@@ -6,7 +6,13 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .base import AgentName, AgentResult
+from .base import (
+    AgentName,
+    AgentResult,
+    public_response_path,
+    read_public_response_file,
+    with_public_response_file_instruction,
+)
 from ..logging import agent_log_path, log
 from ..protocol import CLARIFY_RE, STATE_RE
 from ..runner import Runner
@@ -94,12 +100,15 @@ class GeminiBackend:
         prompt: str,
         session_id: str | None = None,
     ) -> AgentResult:
+        response_path = public_response_path(config, "gemini")
         log_path = agent_log_path(config, "gemini")
-        log(config, f"Starting Gemini in {config.gemini_dir}; log: {log_path}")
+        log(config, f"Starting Gemini in {config.gemini_dir}; log: {log_path}; response: {response_path}")
         args = [
             config.gemini_cmd,
             "--prompt",
-            _with_public_response_marker_instruction(prompt),
+            _with_public_response_marker_instruction(
+                with_public_response_file_instruction(prompt, response_path)
+            ),
             *config.gemini_args,
         ]
         if session_id:
@@ -113,7 +122,7 @@ class GeminiBackend:
         )
         log(config, f"Gemini finished; log: {log_path}")
         text, new_session_id = _parse_gemini_output(result.stdout)
-        return AgentResult(text=text, session_id=new_session_id)
+        return AgentResult(text=read_public_response_file(response_path) or text, session_id=new_session_id)
 
 
 BACKEND = GeminiBackend()

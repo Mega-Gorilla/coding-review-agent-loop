@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -46,6 +47,7 @@ class FakeRunner(Runner):
         diff_returncode=0,
         diff_stderr="",
         issue_urls=None,
+        public_response_outputs=None,
     ):
         super().__init__(dry_run=False)
         self.claude_outputs = list(claude_outputs or [])
@@ -83,6 +85,7 @@ class FakeRunner(Runner):
         self.diff_returncode = diff_returncode
         self.diff_stderr = diff_stderr
         self.issue_urls = list(issue_urls) if issue_urls is not None else None
+        self.public_response_outputs = list(public_response_outputs or [])
 
     def _record_command(self, args, cwd):
         cmd = [str(arg) for arg in args]
@@ -91,6 +94,17 @@ class FakeRunner(Runner):
             raise FileNotFoundError(cwd_path)
         self.commands.append((cmd, cwd_path))
         return cmd, cwd_path
+
+    def _maybe_write_public_response_file(self, cmd):
+        if not self.public_response_outputs:
+            return
+        prompt = "\n".join(cmd)
+        match = re.search(r"Write the final public response.*?\n\n([^\n]+/responses/[^\n]+\.md)", prompt, re.S)
+        if not match:
+            return
+        response_path = Path(match.group(1))
+        response_path.parent.mkdir(parents=True, exist_ok=True)
+        response_path.write_text(self.public_response_outputs.pop(0), encoding="utf-8")
 
     def run_with_log(
         self,
@@ -108,6 +122,7 @@ class FakeRunner(Runner):
 
         if cmd[:1] == ["claude"]:
             output = self.claude_outputs.pop(0)
+            self._maybe_write_public_response_file(cmd)
             log_path.write_text(f"$ {' '.join(cmd)}\n\n{output}", encoding="utf-8")
             return CommandResult(cmd, cwd_path, output, "", 0)
 
@@ -121,6 +136,7 @@ class FakeRunner(Runner):
 
         if cmd[:1] == ["gemini"]:
             output = self.gemini_outputs.pop(0)
+            self._maybe_write_public_response_file(cmd)
             log_path.write_text(f"$ {' '.join(cmd)}\n\n{output}", encoding="utf-8")
             return CommandResult(cmd, cwd_path, output, "", 0)
 
@@ -2228,6 +2244,56 @@ def test_gemini_review_loop_uses_prompt_and_extra_args(tmp_path):
     assert "--output-format" in gemini_call
     assert "--model" in gemini_call
     assert runner.comments == ["LGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"]
+
+
+def test_gemini_review_loop_prefers_public_response_file_over_stdout(tmp_path):
+    runner = FakeRunner(
+        gemini_outputs=[
+            "Warning: True color (24-bit) support not detected.\n"
+            "YOLO mode is enabled. All tool calls will be automatically approved.\n"
+            "I will fetch the PR and inspect the diff.\n"
+            "Error executing tool run_shell_command: confirmation required.\n"
+            "This stdout chatter should not be posted.\n",
+        ],
+        public_response_outputs=[
+            "LGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini",
+        ],
+    )
+    config = make_config(tmp_path, reviewer="gemini")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    gemini_call = next(cmd for cmd, _cwd in runner.commands if cmd[:1] == ["gemini"])
+    assert "PUBLIC RESPONSE FILE:" in gemini_call[2]
+    assert "/coding-review-agent-loop/responses/OWNER-REPO/gemini/" in gemini_call[2]
+    assert runner.comments == ["LGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"]
+
+
+def test_claude_review_loop_prefers_public_response_file_over_stdout(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            json.dumps(
+                {
+                    "result": (
+                        "I will inspect the PR diff.\n"
+                        "Tool output chatter should not be posted.\n"
+                    ),
+                    "session_id": "claude-session-1",
+                }
+            ),
+        ],
+        public_response_outputs=[
+            "LGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+    )
+    config = make_config(tmp_path, reviewer="claude")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    claude_call = next(cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"])
+    assert "PUBLIC RESPONSE FILE:" in claude_call[-1]
+    assert "/coding-review-agent-loop/responses/OWNER-REPO/claude/" in claude_call[-1]
+    assert runner.comments == ["LGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude"]
 
 
 def test_codex_task_loop_rejects_empty_task_text(tmp_path):
