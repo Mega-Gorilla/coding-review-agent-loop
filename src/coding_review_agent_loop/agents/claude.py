@@ -6,7 +6,13 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .base import AgentName, AgentResult
+from .base import (
+    AgentName,
+    AgentResult,
+    public_response_path,
+    read_public_response_file,
+    with_public_response_file_instruction,
+)
 from ..logging import agent_log_path, log
 from ..runner import Runner
 
@@ -46,12 +52,13 @@ class ClaudeBackend:
         prompt: str,
         session_id: str | None = None,
     ) -> AgentResult:
+        response_path = public_response_path(config, "claude")
         args = [config.claude_cmd, "--print", "--output-format", "json", *config.claude_args]
         if session_id:
             args += ["--resume", session_id]
-        args.append(prompt)
+        args.append(with_public_response_file_instruction(prompt, response_path))
         log_path = agent_log_path(config, "claude")
-        log(config, f"Starting Claude in {config.claude_dir}; log: {log_path}")
+        log(config, f"Starting Claude in {config.claude_dir}; log: {log_path}; response: {response_path}")
         result = runner.run_with_log(
             args,
             cwd=config.claude_dir,
@@ -61,7 +68,7 @@ class ClaudeBackend:
         )
         log(config, f"Claude finished; log: {log_path}")
         text, new_session_id = _parse_claude_output(result.stdout)
-        return AgentResult(text=text, session_id=new_session_id)
+        return AgentResult(text=read_public_response_file(response_path) or text, session_id=new_session_id)
 
 
 BACKEND = ClaudeBackend()
