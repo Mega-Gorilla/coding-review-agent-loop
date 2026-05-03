@@ -53,6 +53,8 @@ flowchart LR
     Runner --> Logs
 
     AgentCLIs --> AgentDirs
+    AgentCLIs --> ResponseFiles[(Public response files<br/>/tmp/coding-review-agent-loop/responses)]
+    ResponseFiles --> Orchestrator
     GhCLI --> GitHub[(GitHub repo<br/>issues / PRs / comments / checks)]
     Followups --> GitHubOps
 ```
@@ -67,6 +69,7 @@ sequenceDiagram
     participant Memory as Agent memory
     participant Coder as Coder agent CLI
     participant Reviewer as Reviewer agent CLI(s)
+    participant Resp as Public response files
     participant GH as GitHub via gh
 
     User->>CLI: agent-loop issue | task | pr
@@ -75,7 +78,8 @@ sequenceDiagram
     Orch->>Memory: prepare advisory repo memory
     alt issue or task
         Orch->>Coder: create or update PR
-        Coder-->>Orch: output with AGENT_PR marker
+        Coder-->>Resp: write public response if supported
+        Coder-->>Orch: response file or parsed stdout with AGENT_PR marker
         Orch->>GH: validate PR and post coder output
     else existing PR
         Orch->>GH: validate open PR
@@ -83,14 +87,17 @@ sequenceDiagram
 
     loop until all reviewers approve or max rounds reached
         Orch->>Reviewer: review PR
-        Reviewer-->>Orch: AGENT_STATE approved or blocking
+        Reviewer-->>Resp: write public response if supported
+        Reviewer-->>Orch: response file or parsed stdout with AGENT_STATE
         Orch->>GH: post review comment
         alt any blocking review
             Orch->>Coder: address combined feedback
+            Coder-->>Resp: write public response if supported
             Coder-->>Orch: AGENT_STATE blocking
             Orch->>GH: post coder update
         else approved review has same-PR follow-ups in a fix-and mode
             Orch->>Coder: address same-PR follow-ups
+            Coder-->>Resp: write public response if supported
             Coder-->>Orch: AGENT_STATE blocking
             Orch->>GH: post coder update
         else all approved
@@ -414,4 +421,9 @@ agents run:
 [agent-loop 12:00:31] Claude still running (30s); log: /path/to/.agent-loop-logs/20260425-120001-claude.log
 ```
 
-Use `tail -f` on the displayed path to see live output. The log directory gets its own `.gitignore` on first use.
+Use `tail -f` on the displayed path to see live output. Logs are diagnostic
+output and may include CLI status text or tool narration. For Claude and
+Gemini, prompts also include a public response-file path under
+`/tmp/coding-review-agent-loop/responses/`; when that file exists and is
+non-empty, the loop posts the file contents to GitHub instead of stdout. The log
+directory gets its own `.gitignore` on first use.
