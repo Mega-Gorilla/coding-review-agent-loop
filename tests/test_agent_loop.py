@@ -2269,6 +2269,33 @@ def test_gemini_review_loop_prefers_public_response_file_over_stdout(tmp_path):
     assert runner.comments == ["LGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"]
 
 
+def test_claude_review_loop_prefers_public_response_file_over_stdout(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            json.dumps(
+                {
+                    "result": (
+                        "I will inspect the PR diff.\n"
+                        "Tool output chatter should not be posted.\n"
+                    ),
+                    "session_id": "claude-session-1",
+                }
+            ),
+        ],
+        public_response_outputs=[
+            "LGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+    )
+    config = make_config(tmp_path, reviewer="claude")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    claude_call = next(cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"])
+    assert "PUBLIC RESPONSE FILE:" in claude_call[-1]
+    assert "/coding-review-agent-loop/responses/OWNER-REPO/claude/" in claude_call[-1]
+    assert runner.comments == ["LGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude"]
+
+
 def test_codex_task_loop_rejects_empty_task_text(tmp_path):
     runner = FakeRunner()
     config = make_config(tmp_path, coder="codex", reviewer="claude")
