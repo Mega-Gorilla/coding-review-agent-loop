@@ -26,6 +26,8 @@ from coding_review_agent_loop.config import (
     default_agent_workdir,
     default_cache_root,
 )
+from coding_review_agent_loop.github import IssueComment, IssueContext
+from coding_review_agent_loop.prompts import format_issue_context
 from coding_review_agent_loop.protocol import parse_approved_followups, parse_non_blocking_followups
 
 
@@ -653,6 +655,37 @@ def test_issue_loop_includes_issue_comments_in_coder_and_review_prompts(tmp_path
         assert "Later comment should come second." in prompt
 
 
+def test_format_issue_context_truncates_oversized_newest_comment():
+    issue_context = IssueContext(
+        number=56,
+        repo="OWNER/REPO",
+        title="Support issue comments",
+        body="Original request.",
+        url="https://github.com/OWNER/REPO/issues/56",
+        comments=(
+            IssueComment(
+                author="first-user",
+                created_at="2026-05-17T09:00:00Z",
+                body="Older detail should not be kept instead of the newest comment.",
+            ),
+            IssueComment(
+                author="second-user",
+                created_at="2026-05-17T10:00:00Z",
+                body="Newest detail. " + ("x" * 1000),
+            ),
+        ),
+    )
+
+    text = format_issue_context(issue_context, max_chars=700)
+
+    assert len(text) <= 700
+    assert "Older comments omitted: 1 comment(s)" in text
+    assert "Comment by second-user at 2026-05-17T10:00:00Z" in text
+    assert "Newest detail." in text
+    assert "[Newest comment truncated to keep this prompt bounded.]" in text
+    assert "Older detail should not be kept instead of the newest comment." not in text
+
+
 def test_issue_loop_can_use_codex_as_coder_and_claude_as_reviewer(tmp_path):
     runner = FakeRunner(
         codex_outputs=[
@@ -742,6 +775,41 @@ def test_review_prompt_includes_pr_metadata_and_suggested_commands(tmp_path):
     assert "### Future follow-ups" not in prompt
     assert "legacy heading `### Non-blocking follow-ups`" not in prompt
     assert "Use blocking only for issues that should prevent merge." in prompt
+
+
+def test_blocking_followup_prompt_reinjects_issue_context(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Needs a fix.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        claude_outputs=["Fixed review.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
+    )
+    config = make_config(tmp_path)
+    issue_context = IssueContext(
+        number=56,
+        repo="OWNER/REPO",
+        title="Support issue comments",
+        body="Original request.",
+        url="https://github.com/OWNER/REPO/issues/56",
+        comments=(
+            IssueComment(
+                author="commenter",
+                created_at="2026-05-17T10:00:00Z",
+                body="Clarifying issue comment.",
+            ),
+        ),
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config, issue_context=issue_context) == 0
+
+    followup_prompt = next(
+        cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"] and "Address the review below" in cmd[-1]
+    )
+    assert "Issue context from GitHub" in followup_prompt
+    assert "Title:\nSupport issue comments" in followup_prompt
+    assert "Clarifying issue comment." in followup_prompt
+    assert "Needs a fix." in followup_prompt
 
 
 def test_review_prompt_requests_future_followups_when_processed(tmp_path):
@@ -1161,8 +1229,22 @@ def test_pr_loop_fix_and_summarize_sends_same_pr_followups_to_coder_then_rerevie
         claude_outputs=["Renamed helper.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
     )
     config = make_config(tmp_path, approved_followups="fix-and-summarize")
+    issue_context = IssueContext(
+        number=56,
+        repo="OWNER/REPO",
+        title="Support issue comments",
+        body="Original request.",
+        url="https://github.com/OWNER/REPO/issues/56",
+        comments=(
+            IssueComment(
+                author="commenter",
+                created_at="2026-05-17T10:00:00Z",
+                body="Clarifying issue comment.",
+            ),
+        ),
+    )
 
-    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+    assert run_pr_loop(runner, pr_number=77, config=config, issue_context=issue_context) == 0
 
     agent_commands = [cmd[:2] for cmd, _cwd in runner.commands if cmd[:1] in (["claude"], ["codex"])]
     assert agent_commands == [["codex", "exec"], ["claude", "--print"], ["codex", "exec"]]
@@ -1171,6 +1253,9 @@ def test_pr_loop_fix_and_summarize_sends_same_pr_followups_to_coder_then_rerevie
         cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"] and "Same-PR follow-ups" in cmd[-1]
     )
     assert "Rename the helper before merge." in followup_prompt
+    assert "Issue context from GitHub" in followup_prompt
+    assert "Title:\nSupport issue comments" in followup_prompt
+    assert "Clarifying issue comment." in followup_prompt
     assert "small, localized cleanup for the\ncurrent PR" in followup_prompt
     assert "Keep the change narrowly scoped to the listed items" in followup_prompt
     assert "Do not take on\nlarger redesigns or unrelated future work" in followup_prompt

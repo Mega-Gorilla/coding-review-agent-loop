@@ -92,7 +92,24 @@ def format_issue_context(issue_context: IssueContext, *, max_chars: int = 24_000
                 kept_comments = candidate_comments
                 omitted_count = len(comments) - len(candidate_comments)
             elif not kept_comments:
+                omitted_count = len(comments) - 1
+                notice = (
+                    "\n\n"
+                    f"Older comments omitted: {omitted_count} comment(s) were omitted to keep "
+                    "this prompt bounded. Newest comments were kept preferentially."
+                )
+                prefix = issue_header + notice
+                remaining_chars = max_chars - len(prefix)
+                if remaining_chars > 0:
+                    truncated_comment = _truncate_issue_text(
+                        comment_text,
+                        max_chars=remaining_chars,
+                        label="Newest comment",
+                    )
+                    if len(prefix) + len(truncated_comment) <= max_chars:
+                        return prefix + truncated_comment
                 omitted_count = len(comments)
+                break
             else:
                 break
         if kept_comments:
@@ -343,6 +360,7 @@ def build_followup_prompt(
     review: str,
     config: AgentLoopConfig,
     memory: AgentMemoryContext | None = None,
+    issue_context: IssueContext | None = None,
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
@@ -352,6 +370,7 @@ Address the review below in this local checkout. Pull/sync the PR branch if
 needed, implement fixes, run relevant tests, commit, and push to the same PR.
 Do not create a new PR.
 {_scratch_file_guidance()}
+{_issue_context_block(issue_context)}
 {_memory_block(memory)}
 
 {reviewer_name} review:
@@ -375,6 +394,7 @@ def build_same_pr_followup_prompt(
     review: str,
     config: AgentLoopConfig,
     memory: AgentMemoryContext | None = None,
+    issue_context: IssueContext | None = None,
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
@@ -387,6 +407,7 @@ These same-PR follow-ups are intended to be small, localized cleanup for the
 current PR. Keep the change narrowly scoped to the listed items. Do not take on
 larger redesigns or unrelated future work; call that out instead.
 {_scratch_file_guidance()}
+{_issue_context_block(issue_context)}
 {_memory_block(memory)}
 
 Same-PR follow-ups:

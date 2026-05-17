@@ -465,6 +465,7 @@ def run_pr_loop(
                 combined_review,
                 config,
                 memory,
+                issue_context=issue_context,
             )
         else:
             # Future follow-ups are only retained for fully approved same-PR fix
@@ -487,6 +488,7 @@ def run_pr_loop(
                 combined_review,
                 config,
                 memory,
+                issue_context=issue_context,
             )
         log(config, f"Round {round_number}: {coder_name} addressing reviewer feedback")
         coder_output, coder_session_id = run_agent(
