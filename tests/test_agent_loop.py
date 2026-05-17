@@ -16,6 +16,7 @@ from coding_review_agent_loop.cli import (
     ensure_log_dir_ignored,
     is_clarification_request,
     parse_agent_state,
+    parse_plan_state,
     parse_pr_number,
     run_issue_loop,
     run_pr_loop,
@@ -446,6 +447,13 @@ def test_parse_agent_state_requires_marker():
         parse_agent_state("LGTM")
 
 
+def test_parse_plan_state_accepts_separate_planning_marker():
+    assert parse_plan_state("plan looks viable\n<!-- AGENT_PLAN_STATE: approved -->") == "approved"
+    assert parse_plan_state("needs detail\n<!-- agent_plan_state: BLOCKING -->") == "blocking"
+    with pytest.raises(AgentLoopError):
+        parse_plan_state("<!-- AGENT_STATE: approved -->")
+
+
 def test_parse_non_blocking_followups_extracts_bullets_only_from_section():
     review = """
     Looks good.
@@ -614,6 +622,94 @@ def test_issue_loop_can_use_codex_as_coder_and_claude_as_reviewer(tmp_path):
     ]
     assert len(runner.comments) == 4
     assert runner.comments[-1].startswith("LGTM.")
+
+
+def test_issue_loop_plan_first_gets_plan_approval_before_implementation(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Plan: update CLI, protocol, and orchestration tests.\n"
+            "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Implemented approved plan.\n<!-- AGENT_PR: 77 -->\n"
+            "<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, plan_first=True)
+
+    assert run_issue_loop(runner, issue_number=56, config=config) == 0
+
+    agent_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] in (["claude"], ["codex"])]
+    assert [cmd[:2] for cmd in agent_commands] == [
+        ["claude", "--print"],
+        ["codex", "exec"],
+        ["claude", "--print"],
+        ["codex", "exec"],
+    ]
+    planning_prompt = agent_commands[0][-1]
+    assert "Do not edit files, create a branch" in planning_prompt
+    assert "<!-- AGENT_PLAN_STATE: blocking -->" in planning_prompt
+
+    plan_review_prompt = agent_commands[1][-1]
+    assert "Review the implementation plan for GitHub issue #56" in plan_review_prompt
+    assert "Plan: update CLI, protocol, and orchestration tests." in plan_review_prompt
+    assert "<!-- AGENT_PLAN_STATE: approved -->" in plan_review_prompt
+
+    implementation_prompt = agent_commands[2][-1]
+    assert "Approved implementation plan:" in implementation_prompt
+    assert "Plan: update CLI, protocol, and orchestration tests." in implementation_prompt
+    assert "<!-- AGENT_PR: <number> -->" in implementation_prompt
+
+    assert len(runner.comments) == 2
+    assert runner.comments[0].startswith("Implemented approved plan.")
+    assert runner.comments[1].startswith("LGTM.")
+
+
+def test_issue_loop_plan_first_revises_plan_until_all_reviewers_approve(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Plan v1.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Plan v2 adds tests.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Implemented revised plan.\n<!-- AGENT_PR: 77 -->\n"
+            "<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Missing regression test plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
+            "Plan approved.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, plan_first=True)
+
+    assert run_issue_loop(runner, issue_number=56, config=config) == 0
+
+    claude_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert "Previous plan:\n\nPlan v1." in claude_prompts[1]
+    assert "Missing regression test plan." in claude_prompts[1]
+    assert "Approved implementation plan:" in claude_prompts[2]
+    assert "Plan v2 adds tests." in claude_prompts[2]
+
+
+def test_issue_loop_plan_first_fails_after_max_planning_rounds(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Plan v1.\n<!-- AGENT_PLAN_STATE: blocking -->",
+        ],
+        codex_outputs=[
+            "Still ambiguous.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, plan_first=True, max_rounds=1)
+
+    with pytest.raises(AgentLoopError, match="blocking plan issues"):
+        run_issue_loop(runner, issue_number=56, config=config)
+
+    assert runner.comments == []
+    claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert len(claude_calls) == 1
+    assert "Plan the implementation" in claude_calls[0][-1]
 
 
 def test_ensure_log_dir_ignored_does_not_overwrite_existing_file(tmp_path):
@@ -1421,6 +1517,27 @@ def test_approved_followups_cli_mode_is_configurable(tmp_path, mode):
     config = config_from_args(args, FakeRunner())
 
     assert config.approved_followups == mode
+
+
+def test_issue_plan_first_cli_flag_is_configurable(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args([
+        "issue",
+        "56",
+        "--repo",
+        "OWNER/REPO",
+        "--plan-first",
+        "--claude-dir",
+        str(tmp_path / "claude"),
+        "--codex-dir",
+        str(tmp_path / "codex"),
+        "--gemini-dir",
+        str(tmp_path / "gemini"),
+    ])
+
+    config = config_from_args(args, FakeRunner())
+
+    assert config.plan_first is True
 
 
 def test_explicit_agent_dirs_are_preserved_when_others_default(tmp_path):

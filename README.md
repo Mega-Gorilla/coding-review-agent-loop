@@ -97,6 +97,15 @@ and body as the implementation task:
 agent-loop issue 123 --repo OWNER/REPO
 ```
 
+For larger or ambiguous issues, add `--plan-first` to make the coder write an
+implementation plan first. Reviewers approve or block that plan before the coder
+edits files or opens a PR; after plan approval, the normal implementation and PR
+review loop runs.
+
+```bash
+agent-loop issue 123 --repo OWNER/REPO --plan-first
+```
+
 Provide a one-off task directly when there is no issue yet:
 
 ```bash

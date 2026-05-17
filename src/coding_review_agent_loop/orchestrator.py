@@ -25,13 +25,16 @@ from .memory import prepare_agent_memory
 from .prompts import (
     build_followup_prompt,
     build_issue_prompt,
+    build_issue_plan_prompt,
+    build_plan_followup_prompt,
+    build_plan_review_prompt,
     build_review_prompt,
     build_same_pr_followup_prompt,
     build_task_clarification_prompt,
     build_task_prompt,
     format_agent_list,
 )
-from .protocol import is_clarification_request, parse_agent_state, parse_pr_number
+from .protocol import is_clarification_request, parse_agent_state, parse_plan_state, parse_pr_number
 from .protocol import ApprovedFollowup, parse_approved_followups
 from .runner import Runner
 from .workdirs import active_workdir
@@ -180,6 +183,99 @@ def _create_approved_followup_issues(
     return issue_urls, skipped_count
 
 
+def _run_issue_plan_loop(
+    runner: Runner,
+    *,
+    issue_number: int,
+    config: AgentLoopConfig,
+    memory,
+) -> tuple[str, str | None]:
+    coder_name = agent_display_name(config.coder)
+    configured_reviewers = reviewers(config)
+    reviewer_session_ids: dict[AgentName, str | None] = {}
+
+    log(config, f"Planning issue #{issue_number}: invoking {coder_name}")
+    plan, coder_session_id = run_agent(
+        runner,
+        agent=config.coder,
+        config=config,
+        prompt=build_issue_plan_prompt(issue_number, config, memory),
+    )
+    if not plan.strip():
+        raise AgentLoopError(f"{coder_name} produced an empty implementation plan.")
+    if parse_plan_state(plan) != "blocking":
+        raise AgentLoopError(
+            f"{coder_name} planning output must use <!-- AGENT_PLAN_STATE: blocking -->."
+        )
+
+    for round_number in range(1, config.max_rounds + 1):
+        blocking_reviews: list[tuple[str, str]] = []
+        for reviewer in configured_reviewers:
+            reviewer_name = agent_display_name(reviewer)
+            log(config, f"Planning round {round_number}: {reviewer_name} reviewing issue #{issue_number} plan")
+            review_output, new_session_id = run_agent(
+                runner,
+                agent=reviewer,
+                config=config,
+                prompt=build_plan_review_prompt(
+                    issue_number,
+                    round_number,
+                    plan,
+                    config,
+                    reviewer=reviewer,
+                    memory=memory,
+                ),
+                session_id=reviewer_session_ids.get(reviewer),
+            )
+            reviewer_session_ids[reviewer] = new_session_id
+            if not review_output.strip():
+                raise AgentLoopError(f"{reviewer_name} produced an empty planning review.")
+            review_state = parse_plan_state(review_output)
+            log(config, f"Planning round {round_number}: {reviewer_name} state is {review_state}")
+            if review_state == "blocking":
+                blocking_reviews.append((reviewer_name, review_output))
+
+        if not blocking_reviews:
+            log(config, f"Issue #{issue_number} implementation plan approved")
+            return plan, coder_session_id
+
+        if round_number == config.max_rounds:
+            raise AgentLoopError(
+                f"One or more reviewers still reported blocking plan issues after "
+                f"planning round {round_number}; human review required."
+            )
+
+        combined_review = "\n\n".join(
+            f"{name} planning review:\n\n{review}" for name, review in blocking_reviews
+        )
+        log(config, f"Planning round {round_number}: {coder_name} revising the issue plan")
+        plan, coder_session_id = run_agent(
+            runner,
+            agent=config.coder,
+            config=config,
+            prompt=build_plan_followup_prompt(
+                issue_number,
+                round_number,
+                plan,
+                combined_review,
+                config,
+                memory,
+            ),
+            session_id=coder_session_id,
+        )
+        if not plan.strip():
+            raise AgentLoopError(f"{coder_name} produced an empty revised implementation plan.")
+        if parse_plan_state(plan) != "blocking":
+            raise AgentLoopError(
+                f"{coder_name} revised planning output must use <!-- AGENT_PLAN_STATE: blocking -->."
+            )
+
+    raise AgentLoopError(
+        f"Reached max planning rounds ({config.max_rounds}) for issue #{issue_number}; "
+        "human review required."
+    )
+
+
 def _format_created_followup_issue_summary(
     pr_number: int,
     issue_urls: list[str],
@@ -226,12 +322,22 @@ def run_issue_loop(runner: Runner, *, issue_number: int, config: AgentLoopConfig
     log(config, f"Validating issue #{issue_number}")
     validate_open_issue(runner, config=config, issue_number=issue_number)
     memory = prepare_agent_memory(runner, config)
+    approved_plan: str | None = None
+    coder_session_id: str | None = None
+    if config.plan_first:
+        approved_plan, coder_session_id = _run_issue_plan_loop(
+            runner,
+            issue_number=issue_number,
+            config=config,
+            memory=memory,
+        )
 
     coder_output, coder_session_id = run_agent(
         runner,
         agent=config.coder,
         config=config,
-        prompt=build_issue_prompt(issue_number, config, memory),
+        prompt=build_issue_prompt(issue_number, config, memory, approved_plan),
+        session_id=coder_session_id,
     )
     pr_number = parse_pr_number(coder_output)
     if pr_number is None:

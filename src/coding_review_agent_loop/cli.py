@@ -50,7 +50,7 @@ from .prompts import (
     build_task_prompt,
     format_agent_list,
 )
-from .protocol import is_clarification_request, parse_agent_state, parse_pr_number
+from .protocol import is_clarification_request, parse_agent_state, parse_plan_state, parse_pr_number
 from .runner import CommandResult, Runner, ensure_log_dir_ignored, tail_text
 
 
@@ -226,6 +226,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     issue = subparsers.add_parser("issue", help="Ask the coder to fix an issue, then review it.")
     issue.add_argument("issue_number", type=int)
+    issue.add_argument(
+        "--plan-first",
+        action="store_true",
+        help=(
+            "Run an opt-in implementation planning/review loop before the coder "
+            "edits code or opens a PR."
+        ),
+    )
     add_common(issue)
 
     pr = subparsers.add_parser("pr", help="Run the reviewer/coder loop on an existing PR.")

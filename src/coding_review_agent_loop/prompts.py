@@ -40,15 +40,27 @@ def build_issue_prompt(
     issue_number: int,
     config: AgentLoopConfig,
     memory: AgentMemoryContext | None = None,
+    approved_plan: str | None = None,
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
+    plan_block = ""
+    if approved_plan:
+        plan_block = f"""
+Approved implementation plan:
+{approved_plan}
+
+Implement this approved plan. If you discover that the plan is materially wrong
+or incomplete, document the discrepancy in the PR description and keep the
+implementation as close to the approved plan as safely possible.
+"""
     return f"""Fix GitHub issue #{issue_number} in {config.repo}.
 
 Use this local checkout as your workspace. Create a branch, implement the fix,
 run relevant tests, commit, push, and open a pull request against {config.base}.
 {_scratch_file_guidance()}
 {_memory_block(memory)}
+{plan_block}
 
 Do not wait for {reviewer_name} yourself; this local orchestrator will run {reviewer_name} after
 you create the PR. In your final response, include the PR number using exactly
@@ -61,6 +73,116 @@ Also include exactly one state marker:
 <!-- AGENT_STATE: blocking -->
 
 Use blocking here to hand the PR to {reviewer_name} for review. Sign the response as:
+-- {coder_signature}
+"""
+
+
+def build_issue_plan_prompt(
+    issue_number: int,
+    config: AgentLoopConfig,
+    memory: AgentMemoryContext | None = None,
+) -> str:
+    reviewer_name = format_agent_list(reviewers(config))
+    coder_signature = agent_signature(config.coder)
+    return f"""Plan the implementation for GitHub issue #{issue_number} in {config.repo}.
+
+Use this local checkout only for inspection. Do not edit files, create a branch,
+commit, push, or open a pull request during this planning stage.
+{_scratch_file_guidance()}
+{_memory_block(memory)}
+
+Write a concise implementation plan for {reviewer_name} to review. Cover the
+intended code changes, behavior/API decisions, risks or ambiguities, and test
+strategy. If the issue is materially ambiguous, call out the ambiguity in the
+plan instead of implementing.
+
+End your final response with exactly one marker:
+
+<!-- AGENT_PLAN_STATE: blocking -->
+
+Use blocking here to hand the plan to {reviewer_name} for review. Sign the
+response as:
+-- {coder_signature}
+"""
+
+
+def build_plan_review_prompt(
+    issue_number: int,
+    round_number: int,
+    plan: str,
+    config: AgentLoopConfig,
+    *,
+    reviewer: AgentName,
+    memory: AgentMemoryContext | None = None,
+) -> str:
+    coder_name = agent_display_name(config.coder)
+    reviewer_signature = agent_signature(reviewer)
+    reviewer_group = format_agent_list(reviewers(config))
+    return f"""Review the implementation plan for GitHub issue #{issue_number} in {config.repo} (planning round {round_number}).
+
+Use this local checkout only for inspection. Do not edit files, create a branch,
+commit, push, or open a pull request during this planning review.
+{_scratch_file_guidance()}
+{_memory_block(memory)}
+
+Plan from {coder_name}:
+
+{plan}
+
+Review the plan for correctness, architecture fit, missing edge cases, test
+strategy, and ambiguity. Use blocking only for plan issues that should be
+resolved before implementation starts.
+
+All configured reviewers ({reviewer_group}) must approve in the same planning
+round before {coder_name} starts implementation.
+
+End your final response with exactly one marker:
+
+<!-- AGENT_PLAN_STATE: approved -->
+
+or:
+
+<!-- AGENT_PLAN_STATE: blocking -->
+
+Always sign your response:
+-- {reviewer_signature}
+"""
+
+
+def build_plan_followup_prompt(
+    issue_number: int,
+    round_number: int,
+    plan: str,
+    review: str,
+    config: AgentLoopConfig,
+    memory: AgentMemoryContext | None = None,
+) -> str:
+    reviewer_name = format_agent_list(reviewers(config))
+    coder_signature = agent_signature(config.coder)
+    return f"""{reviewer_name} reviewed your implementation plan for GitHub issue #{issue_number} in {config.repo} and found blocking issues.
+
+Use this local checkout only for inspection. Do not edit files, create a branch,
+commit, push, or open a pull request during this planning stage.
+{_scratch_file_guidance()}
+{_memory_block(memory)}
+
+Previous plan:
+
+{plan}
+
+{reviewer_name} planning review:
+
+{review}
+
+Revise the plan to address the blocking feedback. This is planning round
+{round_number}; do not implement yet.
+
+End your final response with exactly one marker:
+
+<!-- AGENT_PLAN_STATE: blocking -->
+
+Use blocking to hand the revised plan back to {reviewer_name}. Sign the
+response as:
 -- {coder_signature}
 """
 

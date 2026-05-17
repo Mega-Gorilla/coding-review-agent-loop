@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from .errors import AgentLoopError
 
 STATE_RE = re.compile(r"<!--\s*AGENT_STATE:\s*(approved|blocking)\s*-->", re.I)
+PLAN_STATE_RE = re.compile(r"<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*-->", re.I)
 PR_RE = re.compile(r"<!--\s*AGENT_PR:\s*(\d+)\s*-->", re.I)
 GH_PR_URL_RE = re.compile(r"/pull/(\d+)(?:\b|$)")
 CLARIFY_RE = re.compile(r"<!--\s*AGENT_CLARIFY\s*-->", re.I)
@@ -41,6 +42,15 @@ def parse_agent_state(text: str) -> str:
     if not matches:
         raise AgentLoopError("Agent response did not include <!-- AGENT_STATE: approved|blocking -->")
     # Use the final marker as authoritative; responses may quote earlier review markers.
+    return matches[-1].lower()
+
+
+def parse_plan_state(text: str) -> str:
+    matches = PLAN_STATE_RE.findall(text)
+    if not matches:
+        raise AgentLoopError(
+            "Agent response did not include <!-- AGENT_PLAN_STATE: approved|blocking -->"
+        )
     return matches[-1].lower()
 
 

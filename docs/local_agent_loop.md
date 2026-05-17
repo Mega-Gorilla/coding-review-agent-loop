@@ -136,6 +136,20 @@ Fix a GitHub issue:
 agent-loop issue 56 --repo OWNER/REPO
 ```
 
+For issue work that needs design agreement before implementation, enable the
+optional planning gate:
+
+```bash
+agent-loop issue 56 --repo OWNER/REPO --plan-first
+```
+
+With `--plan-first`, the coder first writes a concise implementation plan and
+must not edit files, push a branch, or open a PR. Reviewers inspect that plan
+for correctness, architecture fit, edge cases, test strategy, and ambiguity. If
+any reviewer blocks, the coder revises the plan; once all reviewers approve in
+the same planning round, the approved plan is passed into the normal
+implementation prompt and the regular PR review loop begins.
+
 Implement a free-form task:
 
 ```bash
