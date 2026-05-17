@@ -37,6 +37,7 @@ class FakeRunner(Runner):
         codex_outputs=None,
         gemini_outputs=None,
         issue_payload=None,
+        issue_comments=None,
         pr_payload=None,
         git_status="",
         git_remote="git@github.com:OWNER/REPO.git",
@@ -58,7 +59,10 @@ class FakeRunner(Runner):
             "state": "open",
             "is_pr": False,
             "url": "https://github.com/OWNER/REPO/issues/56",
+            "title": "Fix issue-mode context",
+            "body": "Original issue body.",
         }
+        self.issue_comments = list(issue_comments or [])
         self.pr_payload = pr_payload or {
             "number": 77,
             "state": "OPEN",
@@ -181,6 +185,16 @@ class FakeRunner(Runner):
             if "--jq" in cmd and ".headRefOid" in cmd:
                 return CommandResult(cmd, cwd_path, "abc123\n", "", 0)
             return CommandResult(cmd, cwd_path, json_dumps(self.pr_payload), "", 0)
+
+        if cmd[:3] == ["gh", "issue", "view"]:
+            payload = {
+                "number": self.issue_payload.get("number", 56),
+                "title": self.issue_payload.get("title"),
+                "body": self.issue_payload.get("body"),
+                "url": self.issue_payload.get("url"),
+                "comments": self.issue_comments,
+            }
+            return CommandResult(cmd, cwd_path, json_dumps(payload), "", 0)
 
         if cmd[:2] == ["gh", "api"] and "/issues/" in cmd[2]:
             return CommandResult(cmd, cwd_path, json_dumps(self.issue_payload), "", 0)
@@ -588,6 +602,55 @@ def test_issue_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
     assert list((tmp_path / "logs").glob("*-claude.log"))
     assert list((tmp_path / "logs").glob("*-codex.log"))
     assert (tmp_path / "logs" / ".gitignore").read_text(encoding="utf-8") == "*\n!.gitignore\n"
+
+
+def test_issue_loop_includes_issue_comments_in_coder_and_review_prompts(tmp_path):
+    runner = FakeRunner(
+        issue_payload={
+            "number": 56,
+            "state": "open",
+            "is_pr": False,
+            "url": "https://github.com/OWNER/REPO/issues/56",
+            "title": "Support issue comments",
+            "body": "Original request.",
+        },
+        issue_comments=[
+            {
+                "author": {"login": "second-user"},
+                "createdAt": "2026-05-17T10:00:00Z",
+                "body": "Later comment should come second.",
+            },
+            {
+                "author": {"login": "first-user"},
+                "createdAt": "2026-05-17T09:00:00Z",
+                "body": "Earlier comment refines the request.",
+            },
+        ],
+        claude_outputs=[
+            "Created PR.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->",
+        ],
+        codex_outputs=[
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path)
+
+    assert run_issue_loop(runner, issue_number=56, config=config) == 0
+
+    claude_prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"])
+    codex_prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"])
+    for prompt in (claude_prompt, codex_prompt):
+        assert "Issue context from GitHub" in prompt
+        assert "Later comments may refine or supersede the original issue body" in prompt
+        assert "GitHub issue #56" in prompt
+        assert "Title:\nSupport issue comments" in prompt
+        assert "Body:\nOriginal request." in prompt
+        assert "Comments, oldest to newest:" in prompt
+        assert prompt.index("Comment by first-user at 2026-05-17T09:00:00Z") < prompt.index(
+            "Comment by second-user at 2026-05-17T10:00:00Z"
+        )
+        assert "Earlier comment refines the request." in prompt
+        assert "Later comment should come second." in prompt
 
 
 def test_issue_loop_can_use_codex_as_coder_and_claude_as_reviewer(tmp_path):

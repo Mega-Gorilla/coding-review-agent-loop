@@ -12,7 +12,9 @@ from .agents.registry import agent_display_name, run_agent
 from .config import AgentLoopConfig, ensure_agent_workdirs, reviewers
 from .errors import AgentLoopError
 from .github import (
+    IssueContext,
     create_issue,
+    get_issue_context,
     get_pr_metadata,
     merge_pr,
     post_pr_comment,
@@ -225,13 +227,14 @@ def run_issue_loop(runner: Runner, *, issue_number: int, config: AgentLoopConfig
     ensure_agent_workdirs(config, runner)
     log(config, f"Validating issue #{issue_number}")
     validate_open_issue(runner, config=config, issue_number=issue_number)
+    issue_context = get_issue_context(runner, config=config, issue_number=issue_number)
     memory = prepare_agent_memory(runner, config)
 
     coder_output, coder_session_id = run_agent(
         runner,
         agent=config.coder,
         config=config,
-        prompt=build_issue_prompt(issue_number, config, memory),
+        prompt=build_issue_prompt(issue_number, config, memory, issue_context=issue_context),
     )
     pr_number = parse_pr_number(coder_output)
     if pr_number is None:
@@ -247,6 +250,7 @@ def run_issue_loop(runner: Runner, *, issue_number: int, config: AgentLoopConfig
         pr_number=pr_number,
         config=config,
         coder_session_id=coder_session_id,
+        issue_context=issue_context,
         workdirs_ready=True,
     )
 
@@ -354,6 +358,7 @@ def run_pr_loop(
     config: AgentLoopConfig,
     coder_session_id: str | None = None,
     reviewer_session_id: str | None = None,
+    issue_context: IssueContext | None = None,
     workdirs_ready: bool = False,
 ) -> int:
     if not workdirs_ready:
@@ -389,6 +394,7 @@ def run_pr_loop(
                     reviewer=reviewer,
                     pr_metadata=pr_metadata,
                     memory=memory,
+                    issue_context=issue_context,
                 ),
                 session_id=reviewer_session_ids.get(reviewer),
             )
