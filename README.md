@@ -90,8 +90,10 @@ python -m pytest
 
 ## Quick Start
 
-Start from a GitHub issue when you want the agent loop to use the issue title
-and body as the implementation task:
+Start from a GitHub issue when you want the agent loop to use the issue title,
+body, and comments as the implementation task. Comments are included oldest to
+newest, and prompts tell agents that later comments may refine or supersede the
+original issue body:
 
 ```bash
 agent-loop issue 123 --repo OWNER/REPO

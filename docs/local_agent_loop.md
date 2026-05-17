@@ -136,6 +136,10 @@ Fix a GitHub issue:
 agent-loop issue 56 --repo OWNER/REPO
 ```
 
+Issue mode includes the issue title, body, and comments in the coder prompt and
+issue-origin review prompts. Comments are ordered oldest to newest so later
+discussion can refine or supersede the original body.
+
 Implement a free-form task:
 
 ```bash

@@ -29,6 +29,23 @@ class PullRequestMetadata:
     url: str | None
 
 
+@dataclass(frozen=True)
+class IssueComment:
+    author: str | None
+    created_at: str | None
+    body: str | None
+
+
+@dataclass(frozen=True)
+class IssueContext:
+    number: int
+    repo: str
+    title: str | None
+    body: str | None
+    url: str | None
+    comments: tuple[IssueComment, ...]
+
+
 def detect_repo(runner: Runner, cwd: Path, gh_cmd: str) -> str:
     result = runner.run(
         [gh_cmd, "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
@@ -122,6 +139,60 @@ def validate_open_issue(runner: Runner, *, config: AgentLoopConfig, issue_number
         raise AgentLoopError(
             f"Issue #{issue_number} is {data.get('state', 'not open')}; provide an open issue number."
         )
+
+
+def _comment_sort_key(comment: IssueComment) -> str:
+    return comment.created_at or ""
+
+
+def get_issue_context(runner: Runner, *, config: AgentLoopConfig, issue_number: int) -> IssueContext:
+    if config.dry_run:
+        return IssueContext(
+            number=issue_number,
+            repo=config.repo,
+            title=None,
+            body=None,
+            url=None,
+            comments=(),
+        )
+
+    result = runner.run(
+        [
+            config.gh_cmd,
+            "issue",
+            "view",
+            str(issue_number),
+            "--repo",
+            config.repo,
+            "--comments",
+            "--json",
+            "number,title,body,url,comments",
+        ],
+        cwd=active_workdir(config),
+    )
+    data = json.loads(result.stdout or "{}")
+    comments: list[IssueComment] = []
+    for raw_comment in data.get("comments") or []:
+        author = raw_comment.get("author")
+        if isinstance(author, dict):
+            author_name = author.get("login")
+        else:
+            author_name = None
+        comments.append(
+            IssueComment(
+                author=author_name,
+                created_at=raw_comment.get("createdAt") or raw_comment.get("created_at"),
+                body=raw_comment.get("body"),
+            )
+        )
+    return IssueContext(
+        number=int(data.get("number") or issue_number),
+        repo=config.repo,
+        title=data.get("title"),
+        body=data.get("body"),
+        url=data.get("url"),
+        comments=tuple(sorted(comments, key=_comment_sort_key)),
+    )
 
 
 def post_pr_comment(

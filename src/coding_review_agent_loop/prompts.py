@@ -7,7 +7,7 @@ from typing import Sequence
 from .agents.base import AgentName
 from .agents.registry import agent_display_name, agent_signature
 from .config import AgentLoopConfig, reviewers
-from .github import PullRequestMetadata
+from .github import IssueContext, PullRequestMetadata
 from .memory import AgentMemoryContext, format_agent_memory_context
 
 
@@ -36,10 +36,114 @@ def _scratch_file_guidance() -> str:
     )
 
 
+def _truncate_issue_text(text: str, *, max_chars: int, label: str) -> str:
+    if len(text) <= max_chars:
+        return text
+    suffix = f"\n\n[{label} truncated to keep this prompt bounded.]"
+    return text[: max(0, max_chars - len(suffix))].rstrip() + suffix
+
+
+def format_issue_context(issue_context: IssueContext, *, max_chars: int = 24_000) -> str:
+    raw_body = issue_context.body if issue_context.body else "(none)"
+    body = _truncate_issue_text(raw_body, max_chars=max_chars // 3, label="Issue body")
+    title = issue_context.title if issue_context.title else "(unknown)"
+    lines = [
+        f"GitHub issue #{issue_context.number}",
+        "",
+        "Title:",
+        title,
+        "",
+        "Body:",
+        body,
+        "",
+        "Comments, oldest to newest:",
+    ]
+    if issue_context.comments:
+        comments = [
+            "\n".join(
+                [
+                    "",
+                    (
+                        f"Comment by {comment.author or '(unknown)'} "
+                        f"at {comment.created_at or '(unknown time)'}:"
+                    ),
+                    comment.body if comment.body else "(none)",
+                ]
+            )
+            for comment in issue_context.comments
+        ]
+        issue_header = "\n".join(lines)
+        full_text = issue_header + "\n".join(comments)
+        if len(full_text) <= max_chars:
+            return full_text
+
+        kept_comments: list[str] = []
+        omitted_count = 0
+        for comment_text in reversed(comments):
+            candidate_comments = [comment_text, *kept_comments]
+            notice = (
+                "\n\n"
+                f"Older comments omitted: {len(comments) - len(candidate_comments)} "
+                "comment(s) were omitted to keep this prompt bounded. "
+                "Newest comments were kept preferentially."
+            )
+            candidate = issue_header + notice + "".join(candidate_comments)
+            if len(candidate) <= max_chars:
+                kept_comments = candidate_comments
+                omitted_count = len(comments) - len(candidate_comments)
+            elif not kept_comments:
+                omitted_count = len(comments) - 1
+                notice = (
+                    "\n\n"
+                    f"Older comments omitted: {omitted_count} comment(s) were omitted to keep "
+                    "this prompt bounded. Newest comments were kept preferentially."
+                )
+                prefix = issue_header + notice
+                remaining_chars = max_chars - len(prefix)
+                if remaining_chars > 0:
+                    truncated_comment = _truncate_issue_text(
+                        comment_text,
+                        max_chars=remaining_chars,
+                        label="Newest comment",
+                    )
+                    if len(prefix) + len(truncated_comment) <= max_chars:
+                        return prefix + truncated_comment
+                omitted_count = len(comments)
+                break
+            else:
+                break
+        if kept_comments:
+            return (
+                issue_header
+                + "\n\n"
+                + f"Older comments omitted: {omitted_count} comment(s) were omitted to keep "
+                "this prompt bounded. Newest comments were kept preferentially."
+                + "".join(kept_comments)
+            )
+        return (
+            issue_header
+            + "\n\n"
+            + f"All {omitted_count} comment(s) were omitted to keep this prompt bounded. "
+            "Fetch the issue discussion directly if those details are needed."
+        )
+    return "\n".join([*lines, "", "(none)"])
+
+
+def _issue_context_block(issue_context: IssueContext | None) -> str:
+    if issue_context is None:
+        return ""
+    return (
+        "Issue context from GitHub. Later comments may refine or supersede the "
+        "original issue body:\n"
+        f"{format_issue_context(issue_context)}\n"
+    )
+
+
 def build_issue_prompt(
     issue_number: int,
     config: AgentLoopConfig,
     memory: AgentMemoryContext | None = None,
+    issue_context: IssueContext | None = None,
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
@@ -48,6 +152,7 @@ def build_issue_prompt(
 Use this local checkout as your workspace. Create a branch, implement the fix,
 run relevant tests, commit, push, and open a pull request against {config.base}.
 {_scratch_file_guidance()}
+{_issue_context_block(issue_context)}
 {_memory_block(memory)}
 
 Do not wait for {reviewer_name} yourself; this local orchestrator will run {reviewer_name} after
@@ -147,6 +252,7 @@ def build_review_prompt(
     reviewer: AgentName,
     pr_metadata: PullRequestMetadata | None = None,
     memory: AgentMemoryContext | None = None,
+    issue_context: IssueContext | None = None,
 ) -> str:
     coder_name = agent_display_name(config.coder)
     reviewer_signature = agent_signature(reviewer)
@@ -216,6 +322,7 @@ PR metadata:
 Use this PR metadata as authoritative. Do not spend time discovering the PR
 branch.
 {_scratch_file_guidance()}
+{_issue_context_block(issue_context)}
 {_memory_block(memory)}
 
 Suggested commands:
@@ -253,6 +360,7 @@ def build_followup_prompt(
     review: str,
     config: AgentLoopConfig,
     memory: AgentMemoryContext | None = None,
+    issue_context: IssueContext | None = None,
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
@@ -262,6 +370,7 @@ Address the review below in this local checkout. Pull/sync the PR branch if
 needed, implement fixes, run relevant tests, commit, and push to the same PR.
 Do not create a new PR.
 {_scratch_file_guidance()}
+{_issue_context_block(issue_context)}
 {_memory_block(memory)}
 
 {reviewer_name} review:
@@ -285,6 +394,7 @@ def build_same_pr_followup_prompt(
     review: str,
     config: AgentLoopConfig,
     memory: AgentMemoryContext | None = None,
+    issue_context: IssueContext | None = None,
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
@@ -297,6 +407,7 @@ These same-PR follow-ups are intended to be small, localized cleanup for the
 current PR. Keep the change narrowly scoped to the listed items. Do not take on
 larger redesigns or unrelated future work; call that out instead.
 {_scratch_file_guidance()}
+{_issue_context_block(issue_context)}
 {_memory_block(memory)}
 
 Same-PR follow-ups:
