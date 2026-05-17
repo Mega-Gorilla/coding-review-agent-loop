@@ -367,7 +367,6 @@ def run_pr_loop(
         # Backward-compatible single-reviewer resume support: older callers
         # pass one reviewer session, so attach it to the first configured reviewer.
         reviewer_session_ids[configured_reviewers[0]] = reviewer_session_id
-    pending_future_followups: list[ApprovedFollowup] = []
 
     for round_number in range(1, config.max_rounds + 1):
         coder_name = agent_display_name(config.coder)
@@ -424,7 +423,7 @@ def run_pr_loop(
                         )
 
         if not blocking_reviews and not same_pr_followups:
-            approved_followups = [*pending_future_followups, *round_future_followups]
+            approved_followups = round_future_followups
             if config.approved_followups in ("summarize", "fix-and-summarize") and approved_followups:
                 body = _format_approved_followup_summary(pr_number, approved_followups)
                 post_pr_comment(runner, config=config, pr_number=pr_number, body=body)
@@ -451,7 +450,6 @@ def run_pr_loop(
             )
 
         if same_pr_followups and not blocking_reviews:
-            pending_future_followups.extend(round_future_followups)
             combined_review = _format_same_pr_followups(same_pr_followups)
             followup_prompt = build_same_pr_followup_prompt(
                 pr_number,

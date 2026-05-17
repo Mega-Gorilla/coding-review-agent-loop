@@ -1084,7 +1084,7 @@ def test_pr_loop_caps_approved_followup_issues(tmp_path):
     assert issue_summary.endswith("-- coding-review-agent-loop")
 
 
-def test_pr_loop_fix_and_summarize_sends_same_pr_followups_to_coder_then_rereviews(tmp_path):
+def test_pr_loop_fix_and_summarize_ignores_future_followups_before_same_pr_rereview(tmp_path):
     runner = FakeRunner(
         codex_outputs=[
             "Codex approves with cleanup.\n\n"
@@ -1103,7 +1103,7 @@ def test_pr_loop_fix_and_summarize_sends_same_pr_followups_to_coder_then_rerevie
 
     agent_commands = [cmd[:2] for cmd, _cwd in runner.commands if cmd[:1] in (["claude"], ["codex"])]
     assert agent_commands == [["codex", "exec"], ["claude", "--print"], ["codex", "exec"]]
-    assert len(runner.comments) == 4
+    assert len(runner.comments) == 3
     followup_prompt = next(
         cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"] and "Same-PR follow-ups" in cmd[-1]
     )
@@ -1111,12 +1111,10 @@ def test_pr_loop_fix_and_summarize_sends_same_pr_followups_to_coder_then_rerevie
     assert "small, localized cleanup for the\ncurrent PR" in followup_prompt
     assert "Keep the change narrowly scoped to the listed items" in followup_prompt
     assert "Do not take on\nlarger redesigns or unrelated future work" in followup_prompt
-    summary = runner.comments[-1]
-    assert summary.startswith("Approved-review future follow-ups for PR #77:")
-    assert "- Add broader integration coverage later. (Codex)" in summary
+    assert runner.comments[-1] == "Codex approves final pass.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
 
 
-def test_pr_loop_fix_and_issue_retains_future_followups_across_same_pr_round(tmp_path):
+def test_pr_loop_fix_and_issue_ignores_stale_future_followups_after_same_pr_rereview(tmp_path):
     runner = FakeRunner(
         codex_outputs=[
             "Codex approves with cleanup.\n\n"
@@ -1133,14 +1131,13 @@ def test_pr_loop_fix_and_issue_retains_future_followups_across_same_pr_round(tmp
 
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
-    assert len(runner.issues) == 1
-    assert runner.issues[0]["title"] == "Follow up future review note: Add a separate migration dry-run command."
-    assert "- https://github.com/OWNER/REPO/issues/99" in runner.comments[-1]
+    assert runner.issues == []
+    assert runner.comments[-1] == "Codex approves final pass.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
     commands = [cmd[:3] for cmd, _cwd in runner.commands]
-    assert commands.count(["gh", "issue", "create"]) == 1
+    assert commands.count(["gh", "issue", "create"]) == 0
 
 
-def test_pr_loop_fix_and_summarize_retains_future_followups_from_multiple_reviewers(tmp_path):
+def test_pr_loop_fix_and_summarize_only_uses_final_round_future_followups(tmp_path):
     runner = FakeRunner(
         codex_outputs=[
             "Codex approves with cleanup.\n\n"
@@ -1149,14 +1146,20 @@ def test_pr_loop_fix_and_summarize_retains_future_followups_from_multiple_review
             "### Future follow-ups\n"
             "- Add Codex's larger follow-up later.\n"
             "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
-            "Codex approves final pass.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "Codex approves final pass.\n\n"
+            "### Future follow-ups\n"
+            "- Add Codex's final follow-up later.\n"
+            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
         claude_outputs=[
             "Claude approves.\n\n"
             "### Future follow-ups\n"
             "- Add Claude's larger follow-up later.\n"
             "<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
-            "Claude approves final pass.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+            "Claude approves final pass.\n\n"
+            "### Future follow-ups\n"
+            "- Add Claude's final follow-up later.\n"
+            "<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
         ],
         gemini_outputs=["Added assertion.\n<!-- AGENT_STATE: blocking -->\n-- Google Gemini"],
     )
@@ -1178,8 +1181,10 @@ def test_pr_loop_fix_and_summarize_retains_future_followups_from_multiple_review
         ["claude", "--print"],
     ]
     summary = runner.comments[-1]
-    assert "- Add Codex's larger follow-up later. (Codex)" in summary
-    assert "- Add Claude's larger follow-up later. (Claude)" in summary
+    assert "- Add Codex's final follow-up later. (Codex)" in summary
+    assert "- Add Claude's final follow-up later. (Claude)" in summary
+    assert "Add Codex's larger follow-up later." not in summary
+    assert "Add Claude's larger follow-up later." not in summary
 
 
 def test_pr_loop_reruns_all_reviewers_when_any_reviewer_blocks(tmp_path):
