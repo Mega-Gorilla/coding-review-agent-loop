@@ -557,6 +557,77 @@ def test_parse_approved_followups_accepts_trailing_colons_on_headings():
 
 
 @pytest.mark.parametrize(
+    ("same_pr_heading", "future_heading", "legacy_heading"),
+    [
+        (
+            "### **Same-PR follow-ups**",
+            "### **Future follow-ups**",
+            "### **Non-blocking follow-ups**",
+        ),
+        (
+            "### **Same-PR follow-ups**:",
+            "### **Future follow-ups.**",
+            "### **Non-blocking follow-ups:**",
+        ),
+        (
+            "### Same-PR follow-ups.",
+            "### Future follow-ups.",
+            "### Non-blocking follow-ups.",
+        ),
+    ],
+)
+def test_parse_approved_followups_accepts_common_markdown_heading_variants(
+    same_pr_heading, future_heading, legacy_heading
+):
+    review = f"""
+    LGTM with follow-ups.
+
+    {same_pr_heading}
+    - Rename the helper for clarity.
+
+    {future_heading}
+    - Add an integration fixture later.
+
+    {legacy_heading}
+    - Legacy future item.
+
+    <!-- AGENT_STATE: approved -->
+    -- Google Gemini
+    """
+
+    followups = parse_approved_followups(review, reviewer="Gemini")
+
+    assert [(item.reviewer, item.text) for item in followups.same_pr] == [
+        ("Gemini", "Rename the helper for clarity.")
+    ]
+    assert [(item.reviewer, item.text) for item in followups.future] == [
+        ("Gemini", "Add an integration fixture later."),
+        ("Gemini", "Legacy future item."),
+    ]
+
+
+def test_parse_approved_followups_stops_at_unrelated_bold_heading():
+    review = """
+    LGTM with follow-ups.
+
+    ### Future follow-ups
+    - Add an integration fixture later.
+
+    ### **Notes**
+    - This is not a follow-up.
+
+    <!-- AGENT_STATE: approved -->
+    -- Google Gemini
+    """
+
+    followups = parse_approved_followups(review, reviewer="Gemini")
+
+    assert [(item.reviewer, item.text) for item in followups.future] == [
+        ("Gemini", "Add an integration fixture later."),
+    ]
+
+
+@pytest.mark.parametrize(
     "placeholder",
     [
         "None",
