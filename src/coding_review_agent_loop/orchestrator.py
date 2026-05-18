@@ -17,6 +17,7 @@ from .github import (
     get_issue_context,
     get_pr_metadata,
     merge_pr,
+    post_issue_comment,
     post_pr_comment,
     validate_open_issue,
     validate_open_pr,
@@ -26,14 +27,18 @@ from .logging import log
 from .memory import prepare_agent_memory
 from .prompts import (
     build_followup_prompt,
+    build_issue_implementation_prompt,
+    build_issue_plan_prompt,
     build_issue_prompt,
+    build_plan_review_prompt,
+    build_plan_revision_prompt,
     build_review_prompt,
     build_same_pr_followup_prompt,
     build_task_clarification_prompt,
     build_task_prompt,
     format_agent_list,
 )
-from .protocol import is_clarification_request, parse_agent_state, parse_pr_number
+from .protocol import is_clarification_request, parse_agent_state, parse_plan_state, parse_pr_number
 from .protocol import ApprovedFollowup, parse_approved_followups
 from .runner import Runner
 from .workdirs import active_workdir
@@ -223,12 +228,185 @@ def _format_same_pr_followups(followups: Sequence[ApprovedFollowup]) -> str:
     return "\n".join(lines).strip()
 
 
-def run_issue_loop(runner: Runner, *, issue_number: int, config: AgentLoopConfig) -> int:
+def _format_plan_approval_summary(issue_number: int, approved_plan: str) -> str:
+    return "\n".join(
+        [
+            f"Planning complete for issue #{issue_number}.",
+            "",
+            "Outcome: implement",
+            "",
+            "Approved plan:",
+            "",
+            approved_plan,
+            "",
+            "-- coding-review-agent-loop",
+        ]
+    )
+
+
+def _run_plan_first_loop(
+    runner: Runner,
+    *,
+    issue_number: int,
+    config: AgentLoopConfig,
+    memory,
+    issue_context: IssueContext,
+    implement_after_approval: bool,
+) -> int:
+    coder_name = agent_display_name(config.coder)
+    configured_reviewers = reviewers(config)
+    coder_session_id: str | None = None
+    reviewer_session_ids: dict[AgentName, str | None] = {}
+
+    log(config, f"Planning issue #{issue_number}: invoking {coder_name}")
+    plan_output, coder_session_id = run_agent(
+        runner,
+        agent=config.coder,
+        config=config,
+        prompt=build_issue_plan_prompt(issue_number, config, memory, issue_context=issue_context),
+    )
+    if not plan_output.strip():
+        raise AgentLoopError(f"{coder_name} produced an empty response.")
+    if is_clarification_request(plan_output):
+        raise AgentLoopError(
+            f"{coder_name} requested clarification during planning; human intervention required.\n\n"
+            f"{coder_name}'s questions:\n{plan_output}"
+        )
+    parse_plan_state(plan_output)
+    post_issue_comment(runner, config=config, issue_number=issue_number, body=plan_output)
+    current_plan = plan_output
+
+    for round_number in range(1, config.max_rounds + 1):
+        blocking_reviews: list[tuple[str, str]] = []
+        for reviewer in configured_reviewers:
+            reviewer_name = agent_display_name(reviewer)
+            log(config, f"Planning round {round_number}: {reviewer_name} reviewing issue #{issue_number}")
+            review_output, new_session_id = run_agent(
+                runner,
+                agent=reviewer,
+                config=config,
+                prompt=build_plan_review_prompt(
+                    issue_number,
+                    round_number,
+                    current_plan,
+                    config,
+                    reviewer=reviewer,
+                    memory=memory,
+                    issue_context=issue_context,
+                ),
+                session_id=reviewer_session_ids.get(reviewer),
+            )
+            reviewer_session_ids[reviewer] = new_session_id
+            if not review_output.strip():
+                raise AgentLoopError(f"{reviewer_name} produced an empty response.")
+            post_issue_comment(runner, config=config, issue_number=issue_number, body=review_output)
+            review_state = parse_plan_state(review_output)
+            log(config, f"Planning round {round_number}: {reviewer_name} state is {review_state}")
+            if review_state == "blocking":
+                blocking_reviews.append((reviewer_name, review_output))
+
+        if not blocking_reviews:
+            post_issue_comment(
+                runner,
+                config=config,
+                issue_number=issue_number,
+                body=_format_plan_approval_summary(issue_number, current_plan),
+            )
+            if not implement_after_approval:
+                print(
+                    f"Issue #{issue_number} plan approved by {format_agent_list(configured_reviewers)}."
+                )
+                return 0
+
+            log(config, f"Planning approved; invoking {coder_name} to implement issue #{issue_number}")
+            coder_output, coder_session_id = run_agent(
+                runner,
+                agent=config.coder,
+                config=config,
+                prompt=build_issue_implementation_prompt(
+                    issue_number,
+                    current_plan,
+                    config,
+                    memory,
+                    issue_context=issue_context,
+                ),
+                session_id=coder_session_id,
+            )
+            pr_number = parse_pr_number(coder_output)
+            if pr_number is None:
+                raise AgentLoopError(
+                    f"{coder_name} output did not include a PR marker or PR URL."
+                )
+            log(config, f"{coder_name} reported PR #{pr_number}; validating it is open")
+            validate_open_pr(runner, config=config, pr_number=pr_number)
+            post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
+            return run_pr_loop(
+                runner,
+                pr_number=pr_number,
+                config=config,
+                coder_session_id=coder_session_id,
+                issue_context=issue_context,
+                workdirs_ready=True,
+            )
+
+        if round_number == config.max_rounds:
+            raise AgentLoopError(
+                f"One or more reviewers still reported blocking plan issues after "
+                f"round {round_number}; human review required."
+            )
+
+        combined_review = "\n\n".join(
+            f"{name} plan review:\n\n{review}" for name, review in blocking_reviews
+        )
+        log(config, f"Planning round {round_number}: {coder_name} revising the plan")
+        current_plan, coder_session_id = run_agent(
+            runner,
+            agent=config.coder,
+            config=config,
+            prompt=build_plan_revision_prompt(
+                issue_number,
+                round_number,
+                current_plan,
+                combined_review,
+                config,
+                memory,
+                issue_context=issue_context,
+            ),
+            session_id=coder_session_id,
+        )
+        if not current_plan.strip():
+            raise AgentLoopError(f"{coder_name} produced an empty response.")
+        parse_plan_state(current_plan)
+        post_issue_comment(runner, config=config, issue_number=issue_number, body=current_plan)
+
+    raise AgentLoopError(
+        f"Reached max planning rounds ({config.max_rounds}) for issue #{issue_number}; "
+        "human review required."
+    )
+
+
+def run_issue_loop(
+    runner: Runner,
+    *,
+    issue_number: int,
+    config: AgentLoopConfig,
+    plan_first: bool = False,
+    implement_after_approval: bool = False,
+) -> int:
     ensure_agent_workdirs(config, runner)
     log(config, f"Validating issue #{issue_number}")
     validate_open_issue(runner, config=config, issue_number=issue_number)
     issue_context = get_issue_context(runner, config=config, issue_number=issue_number)
     memory = prepare_agent_memory(runner, config)
+    if plan_first:
+        return _run_plan_first_loop(
+            runner,
+            issue_number=issue_number,
+            config=config,
+            memory=memory,
+            issue_context=issue_context,
+            implement_after_approval=implement_after_approval,
+        )
 
     coder_output, coder_session_id = run_agent(
         runner,

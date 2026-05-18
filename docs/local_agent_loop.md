@@ -140,6 +140,23 @@ Issue mode includes the issue title, body, and comments in the coder prompt and
 issue-origin review prompts. Comments are ordered oldest to newest so later
 discussion can refine or supersede the original body.
 
+Run issue mode as plan-first discussion before implementation:
+
+```bash
+agent-loop issue 56 --repo OWNER/REPO --plan-first
+```
+
+With `--plan-first`, the coder writes an implementation plan without editing
+code, pushing a branch, or opening a PR. Reviewers critique that plan on the
+issue using `AGENT_PLAN_STATE` markers until every reviewer approves in the
+same planning round. By default the loop posts an approved consensus summary to
+the issue and stops. Add `--implement-after-approval` to continue into the
+normal implementation and PR review loop using the approved plan:
+
+```bash
+agent-loop issue 56 --repo OWNER/REPO --plan-first --implement-after-approval
+```
+
 Implement a free-form task:
 
 ```bash
@@ -360,10 +377,15 @@ Agent responses are parsed using HTML comment markers:
 <!-- AGENT_PR: 123 -->
 <!-- AGENT_STATE: approved -->
 <!-- AGENT_STATE: blocking -->
+<!-- AGENT_PLAN_STATE: approved -->
+<!-- AGENT_PLAN_STATE: blocking -->
 <!-- AGENT_CLARIFY -->
 ```
 
-`AGENT_PR` is required after a coder creates a PR. Review/fix responses must include a final `AGENT_STATE` marker. If a response quotes older markers, the final marker is treated as authoritative.
+`AGENT_PR` is required after a coder creates a PR. Review/fix responses must
+include a final `AGENT_STATE` marker. Plan-first coder/reviewer responses use
+`AGENT_PLAN_STATE` instead. If a response quotes older markers, the final
+matching marker is treated as authoritative.
 
 When `--approved-followups` is set to `summarize`, `issue`, or a `fix-and-*`
 mode, approved reviewer responses may also include optional future-work items
