@@ -520,6 +520,34 @@ def test_parse_approved_followups_extracts_same_pr_and_future_independently():
     ]
 
 
+def test_parse_approved_followups_accepts_trailing_colons_on_headings():
+    review = """
+    LGTM with follow-ups.
+
+    ### Same-PR follow-ups:
+    - Rename the helper for clarity.
+
+    ### Future follow-ups:
+    - Add an integration fixture later.
+
+    ### Non-blocking follow-ups:
+    - Legacy future item.
+
+    <!-- AGENT_STATE: approved -->
+    -- Google Gemini
+    """
+
+    followups = parse_approved_followups(review, reviewer="Gemini")
+
+    assert [(item.reviewer, item.text) for item in followups.same_pr] == [
+        ("Gemini", "Rename the helper for clarity.")
+    ]
+    assert [(item.reviewer, item.text) for item in followups.future] == [
+        ("Gemini", "Add an integration fixture later."),
+        ("Gemini", "Legacy future item."),
+    ]
+
+
 @pytest.mark.parametrize(
     "placeholder",
     [
