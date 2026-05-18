@@ -12,9 +12,19 @@ PLAN_STATE_RE = re.compile(r"<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*--
 PR_RE = re.compile(r"<!--\s*AGENT_PR:\s*(\d+)\s*-->", re.I)
 GH_PR_URL_RE = re.compile(r"/pull/(\d+)(?:\b|$)")
 CLARIFY_RE = re.compile(r"<!--\s*AGENT_CLARIFY\s*-->", re.I)
-SAME_PR_FOLLOWUP_HEADING_RE = re.compile(r"^\s*#{2,6}\s+same[- ]pr follow[- ]ups:?\s*$", re.I)
-FUTURE_FOLLOWUP_HEADING_RE = re.compile(r"^\s*#{2,6}\s+future follow[- ]ups:?\s*$", re.I)
-LEGACY_FOLLOWUP_HEADING_RE = re.compile(r"^\s*#{2,6}\s+non[- ]blocking follow[- ]ups:?\s*$", re.I)
+def _followup_heading_re(title: str) -> re.Pattern[str]:
+    title_with_punctuation = rf"{title}[:.]?"
+    return re.compile(
+        rf"^\s*#{{2,6}}\s+"
+        rf"(?:{title_with_punctuation}|\*\*{title}\*\*[:.]?|\*\*{title_with_punctuation}\*\*)"
+        rf"\s*$",
+        re.I,
+    )
+
+
+SAME_PR_FOLLOWUP_HEADING_RE = _followup_heading_re(r"same[- ]pr follow[- ]ups")
+FUTURE_FOLLOWUP_HEADING_RE = _followup_heading_re(r"future follow[- ]ups")
+LEGACY_FOLLOWUP_HEADING_RE = _followup_heading_re(r"non[- ]blocking follow[- ]ups")
 ANY_HEADING_RE = re.compile(r"^\s*#{1,6}\s+\S")
 HTML_COMMENT_RE = re.compile(r"^\s*<!--.*-->\s*$")
 SIGNATURE_RE = re.compile(r"^\s*--\s+\S")
