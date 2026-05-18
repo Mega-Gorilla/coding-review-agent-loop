@@ -170,6 +170,158 @@ Use blocking here to hand the PR to {reviewer_name} for review. Sign the respons
 """
 
 
+def build_issue_plan_prompt(
+    issue_number: int,
+    config: AgentLoopConfig,
+    memory: AgentMemoryContext | None = None,
+    issue_context: IssueContext | None = None,
+) -> str:
+    reviewer_name = format_agent_list(reviewers(config))
+    coder_signature = agent_signature(config.coder)
+    return f"""Plan GitHub issue #{issue_number} in {config.repo}.
+
+Use this local checkout only to inspect context. Do not edit files, create a
+branch, commit, push, or open a pull request during this planning stage.
+Write a concise implementation plan covering the intended approach, key files or
+areas to change, edge cases, and test strategy.
+{_scratch_file_guidance()}
+{_issue_context_block(issue_context)}
+{_memory_block(memory)}
+
+Do not wait for {reviewer_name} yourself; this local orchestrator will run
+{reviewer_name} to review the plan. End your final response with exactly one
+planning marker:
+
+<!-- AGENT_PLAN_STATE: blocking -->
+
+Use blocking here to hand the plan to {reviewer_name} for review. If the issue
+is materially ambiguous before a useful plan can be written, ask focused
+clarifying questions and end with exactly this marker:
+
+<!-- AGENT_CLARIFY -->
+
+Sign the response as:
+-- {coder_signature}
+"""
+
+
+def build_plan_review_prompt(
+    issue_number: int,
+    round_number: int,
+    plan: str,
+    config: AgentLoopConfig,
+    *,
+    reviewer: AgentName,
+    memory: AgentMemoryContext | None = None,
+    issue_context: IssueContext | None = None,
+) -> str:
+    coder_name = agent_display_name(config.coder)
+    reviewer_signature = agent_signature(reviewer)
+    reviewer_group = format_agent_list(reviewers(config))
+    return f"""Review the implementation plan for GitHub issue #{issue_number} in {config.repo} (planning round {round_number}).
+
+Use this local checkout only to inspect context. Do not edit files, create a
+branch, commit, push, or open a pull request during this planning review.
+{_scratch_file_guidance()}
+{_issue_context_block(issue_context)}
+{_memory_block(memory)}
+
+Plan from {coder_name}:
+
+{plan}
+
+Review the plan for correctness, architecture fit, missing edge cases, test
+strategy, and ambiguity. Use blocking only for issues that should be resolved
+before implementation starts. All configured reviewers ({reviewer_group}) must
+approve in the same planning round before implementation can proceed.
+
+End your final response with exactly one planning marker:
+
+<!-- AGENT_PLAN_STATE: approved -->
+
+or:
+
+<!-- AGENT_PLAN_STATE: blocking -->
+
+Use approved only if there are no blocking plan issues. Always sign your response:
+-- {reviewer_signature}
+"""
+
+
+def build_plan_revision_prompt(
+    issue_number: int,
+    round_number: int,
+    previous_plan: str,
+    review: str,
+    config: AgentLoopConfig,
+    memory: AgentMemoryContext | None = None,
+    issue_context: IssueContext | None = None,
+) -> str:
+    reviewer_name = format_agent_list(reviewers(config))
+    coder_signature = agent_signature(config.coder)
+    return f"""{reviewer_name} reviewed the implementation plan for GitHub issue #{issue_number} in {config.repo} and found blocking issues.
+
+Revise the plan in this local checkout without editing code. Do not create a
+branch, commit, push, or open a pull request during this planning stage.
+{_scratch_file_guidance()}
+{_issue_context_block(issue_context)}
+{_memory_block(memory)}
+
+Previous plan:
+
+{previous_plan}
+
+{reviewer_name} plan review:
+
+{review}
+
+This is planning round {round_number}. End your final response with exactly one
+planning marker:
+
+<!-- AGENT_PLAN_STATE: blocking -->
+
+Use blocking to hand the revised plan back to {reviewer_name}. Sign the response as:
+-- {coder_signature}
+"""
+
+
+def build_issue_implementation_prompt(
+    issue_number: int,
+    approved_plan: str,
+    config: AgentLoopConfig,
+    memory: AgentMemoryContext | None = None,
+    issue_context: IssueContext | None = None,
+) -> str:
+    reviewer_name = format_agent_list(reviewers(config))
+    coder_signature = agent_signature(config.coder)
+    return f"""Implement the approved plan for GitHub issue #{issue_number} in {config.repo}.
+
+Use this local checkout as your workspace. Create a branch, implement the
+approved plan, run relevant tests, commit, push, and open a pull request against
+{config.base}.
+{_scratch_file_guidance()}
+{_issue_context_block(issue_context)}
+{_memory_block(memory)}
+
+Approved implementation plan:
+
+{approved_plan}
+
+Do not wait for {reviewer_name} yourself; this local orchestrator will run
+{reviewer_name} after you create the PR. In your final response, include the PR
+number using exactly this marker:
+
+<!-- AGENT_PR: <number> -->
+
+Also include exactly one state marker:
+
+<!-- AGENT_STATE: blocking -->
+
+Use blocking here to hand the PR to {reviewer_name} for review. Sign the response as:
+-- {coder_signature}
+"""
+
+
 def build_task_prompt(
     task_text: str,
     config: AgentLoopConfig,

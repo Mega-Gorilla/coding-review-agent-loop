@@ -169,6 +169,14 @@ class FakeRunner(Runner):
                 self.comments.append(cmd[cmd.index("--body") + 1])
             return CommandResult(cmd, cwd_path, "", "", 0)
 
+        if cmd[:3] == ["gh", "issue", "comment"]:
+            if "--body-file" in cmd:
+                body_path = Path(cmd[cmd.index("--body-file") + 1])
+                self.comments.append(body_path.read_text(encoding="utf-8"))
+            elif "--body" in cmd:
+                self.comments.append(cmd[cmd.index("--body") + 1])
+            return CommandResult(cmd, cwd_path, "", "", 0)
+
         if cmd[:3] == ["gh", "issue", "create"]:
             title = cmd[cmd.index("--title") + 1]
             if "--body-file" in cmd:
@@ -2123,6 +2131,82 @@ def test_issue_loop_rejects_pr_number_before_running_claude(tmp_path):
         run_issue_loop(runner, issue_number=62, config=config)
 
     assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+
+
+def test_issue_loop_plan_first_stops_after_approved_plan(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Plan:\n- Update the CLI.\n- Add tests.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path)
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    assert any(cmd[:3] == ["claude", "--print", "--output-format"] for cmd, _cwd in runner.commands)
+    assert any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
+    assert not any(cmd[:3] == ["gh", "pr", "view"] for cmd, _cwd in runner.commands)
+    assert len(runner.comments) == 3
+    assert runner.comments[0].startswith("Plan:")
+    assert runner.comments[1].startswith("Plan looks sound.")
+    assert "Outcome: implement" in runner.comments[2]
+
+
+def test_issue_loop_plan_first_revises_until_all_reviewers_approve(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Initial plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Revised plan with tests.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Missing test strategy.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
+            "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path)
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert len(claude_calls) == 2
+    assert "Missing test strategy" in claude_calls[1][-1]
+    assert len(runner.comments) == 5
+    assert runner.comments[2].startswith("Revised plan")
+
+
+def test_issue_loop_plan_first_can_implement_after_approval(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Plan:\n- Make the change.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Implemented approved plan.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path)
+
+    assert (
+        run_issue_loop(
+            runner,
+            issue_number=56,
+            config=config,
+            plan_first=True,
+            implement_after_approval=True,
+        )
+        == 0
+    )
+
+    claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert len(claude_calls) == 2
+    assert "Approved implementation plan" in claude_calls[1][-1]
+    assert len(runner.comments) == 5
+    assert runner.comments[3].startswith("Implemented approved plan.")
+    assert runner.comments[4].startswith("LGTM.")
 
 
 def test_is_clarification_request_detects_marker():

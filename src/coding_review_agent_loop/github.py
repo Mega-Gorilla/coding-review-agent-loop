@@ -234,6 +234,54 @@ def post_pr_comment(
             pass
 
 
+def post_issue_comment(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    issue_number: int,
+    body: str,
+) -> None:
+    log(config, f"Posting agent output to issue #{issue_number}")
+    if config.dry_run:
+        runner.run(
+            [
+                config.gh_cmd,
+                "issue",
+                "comment",
+                str(issue_number),
+                "--repo",
+                config.repo,
+                "--body",
+                body,
+            ],
+            cwd=active_workdir(config),
+        )
+        return
+
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
+        handle.write(body)
+        path = handle.name
+    try:
+        runner.run(
+            [
+                config.gh_cmd,
+                "issue",
+                "comment",
+                str(issue_number),
+                "--repo",
+                config.repo,
+                "--body-file",
+                path,
+            ],
+            cwd=active_workdir(config),
+        )
+    finally:
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
+
+
 def create_issue(
     runner: Runner,
     *,

@@ -99,6 +99,16 @@ original issue body:
 agent-loop issue 123 --repo OWNER/REPO
 ```
 
+For larger or ambiguous issues, add `--plan-first` to run a plan review on the
+issue before code is written. The coder may inspect the checkout but must not
+edit files, push, or open a PR during planning. Reviewers approve or block with
+`AGENT_PLAN_STATE` markers. By default the loop posts the approved plan summary
+and stops; add `--implement-after-approval` to continue into the normal PR flow:
+
+```bash
+agent-loop issue 123 --repo OWNER/REPO --plan-first --implement-after-approval
+```
+
 Provide a one-off task directly when there is no issue yet:
 
 ```bash

@@ -226,6 +226,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     issue = subparsers.add_parser("issue", help="Ask the coder to fix an issue, then review it.")
     issue.add_argument("issue_number", type=int)
+    issue.add_argument(
+        "--plan-first",
+        action="store_true",
+        help=(
+            "Run an issue planning/review stage before implementation. By default, "
+            "stop after the plan is approved and post the outcome to the issue."
+        ),
+    )
+    issue.add_argument(
+        "--implement-after-approval",
+        action="store_true",
+        help="With --plan-first, continue into implementation after reviewers approve the plan.",
+    )
     add_common(issue)
 
     pr = subparsers.add_parser("pr", help="Run the reviewer/coder loop on an existing PR.")
@@ -288,7 +301,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         config = config_from_args(args, runner)
         if args.command == "issue":
-            return run_issue_loop(runner, issue_number=args.issue_number, config=config)
+            if args.implement_after_approval and not args.plan_first:
+                raise AgentLoopError("--implement-after-approval requires --plan-first.")
+            return run_issue_loop(
+                runner,
+                issue_number=args.issue_number,
+                config=config,
+                plan_first=args.plan_first,
+                implement_after_approval=args.implement_after_approval,
+            )
         if args.command == "pr":
             return run_pr_loop(runner, pr_number=args.pr_number, config=config)
         if args.command == "task":
