@@ -319,7 +319,7 @@ def sync_reviewer_pr_before_review(
     local_head = _run_git(runner, path, ("rev-parse", "HEAD")).stdout.strip()
     branch_state = _run_git(runner, path, ("status", "--short", "--branch")).stdout.strip()
     advertised_head = (pr_metadata.head_sha or "").strip()
-    if advertised_head and local_head != advertised_head and not runner.dry_run:
+    if advertised_head and local_head != advertised_head:
         raise AgentLoopError(
             f"{label} at {path} is at {local_head or '(unknown)'}, "
             f"but PR #{pr_number} metadata advertises head SHA {advertised_head}."
