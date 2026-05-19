@@ -223,6 +223,11 @@ class FakeRunner(Runner):
         if cmd[:3] == ["git", "rev-parse", "HEAD"]:
             return CommandResult(cmd, cwd_path, f"{self.git_head}\n", "", 0)
 
+        if cmd[:3] == ["git", "checkout", "--detach"]:
+            if len(cmd) > 3 and cmd[3].startswith("refs/remotes/origin/pr/"):
+                self.git_head = self.pr_payload.get("headRefOid", self.git_head)
+            return CommandResult(cmd, cwd_path, "", "", 0)
+
         if cmd[:2] == ["git", "ls-files"]:
             return CommandResult(cmd, cwd_path, "\n".join(self.tracked_files) + "\n", "", 0)
 
@@ -1908,6 +1913,112 @@ def test_clean_existing_auto_agent_dir_is_synced(tmp_path):
     assert ["git", "pull", "--ff-only", "origin", "main"] in commands
 
 
+def test_reviewer_checkout_is_refreshed_to_pr_head_before_review(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+    )
+    config = make_config(tmp_path, reviewer="codex")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    commands = [cmd for cmd, _cwd in runner.commands]
+    review_index = command_index(runner.commands, ["codex", "exec"])
+    fetch_index = command_index(runner.commands, ["git", "fetch", "origin"], start=0)
+    pr_fetch_index = command_index(
+        runner.commands,
+        ["git", "fetch", "origin", "pull/77/head:refs/remotes/origin/pr/77"],
+    )
+    checkout_index = command_index(
+        runner.commands,
+        ["git", "checkout", "--detach", "refs/remotes/origin/pr/77"],
+    )
+    head_index = command_index(runner.commands, ["git", "rev-parse", "HEAD"], start=checkout_index)
+
+    assert commands[pr_fetch_index] == ["git", "fetch", "origin", "pull/77/head:refs/remotes/origin/pr/77"]
+    assert fetch_index < pr_fetch_index < checkout_index < head_index < review_index
+
+
+def test_reviewer_checkout_refreshes_each_round_before_review(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=["Fixed.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
+        codex_outputs=[
+            "Please fix it.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    commands = [cmd for cmd, _cwd in runner.commands]
+    pr_fetches = [
+        index
+        for index, cmd in enumerate(commands)
+        if cmd == ["git", "fetch", "origin", "pull/77/head:refs/remotes/origin/pr/77"]
+    ]
+    review_indices = [index for index, cmd in enumerate(commands) if cmd[:2] == ["codex", "exec"]]
+
+    assert len(pr_fetches) == 2
+    assert len(review_indices) == 2
+    assert pr_fetches[0] < review_indices[0]
+    assert pr_fetches[1] < review_indices[1]
+
+
+def test_dirty_default_reviewer_checkout_is_cleaned_before_review(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+        git_status=" M stale.py\n",
+    )
+    codex_dir = tmp_path / "codex"
+    codex_dir.mkdir()
+    config = make_config(
+        tmp_path,
+        codex_dir=codex_dir,
+        coder="claude",
+        reviewer="codex",
+        auto_agent_dirs=("codex",),
+        create_dirs=False,
+    )
+    config.claude_dir.mkdir(parents=True)
+    config.gemini_dir.mkdir(parents=True)
+
+    assert run_pr_loop(runner, pr_number=77, config=config, workdirs_ready=True) == 0
+
+    reset_index = command_index(runner.commands, ["git", "reset", "--hard"])
+    clean_index = command_index(runner.commands, ["git", "clean", "-fd"])
+    review_index = command_index(runner.commands, ["codex", "exec"])
+
+    assert reset_index < clean_index < review_index
+
+
+def test_dirty_explicit_reviewer_checkout_fails_before_review_invocation(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=["This should not run.\n<!-- AGENT_STATE: approved -->"],
+        git_status=" M stale.py\n",
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex", agent_memory=False)
+
+    with pytest.raises(AgentLoopError, match="--codex-dir is dirty"):
+        run_pr_loop(runner, pr_number=77, config=config, workdirs_ready=True)
+
+    assert not any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
+
+
+def test_review_prompt_warns_that_pr_head_sha_is_authoritative(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+    )
+    config = make_config(tmp_path, reviewer="codex")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    codex_command = next(cmd for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"])
+    prompt = codex_command[-1]
+    assert "The Head SHA above is the PR head this\nreview round is about." in prompt
+    assert "If local files do not match that SHA, refresh/fetch the\ncheckout before reviewing." in prompt
+    assert "Do not report findings based on untracked files unless those files are\npresent in the PR diff." in prompt
+
+
 def test_dirty_existing_auto_agent_dir_is_cleaned_before_sync(tmp_path, capsys):
     runner = FakeRunner(
         codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
@@ -2545,7 +2656,7 @@ def test_pr_loop_rejects_non_open_pr_before_running_codex(tmp_path):
         run_pr_loop(runner, pr_number=62, config=config)
 
 
-def test_pr_loop_does_not_perform_just_in_time_base_sync(tmp_path):
+def test_pr_loop_refreshes_pr_head_without_just_in_time_base_sync(tmp_path):
     runner = FakeRunner(
         codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
     )
@@ -2554,7 +2665,8 @@ def test_pr_loop_does_not_perform_just_in_time_base_sync(tmp_path):
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
     commands = [cmd for cmd, _cwd in runner.commands]
-    assert ["git", "fetch", "origin"] not in commands
+    assert ["git", "fetch", "origin"] in commands
+    assert ["git", "fetch", "origin", "pull/77/head:refs/remotes/origin/pr/77"] in commands
     assert ["git", "switch", "main"] not in commands
     assert ["git", "pull", "--ff-only", "origin", "main"] not in commands
 

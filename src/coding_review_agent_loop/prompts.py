@@ -471,8 +471,11 @@ PR metadata:
 - Base branch: {base_branch}
 - Head SHA: {head_sha}
 {url_line}
-Use this PR metadata as authoritative. Do not spend time discovering the PR
-branch.
+Use this PR metadata as authoritative. The Head SHA above is the PR head this
+review round is about. If local files do not match that SHA, refresh/fetch the
+checkout before reviewing. Do not spend time discovering the PR
+branch. Do not report findings based on untracked files unless those files are
+present in the PR diff.
 {_scratch_file_guidance()}
 {_issue_context_block(issue_context)}
 {_memory_block(memory)}
