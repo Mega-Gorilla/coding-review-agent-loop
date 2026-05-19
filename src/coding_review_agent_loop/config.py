@@ -16,6 +16,7 @@ from .errors import AgentLoopError
 from .github import detect_repo
 from .logging import log
 from .runner import Runner
+from .workdirs import active_workdir
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,88 @@ def _run_git(runner: Runner, path: Path, args: tuple[str, ...], *, check: bool =
     return runner.run(("git", *args), cwd=path, check=check)
 
 
+def _agent_dir_option(agent: AgentName) -> str:
+    return {
+        "claude": "--claude-dir",
+        "codex": "--codex-dir",
+        "gemini": "--gemini-dir",
+    }[agent]
+
+
+def _validate_repo_remote(
+    path: Path,
+    *,
+    label: str,
+    config: AgentLoopConfig,
+    runner: Runner,
+) -> None:
+    remote = _run_git(runner, path, ("remote", "get-url", "origin")).stdout.strip()
+    if not _looks_like_repo_remote(remote, config.repo):
+        raise AgentLoopError(f"{label} at {path} uses origin {remote!r}, not {config.repo!r}.")
+
+
+def _clean_or_reject_checkout(
+    path: Path,
+    *,
+    label: str,
+    default_owned: bool,
+    config: AgentLoopConfig,
+    runner: Runner,
+) -> None:
+    status = _run_git(runner, path, ("status", "--porcelain")).stdout.strip()
+    if not status:
+        return
+    if not default_owned:
+        raise AgentLoopError(f"{label} is dirty: {path}. Commit, stash, or clean it before rerunning.")
+    log(config, f"Cleaning dirty {label[0].lower()}{label[1:]}: {path}")
+    _run_git(runner, path, ("reset", "--hard"))
+    _run_git(runner, path, ("clean", "-fd"))
+
+
+def _sync_base_branch(
+    path: Path,
+    *,
+    label: str,
+    default_owned: bool,
+    config: AgentLoopConfig,
+    runner: Runner,
+) -> None:
+    if not path.is_dir():
+        raise AgentLoopError(f"{label} does not exist or is not a directory: {path}")
+
+    git_check = _run_git(runner, path, ("rev-parse", "--is-inside-work-tree"), check=False)
+    if git_check.returncode != 0 or git_check.stdout.strip() != "true":
+        if not default_owned:
+            raise AgentLoopError(
+                f"{label} is not a git checkout: {path}. "
+                "Use a clean checkout for issue or task implementation."
+            )
+        raise AgentLoopError(
+            f"{label} exists but is not a git checkout: {path}. "
+            "Remove it or pass an explicit agent directory."
+        )
+
+    _validate_repo_remote(path, label=label, config=config, runner=runner)
+    _clean_or_reject_checkout(
+        path,
+        label=label,
+        default_owned=default_owned,
+        config=config,
+        runner=runner,
+    )
+
+    _run_git(runner, path, ("fetch", "origin"))
+    switch = _run_git(runner, path, ("switch", config.base), check=False)
+    if switch.returncode != 0:
+        if not default_owned:
+            raise AgentLoopError(
+                f"{label} could not switch to base branch {config.base!r}. "
+                "Create the branch locally or use a clean checkout on the base branch."
+            )
+        _run_git(runner, path, ("switch", "-C", config.base, f"origin/{config.base}"))
+    _run_git(runner, path, ("pull", "--ff-only", "origin", config.base))
+
+
 def ensure_temp_checkout(path: Path, *, agent: AgentName, config: AgentLoopConfig, runner: Runner) -> None:
     if not path.exists():
         try:
@@ -144,33 +227,13 @@ def ensure_temp_checkout(path: Path, *, agent: AgentName, config: AgentLoopConfi
         # Fresh clones still flow through validation and sync below so the
         # same remote, cleanliness, and base-branch checks apply to every run.
 
-    if not path.is_dir():
-        raise AgentLoopError(f"Default {agent} workdir exists but is not a directory: {path}")
-
-    git_check = _run_git(runner, path, ("rev-parse", "--is-inside-work-tree"), check=False)
-    if git_check.returncode != 0 or git_check.stdout.strip() != "true":
-        raise AgentLoopError(
-            f"Default {agent} workdir exists but is not a git checkout: {path}. "
-            "Remove it or pass an explicit agent directory."
-        )
-
-    remote = _run_git(runner, path, ("remote", "get-url", "origin")).stdout.strip()
-    if not _looks_like_repo_remote(remote, config.repo):
-        raise AgentLoopError(
-            f"Default {agent} workdir at {path} uses origin {remote!r}, not {config.repo!r}."
-        )
-
-    status = _run_git(runner, path, ("status", "--porcelain")).stdout.strip()
-    if status:
-        log(config, f"Cleaning dirty default {agent} workdir: {path}")
-        _run_git(runner, path, ("reset", "--hard"))
-        _run_git(runner, path, ("clean", "-fd"))
-
-    _run_git(runner, path, ("fetch", "origin"))
-    checkout = _run_git(runner, path, ("checkout", config.base), check=False)
-    if checkout.returncode != 0:
-        _run_git(runner, path, ("checkout", "-B", config.base, f"origin/{config.base}"))
-    _run_git(runner, path, ("pull", "--ff-only", "origin", config.base))
+    _sync_base_branch(
+        path,
+        label=f"Default {agent} workdir",
+        default_owned=True,
+        config=config,
+        runner=runner,
+    )
 
 
 def validate_explicit_workdir(path: Path, option_name: str, config: AgentLoopConfig, runner: Runner) -> None:
@@ -178,17 +241,29 @@ def validate_explicit_workdir(path: Path, option_name: str, config: AgentLoopCon
     if git_check.returncode != 0 or git_check.stdout.strip() != "true":
         return
 
-    status = _run_git(runner, path, ("status", "--porcelain")).stdout.strip()
-    if status:
-        raise AgentLoopError(
-            f"{option_name} is dirty: {path}. Commit, stash, or clean it before rerunning."
-        )
+    _clean_or_reject_checkout(
+        path,
+        label=option_name,
+        default_owned=False,
+        config=config,
+        runner=runner,
+    )
+    _validate_repo_remote(path, label=option_name, config=config, runner=runner)
 
-    remote = _run_git(runner, path, ("remote", "get-url", "origin")).stdout.strip()
-    if not _looks_like_repo_remote(remote, config.repo):
-        raise AgentLoopError(
-            f"{option_name} at {path} uses origin {remote!r}, not {config.repo!r}."
-        )
+
+def sync_coder_base_before_implementation(config: AgentLoopConfig, runner: Runner) -> None:
+    """Sync the active coder checkout to the configured base branch just before implementation."""
+    path = active_workdir(config)
+    option_name = _agent_dir_option(config.coder)
+    default_owned = config.coder in set(config.auto_agent_dirs)
+    label = f"Default {config.coder} workdir" if default_owned else option_name
+    _sync_base_branch(
+        path,
+        label=label,
+        default_owned=default_owned,
+        config=config,
+        runner=runner,
+    )
 
 
 def ensure_agent_workdirs(config: AgentLoopConfig, runner: Runner) -> None:
