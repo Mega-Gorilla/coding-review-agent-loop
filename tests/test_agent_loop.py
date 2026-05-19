@@ -249,6 +249,14 @@ def json_dumps(value):
     return json.dumps(value) + "\n"
 
 
+def command_index(commands, prefix, *, start=0):
+    for index in range(start, len(commands)):
+        cmd = commands[index][0]
+        if cmd[: len(prefix)] == prefix:
+            return index
+    raise AssertionError(f"Command with prefix {prefix!r} not found.")
+
+
 def make_config(tmp_path, *, create_dirs=True, **overrides):
     config = {
         "repo": "OWNER/REPO",
@@ -711,6 +719,32 @@ def test_issue_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
     assert list((tmp_path / "logs").glob("*-claude.log"))
     assert list((tmp_path / "logs").glob("*-codex.log"))
     assert (tmp_path / "logs" / ".gitignore").read_text(encoding="utf-8") == "*\n!.gitignore\n"
+
+
+def test_issue_loop_syncs_coder_base_after_memory_before_coder(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Created PR.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->",
+        ],
+        codex_outputs=[
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path)
+    config.agent_memory_dir.mkdir(parents=True)
+    (config.agent_memory_dir / "last-analyzed-commit").write_text("base123\n", encoding="utf-8")
+
+    assert run_issue_loop(runner, issue_number=56, config=config) == 0
+
+    commands = runner.commands
+    issue_context_index = command_index(commands, ["gh", "issue", "view"])
+    memory_index = command_index(commands, ["git", "diff", "--name-only"])
+    fetch_index = command_index(commands, ["git", "fetch", "origin"])
+    switch_index = command_index(commands, ["git", "switch", "main"])
+    pull_index = command_index(commands, ["git", "pull", "--ff-only", "origin", "main"])
+    coder_index = command_index(commands, ["claude", "--print"])
+
+    assert issue_context_index < memory_index < fetch_index < switch_index < pull_index < coder_index
 
 
 def test_issue_loop_includes_issue_comments_in_coder_and_review_prompts(tmp_path):
@@ -1870,7 +1904,7 @@ def test_clean_existing_auto_agent_dir_is_synced(tmp_path):
 
     commands = [cmd for cmd, _cwd in runner.commands]
     assert ["git", "fetch", "origin"] in commands
-    assert ["git", "checkout", "main"] in commands
+    assert ["git", "switch", "main"] in commands
     assert ["git", "pull", "--ff-only", "origin", "main"] in commands
 
 
@@ -1917,6 +1951,35 @@ def test_dirty_explicit_agent_dir_fails_clearly(tmp_path):
 
     with pytest.raises(AgentLoopError, match="--codex-dir is dirty"):
         run_pr_loop(runner, pr_number=77, config=config)
+
+    assert not any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
+
+
+@pytest.mark.parametrize("loop_name", ["issue", "task"])
+def test_dirty_explicit_coder_dir_fails_before_issue_or_task_coder_invocation(tmp_path, loop_name):
+    runner = FakeRunner(
+        git_status=" M file.py\n",
+        codex_outputs=[
+            "Implemented.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+        ],
+    )
+    codex_dir = tmp_path / "codex"
+    codex_dir.mkdir()
+    config = make_config(
+        tmp_path,
+        codex_dir=codex_dir,
+        coder="codex",
+        reviewer="codex",
+        create_dirs=False,
+    )
+    config.claude_dir.mkdir(parents=True)
+    config.gemini_dir.mkdir(parents=True)
+
+    with pytest.raises(AgentLoopError, match="--codex-dir is dirty"):
+        if loop_name == "issue":
+            run_issue_loop(runner, issue_number=56, config=config)
+        else:
+            run_task_loop(runner, task_text="Add /healthz endpoint.", config=config)
 
     assert not any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
 
@@ -2224,6 +2287,8 @@ def test_issue_loop_plan_first_stops_after_approved_plan(tmp_path):
     assert runner.comments[0].startswith("Plan:")
     assert runner.comments[1].startswith("Plan looks sound.")
     assert "Outcome: implement" in runner.comments[2]
+    assert not any(cmd[:2] == ["git", "fetch"] for cmd, _cwd in runner.commands)
+    assert not any(cmd[:2] == ["git", "switch"] for cmd, _cwd in runner.commands)
 
 
 def test_issue_loop_plan_first_revises_until_all_reviewers_approve(tmp_path):
@@ -2275,6 +2340,11 @@ def test_issue_loop_plan_first_can_implement_after_approval(tmp_path):
     claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
     assert len(claude_calls) == 2
     assert "Approved implementation plan" in claude_calls[1][-1]
+    first_claude_index = command_index(runner.commands, ["claude", "--print"])
+    fetch_index = command_index(runner.commands, ["git", "fetch", "origin"])
+    switch_index = command_index(runner.commands, ["git", "switch", "main"])
+    second_claude_index = command_index(runner.commands, ["claude", "--print"], start=first_claude_index + 1)
+    assert first_claude_index < fetch_index < switch_index < second_claude_index
     assert len(runner.comments) == 5
     assert runner.comments[3].startswith("Implemented approved plan.")
     assert runner.comments[4].startswith("LGTM.")
@@ -2319,6 +2389,36 @@ def test_task_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
     assert len(runner.comments) == 4
     assert runner.comments[0].startswith("Implemented.")
     assert runner.comments[-1].startswith("LGTM.")
+
+
+def test_task_loop_syncs_coder_base_before_first_implementation_attempt(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Implemented.\n<!-- AGENT_PR: 91 -->\n<!-- AGENT_STATE: blocking -->",
+        ],
+        codex_outputs=[
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        pr_payload={
+            "number": 91,
+            "state": "OPEN",
+            "url": "https://github.com/OWNER/REPO/pull/91",
+        },
+    )
+    config = make_config(tmp_path)
+    config.agent_memory_dir.mkdir(parents=True)
+    (config.agent_memory_dir / "last-analyzed-commit").write_text("base123\n", encoding="utf-8")
+
+    assert run_task_loop(runner, task_text="Add a /healthz endpoint.", config=config) == 0
+
+    commands = runner.commands
+    memory_index = command_index(commands, ["git", "diff", "--name-only"])
+    fetch_index = command_index(commands, ["git", "fetch", "origin"])
+    switch_index = command_index(commands, ["git", "switch", "main"])
+    pull_index = command_index(commands, ["git", "pull", "--ff-only", "origin", "main"])
+    coder_index = command_index(commands, ["claude", "--print"])
+
+    assert memory_index < fetch_index < switch_index < pull_index < coder_index
 
 
 def test_task_loop_picks_up_pr_url_when_marker_missing(tmp_path):
@@ -2443,6 +2543,20 @@ def test_pr_loop_rejects_non_open_pr_before_running_codex(tmp_path):
 
     with pytest.raises(AgentLoopError, match="provide an open PR"):
         run_pr_loop(runner, pr_number=62, config=config)
+
+
+def test_pr_loop_does_not_perform_just_in_time_base_sync(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+    )
+    config = make_config(tmp_path)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    commands = [cmd for cmd, _cwd in runner.commands]
+    assert ["git", "fetch", "origin"] not in commands
+    assert ["git", "switch", "main"] not in commands
+    assert ["git", "pull", "--ff-only", "origin", "main"] not in commands
 
 
 # ---------------------------------------------------------------------------

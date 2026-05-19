@@ -9,7 +9,12 @@ from dataclasses import dataclass
 
 from .agents.base import AgentName
 from .agents.registry import agent_display_name, run_agent
-from .config import AgentLoopConfig, ensure_agent_workdirs, reviewers
+from .config import (
+    AgentLoopConfig,
+    ensure_agent_workdirs,
+    reviewers,
+    sync_coder_base_before_implementation,
+)
 from .errors import AgentLoopError
 from .github import (
     IssueContext,
@@ -318,6 +323,7 @@ def _run_plan_first_loop(
                 )
                 return 0
 
+            sync_coder_base_before_implementation(config, runner)
             log(config, f"Planning approved; invoking {coder_name} to implement issue #{issue_number}")
             coder_output, coder_session_id = run_agent(
                 runner,
@@ -408,6 +414,7 @@ def run_issue_loop(
             implement_after_approval=implement_after_approval,
         )
 
+    sync_coder_base_before_implementation(config, runner)
     coder_output, coder_session_id = run_agent(
         runner,
         agent=config.coder,
@@ -474,6 +481,8 @@ def run_task_loop(
     session_id: str | None = None
 
     for attempt in range(max_clarification_rounds + 1):
+        if attempt == 0:
+            sync_coder_base_before_implementation(config, runner)
         log(config, f"Task attempt {attempt + 1}: invoking {coder_name}")
         coder_output, session_id = run_agent(
             runner,
