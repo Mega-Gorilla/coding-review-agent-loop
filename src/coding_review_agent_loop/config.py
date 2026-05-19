@@ -180,7 +180,7 @@ def _sync_base_branch(
     runner: Runner,
 ) -> None:
     if not path.is_dir():
-        raise AgentLoopError(f"{label} exists but is not a directory: {path}")
+        raise AgentLoopError(f"{label} does not exist or is not a directory: {path}")
 
     git_check = _run_git(runner, path, ("rev-parse", "--is-inside-work-tree"), check=False)
     if git_check.returncode != 0 or git_check.stdout.strip() != "true":
