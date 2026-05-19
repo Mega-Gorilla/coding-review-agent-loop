@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from .errors import AgentLoopError
 from .logging import log
+from .protocol import parse_signed_human_requirement_body
 from .runner import Runner
 from .workdirs import active_workdir
 
@@ -44,6 +45,15 @@ class IssueContext:
     body: str | None
     url: str | None
     comments: tuple[IssueComment, ...]
+
+
+@dataclass(frozen=True)
+class HumanReviewRequirement:
+    source_type: str
+    author: str | None
+    created_at: str | None
+    url: str | None
+    body: str
 
 
 def detect_repo(runner: Runner, cwd: Path, gh_cmd: str) -> str:
@@ -115,6 +125,73 @@ def get_pr_metadata(runner: Runner, *, config: AgentLoopConfig, pr_number: int) 
         head_sha=data.get("headRefOid"),
         url=data.get("url"),
     )
+
+
+def _author_login(raw: object) -> str | None:
+    if isinstance(raw, dict):
+        login = raw.get("login")
+        return str(login) if login else None
+    return None
+
+
+def _human_requirement_sort_key(requirement: HumanReviewRequirement) -> str:
+    return requirement.created_at or ""
+
+
+def get_pr_human_requirements(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    pr_number: int,
+) -> tuple[HumanReviewRequirement, ...]:
+    if config.dry_run:
+        return ()
+
+    result = runner.run(
+        [
+            config.gh_cmd,
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            config.repo,
+            "--json",
+            "comments,reviews",
+        ],
+        cwd=active_workdir(config),
+    )
+    data = json.loads(result.stdout or "{}")
+    requirements: list[HumanReviewRequirement] = []
+    for raw_comment in data.get("comments") or []:
+        body = parse_signed_human_requirement_body(raw_comment.get("body"))
+        if body is None:
+            continue
+        requirements.append(
+            HumanReviewRequirement(
+                source_type="PR comment",
+                author=_author_login(raw_comment.get("author")),
+                created_at=raw_comment.get("createdAt") or raw_comment.get("created_at"),
+                url=raw_comment.get("url"),
+                body=body,
+            )
+        )
+    for raw_review in data.get("reviews") or []:
+        body = parse_signed_human_requirement_body(raw_review.get("body"))
+        if body is None:
+            continue
+        requirements.append(
+            HumanReviewRequirement(
+                source_type="PR review",
+                author=_author_login(raw_review.get("author")),
+                created_at=raw_review.get("submittedAt")
+                or raw_review.get("submitted_at")
+                or raw_review.get("createdAt")
+                or raw_review.get("created_at"),
+                url=raw_review.get("url"),
+                body=body,
+            )
+        )
+    return tuple(sorted(requirements, key=_human_requirement_sort_key))
 
 
 def validate_open_issue(runner: Runner, *, config: AgentLoopConfig, issue_number: int) -> None:

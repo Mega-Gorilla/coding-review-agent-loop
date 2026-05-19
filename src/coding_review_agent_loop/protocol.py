@@ -12,6 +12,13 @@ PLAN_STATE_RE = re.compile(r"<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*--
 PR_RE = re.compile(r"<!--\s*AGENT_PR:\s*(\d+)\s*-->", re.I)
 GH_PR_URL_RE = re.compile(r"/pull/(\d+)(?:\b|$)")
 CLARIFY_RE = re.compile(r"<!--\s*AGENT_CLARIFY\s*-->", re.I)
+HUMAN_REVIEWER_SIGNATURE_RE = re.compile(r"^\s*--\s*Human Reviewer\s*$", re.I | re.M)
+HUMAN_REQUIREMENTS_RESOLVED_RE = re.compile(
+    r"<!--\s*HUMAN_REQUIREMENTS_RESOLVED\s*-->",
+    re.I,
+)
+
+
 def _followup_heading_re(title: str) -> re.Pattern[str]:
     title_with_punctuation = rf"{title}[:.]?"
     return re.compile(
@@ -76,6 +83,21 @@ def parse_pr_number(text: str) -> int | None:
 
 def is_clarification_request(text: str) -> bool:
     return bool(CLARIFY_RE.search(text))
+
+
+def parse_signed_human_requirement_body(text: str | None) -> str | None:
+    """Return comment body before a standalone ``-- Human Reviewer`` signature."""
+    if not text:
+        return None
+    match = HUMAN_REVIEWER_SIGNATURE_RE.search(text)
+    if not match:
+        return None
+    body = text[: match.start()].strip()
+    return body or None
+
+
+def human_requirements_resolved(text: str) -> bool:
+    return bool(HUMAN_REQUIREMENTS_RESOLVED_RE.search(text))
 
 
 def parse_approved_followups(text: str, *, reviewer: str) -> ApprovedFollowups:

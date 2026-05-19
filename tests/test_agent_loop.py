@@ -26,9 +26,13 @@ from coding_review_agent_loop.config import (
     default_agent_workdir,
     default_cache_root,
 )
-from coding_review_agent_loop.github import IssueComment, IssueContext
-from coding_review_agent_loop.prompts import format_issue_context
-from coding_review_agent_loop.protocol import parse_approved_followups, parse_non_blocking_followups
+from coding_review_agent_loop.github import HumanReviewRequirement, IssueComment, IssueContext
+from coding_review_agent_loop.prompts import format_human_requirements, format_issue_context
+from coding_review_agent_loop.protocol import (
+    parse_approved_followups,
+    parse_non_blocking_followups,
+    parse_signed_human_requirement_body,
+)
 
 
 class FakeRunner(Runner):
@@ -73,6 +77,8 @@ class FakeRunner(Runner):
             "headRefName": "feature/review-context",
             "baseRefName": "main",
             "headRefOid": "abc123",
+            "comments": [],
+            "reviews": [],
         }
         self.commands = []
         self.comments = []
@@ -483,6 +489,43 @@ def test_parse_agent_state_requires_marker():
         parse_agent_state("LGTM")
 
 
+def test_parse_signed_human_requirement_body_extracts_text_before_signature():
+    body = parse_signed_human_requirement_body(
+        "Please use the absolute URL.\n\n-- Human Reviewer\n\nExtra text ignored."
+    )
+
+    assert body == "Please use the absolute URL."
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "-- Human Reviewer",
+        "  -- Human Reviewer  ",
+        "-- human reviewer",
+        "-- HUMAN REVIEWER",
+    ],
+)
+def test_parse_signed_human_requirement_body_accepts_standalone_signature_variants(signature):
+    assert parse_signed_human_requirement_body(f"Required change.\n{signature}\n") == "Required change."
+
+
+@pytest.mark.parametrize(
+    "signature",
+    [
+        "-- OpenAI Codex",
+        "-- Anthropic Claude",
+        "-- Google Gemini",
+        "-- coding-review-agent-loop",
+        "Inline text -- Human Reviewer",
+    ],
+)
+def test_parse_signed_human_requirement_body_rejects_agent_and_non_standalone_signatures(
+    signature,
+):
+    assert parse_signed_human_requirement_body(f"Comment body.\n{signature}\n") is None
+
+
 def test_parse_non_blocking_followups_extracts_bullets_only_from_section():
     review = """
     Looks good.
@@ -832,6 +875,27 @@ def test_format_issue_context_truncates_oversized_newest_comment():
     assert "Older detail should not be kept instead of the newest comment." not in text
 
 
+def test_format_human_requirements_uses_distinct_high_priority_section():
+    text = format_human_requirements(
+        (
+            HumanReviewRequirement(
+                source_type="PR comment",
+                author="reviewer",
+                created_at="2026-05-18T10:00:00Z",
+                url="https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                body="Please use the absolute URL.",
+            ),
+        )
+    )
+
+    assert text.startswith("Signed Human Reviewer Requirements")
+    assert "high-priority PR requirements" in text
+    assert "latest human instruction wins" in text
+    assert "- Source: PR comment" in text
+    assert "- Author: reviewer" in text
+    assert "Please use the absolute URL." in text
+
+
 def test_issue_loop_can_use_codex_as_coder_and_claude_as_reviewer(tmp_path):
     runner = FakeRunner(
         codex_outputs=[
@@ -891,6 +955,76 @@ def test_pr_loop_runs_tests_and_merge_only_after_codex_approval(tmp_path):
     assert ["gh", "pr", "merge", "77", "--repo", "OWNER/REPO", "--merge"] in commands
 
 
+def test_pr_loop_blocks_approval_without_human_requirement_resolution_marker(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+        pr_payload={
+            "number": 77,
+            "state": "OPEN",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "title": "Improve review prompt context",
+            "headRefName": "feature/review-context",
+            "baseRefName": "main",
+            "headRefOid": "abc123",
+            "comments": [
+                {
+                    "author": {"login": "maintainer"},
+                    "createdAt": "2026-05-18T10:00:00Z",
+                    "url": "https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                    "body": "Please use the absolute URL.\n\n-- Human Reviewer",
+                }
+            ],
+            "reviews": [],
+        },
+    )
+    config = make_config(
+        tmp_path,
+        auto_merge=True,
+        test_command=("pytest", "tests/test_agent_loop.py"),
+        approved_followups="summarize",
+    )
+
+    with pytest.raises(AgentLoopError, match="Signed human reviewer requirements"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    commands = [cmd for cmd, _cwd in runner.commands]
+    assert ["pytest", "tests/test_agent_loop.py"] not in commands
+    assert ["gh", "pr", "merge", "77", "--repo", "OWNER/REPO", "--merge"] not in commands
+    assert not any(comment.startswith("Approved-review future follow-ups") for comment in runner.comments)
+
+
+def test_pr_loop_allows_approval_with_human_requirement_resolution_marker(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "LGTM.\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+        ],
+        pr_payload={
+            "number": 77,
+            "state": "OPEN",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "title": "Improve review prompt context",
+            "headRefName": "feature/review-context",
+            "baseRefName": "main",
+            "headRefOid": "abc123",
+            "comments": [
+                {
+                    "author": {"login": "maintainer"},
+                    "createdAt": "2026-05-18T10:00:00Z",
+                    "url": "https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                    "body": "Please use the absolute URL.\n\n-- Human Reviewer",
+                }
+            ],
+            "reviews": [],
+        },
+    )
+    config = make_config(tmp_path, test_command=("pytest", "tests/test_agent_loop.py"))
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    commands = [cmd for cmd, _cwd in runner.commands]
+    assert ["pytest", "tests/test_agent_loop.py"] in commands
+
+
 def test_review_prompt_includes_pr_metadata_and_suggested_commands(tmp_path):
     runner = FakeRunner(codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"])
     config = make_config(tmp_path)
@@ -921,6 +1055,42 @@ def test_review_prompt_includes_pr_metadata_and_suggested_commands(tmp_path):
     assert "### Future follow-ups" not in prompt
     assert "legacy heading `### Non-blocking follow-ups`" not in prompt
     assert "Use blocking only for issues that should prevent merge." in prompt
+
+
+def test_review_prompt_includes_signed_human_requirements(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "LGTM.\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+        ],
+        pr_payload={
+            "number": 77,
+            "state": "OPEN",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "title": "Improve review prompt context",
+            "headRefName": "feature/review-context",
+            "baseRefName": "main",
+            "headRefOid": "abc123",
+            "comments": [
+                {
+                    "author": {"login": "maintainer"},
+                    "createdAt": "2026-05-18T10:00:00Z",
+                    "url": "https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                    "body": "Please use the absolute URL.\n\n-- Human Reviewer",
+                }
+            ],
+            "reviews": [],
+        },
+    )
+    config = make_config(tmp_path)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"])
+    assert "Signed Human Reviewer Requirements" in prompt
+    assert "Please use the absolute URL." in prompt
+    assert "Signed human reviewer requirements override AI reviewer preferences" in prompt
+    assert "Verify every signed human reviewer requirement before approving." in prompt
+    assert "<!-- HUMAN_REQUIREMENTS_RESOLVED -->" in prompt
 
 
 def test_blocking_followup_prompt_reinjects_issue_context(tmp_path):
@@ -955,6 +1125,46 @@ def test_blocking_followup_prompt_reinjects_issue_context(tmp_path):
     assert "Issue context from GitHub" in followup_prompt
     assert "Title:\nSupport issue comments" in followup_prompt
     assert "Clarifying issue comment." in followup_prompt
+    assert "Needs a fix." in followup_prompt
+
+
+def test_blocking_followup_prompt_includes_human_requirements_before_ai_feedback(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Needs a fix.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "LGTM.\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        claude_outputs=["Fixed review.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
+        pr_payload={
+            "number": 77,
+            "state": "OPEN",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "title": "Improve review prompt context",
+            "headRefName": "feature/review-context",
+            "baseRefName": "main",
+            "headRefOid": "abc123",
+            "comments": [
+                {
+                    "author": {"login": "maintainer"},
+                    "createdAt": "2026-05-18T10:00:00Z",
+                    "url": "https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                    "body": "Please use the absolute URL.\n\n-- Human Reviewer",
+                }
+            ],
+            "reviews": [],
+        },
+    )
+    config = make_config(tmp_path)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    followup_prompt = next(
+        cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"] and "Address the review below" in cmd[-1]
+    )
+    assert followup_prompt.index("Signed Human Reviewer Requirements") < followup_prompt.index(
+        "Codex review:"
+    )
+    assert "Please use the absolute URL." in followup_prompt
     assert "Needs a fix." in followup_prompt
 
 

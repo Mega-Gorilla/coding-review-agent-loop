@@ -21,6 +21,7 @@ from .github import (
     IssueContext,
     create_issue,
     get_issue_context,
+    get_pr_human_requirements,
     get_pr_metadata,
     merge_pr,
     post_issue_comment,
@@ -44,7 +45,13 @@ from .prompts import (
     build_task_prompt,
     format_agent_list,
 )
-from .protocol import is_clarification_request, parse_agent_state, parse_plan_state, parse_pr_number
+from .protocol import (
+    human_requirements_resolved,
+    is_clarification_request,
+    parse_agent_state,
+    parse_plan_state,
+    parse_pr_number,
+)
 from .protocol import ApprovedFollowup, parse_approved_followups
 from .runner import Runner
 from .workdirs import active_workdir
@@ -565,7 +572,9 @@ def run_pr_loop(
         blocking_reviews: list[tuple[str, str]] = []
         same_pr_followups: list[ApprovedFollowup] = []
         round_future_followups: list[ApprovedFollowup] = []
+        approved_review_outputs: list[tuple[str, str]] = []
         pr_metadata = get_pr_metadata(runner, config=config, pr_number=pr_number)
+        human_requirements = get_pr_human_requirements(runner, config=config, pr_number=pr_number)
         for reviewer in configured_reviewers:
             reviewer_name = agent_display_name(reviewer)
             log(config, f"Round {round_number}: {reviewer_name} reviewing PR #{pr_number}")
@@ -582,6 +591,7 @@ def run_pr_loop(
                     pr_metadata=pr_metadata,
                     memory=memory,
                     issue_context=issue_context,
+                    human_requirements=human_requirements,
                 ),
                 session_id=reviewer_session_ids.get(reviewer),
             )
@@ -594,7 +604,10 @@ def run_pr_loop(
             log(config, f"Round {round_number}: {reviewer_name} state is {review_state}")
             if review_state == "blocking":
                 blocking_reviews.append((reviewer_name, review_output))
-            elif config.approved_followups != "ignore":
+                continue
+
+            approved_review_outputs.append((reviewer_name, review_output))
+            if config.approved_followups != "ignore":
                 followups = parse_approved_followups(review_output, reviewer=reviewer_name)
                 round_future_followups.extend(followups.future)
                 if followups.same_pr:
@@ -617,6 +630,19 @@ def run_pr_loop(
                         )
 
         if not blocking_reviews and not same_pr_followups:
+            if human_requirements:
+                missing_acknowledgements = [
+                    reviewer_name
+                    for reviewer_name, review_output in approved_review_outputs
+                    if not human_requirements_resolved(review_output)
+                ]
+                if missing_acknowledgements:
+                    raise AgentLoopError(
+                        "Signed human reviewer requirements remain unresolved or "
+                        "unacknowledged by approved reviewer response(s): "
+                        f"{', '.join(missing_acknowledgements)}. "
+                        "Human intervention is required."
+                    )
             approved_followups = round_future_followups
             if config.approved_followups in ("summarize", "fix-and-summarize") and approved_followups:
                 body = _format_approved_followup_summary(pr_number, approved_followups)
@@ -652,6 +678,7 @@ def run_pr_loop(
                 config,
                 memory,
                 issue_context=issue_context,
+                human_requirements=human_requirements,
             )
         else:
             # Discard future-work suggestions from non-final rounds so reviewers
@@ -673,6 +700,7 @@ def run_pr_loop(
                 config,
                 memory,
                 issue_context=issue_context,
+                human_requirements=human_requirements,
             )
         log(config, f"Round {round_number}: {coder_name} addressing reviewer feedback")
         coder_output, coder_session_id = run_agent(
