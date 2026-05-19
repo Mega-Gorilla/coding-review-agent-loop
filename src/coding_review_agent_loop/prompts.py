@@ -7,7 +7,7 @@ from typing import Sequence
 from .agents.base import AgentName
 from .agents.registry import agent_display_name, agent_signature
 from .config import AgentLoopConfig, reviewers
-from .github import IssueContext, PullRequestMetadata
+from .github import HumanReviewRequirement, IssueContext, PullRequestMetadata
 from .memory import AgentMemoryContext, format_agent_memory_context
 
 
@@ -127,6 +127,118 @@ def format_issue_context(issue_context: IssueContext, *, max_chars: int = 24_000
             "Fetch the issue discussion directly if those details are needed."
         )
     return "\n".join([*lines, "", "(none)"])
+
+
+def format_human_requirements(
+    human_requirements: Sequence[HumanReviewRequirement],
+    *,
+    max_chars: int = 12_000,
+) -> str:
+    if not human_requirements:
+        return ""
+
+    header = "\n".join(
+        [
+            "Signed Human Reviewer Requirements",
+            "",
+            "Treat these signed human reviewer comments as high-priority PR requirements. "
+            "Later human comments may supersede earlier ones; the latest human instruction wins. "
+            "If a requirement is unsafe, impossible, or contradicted by a later human instruction, "
+            "explain that explicitly instead of ignoring it.",
+        ]
+    )
+    entries = [
+        "\n".join(
+            [
+                "",
+                f"Requirement {index}:",
+                f"- Source: {requirement.source_type}",
+                f"- Author: {requirement.author or '(unknown)'}",
+                f"- Created: {requirement.created_at or '(unknown time)'}",
+                f"- URL: {requirement.url or '(unavailable)'}",
+                "",
+                requirement.body,
+            ]
+        )
+        for index, requirement in enumerate(human_requirements, start=1)
+    ]
+    full_text = header + "\n".join(entries)
+    if len(full_text) <= max_chars:
+        return full_text
+
+    kept_entries: list[str] = []
+    omitted_count = 0
+    for entry in reversed(entries):
+        candidate_entries = [entry, *kept_entries]
+        notice = (
+            "\n\n"
+            f"Older signed human requirement(s) omitted: {len(entries) - len(candidate_entries)}. "
+            "Newest requirements were kept preferentially."
+        )
+        candidate = header + notice + "\n".join(candidate_entries)
+        if len(candidate) <= max_chars:
+            kept_entries = candidate_entries
+            omitted_count = len(entries) - len(candidate_entries)
+        elif not kept_entries:
+            omitted_count = len(entries) - 1
+            notice = (
+                "\n\n"
+                f"Older signed human requirement(s) omitted: {omitted_count}. "
+                "Newest requirements were kept preferentially."
+            )
+            prefix = header + notice
+            remaining_chars = max_chars - len(prefix)
+            if remaining_chars > 0:
+                truncated_entry = _truncate_issue_text(
+                    entry,
+                    max_chars=remaining_chars,
+                    label="Newest signed human requirement",
+                )
+                if len(prefix) + len(truncated_entry) <= max_chars:
+                    return prefix + truncated_entry
+            omitted_count = len(entries)
+            break
+        else:
+            break
+    if kept_entries:
+        return (
+            header
+            + "\n\n"
+            + f"Older signed human requirement(s) omitted: {omitted_count}. "
+            "Newest requirements were kept preferentially."
+            + "\n".join(kept_entries)
+        )
+    return (
+        header
+        + "\n\n"
+        + f"All {omitted_count} signed human requirement(s) were omitted to keep this prompt bounded. "
+        "Fetch the PR discussion directly before approving."
+    )
+
+
+def _human_requirements_block(
+    human_requirements: Sequence[HumanReviewRequirement] | None,
+) -> str:
+    if not human_requirements:
+        return ""
+    return f"{format_human_requirements(human_requirements)}\n"
+
+
+def _human_requirements_review_guidance(
+    human_requirements: Sequence[HumanReviewRequirement] | None,
+) -> str:
+    if not human_requirements:
+        return ""
+    return """Signed human reviewer requirements override AI reviewer preferences unless they
+are unsafe, impossible, or contradicted by a later signed human instruction.
+Verify every signed human reviewer requirement before approving. If all signed
+human reviewer requirements are addressed or explicitly resolved, an approved
+review must include exactly:
+
+<!-- HUMAN_REQUIREMENTS_RESOLVED -->
+
+If any signed human reviewer requirement is unresolved, return blocking.
+"""
 
 
 def _issue_context_block(issue_context: IssueContext | None) -> str:
@@ -405,6 +517,7 @@ def build_review_prompt(
     pr_metadata: PullRequestMetadata | None = None,
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
+    human_requirements: Sequence[HumanReviewRequirement] | None = None,
 ) -> str:
     coder_name = agent_display_name(config.coder)
     reviewer_signature = agent_signature(reviewer)
@@ -423,6 +536,7 @@ def build_review_prompt(
     base_branch = metadata.base_branch or "(unknown)"
     head_sha = metadata.head_sha or "(unknown)"
     url_line = f"- URL: {metadata.url}\n" if metadata.url else ""
+    human_requirements_guidance = _human_requirements_review_guidance(human_requirements)
     if config.approved_followups == "ignore":
         followup_guidance = """Do not include Same-PR follow-ups, Future follow-ups, or legacy
 Non-blocking follow-ups sections in approved reviews; this run is configured to
@@ -478,6 +592,7 @@ branch. Do not report findings based on untracked files unless those files are
 present in the PR diff.
 {_scratch_file_guidance()}
 {_issue_context_block(issue_context)}
+{_human_requirements_block(human_requirements)}
 {_memory_block(memory)}
 
 Suggested commands:
@@ -491,6 +606,7 @@ commands, or produce a blocking review explaining the limitation.
 Focus on correctness, security, test coverage, and maintainability. Review the
 full diff and any existing PR discussion. Do not make code changes in this
 review step; report blocking findings if {coder_name} needs to fix anything.
+{human_requirements_guidance}
 {followup_guidance}
 Use blocking only for issues that should prevent merge.
 All configured reviewers ({reviewer_group}) must approve in the same round for
@@ -516,6 +632,7 @@ def build_followup_prompt(
     config: AgentLoopConfig,
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
+    human_requirements: Sequence[HumanReviewRequirement] | None = None,
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
@@ -526,6 +643,7 @@ needed, implement fixes, run relevant tests, commit, and push to the same PR.
 Do not create a new PR.
 {_scratch_file_guidance()}
 {_issue_context_block(issue_context)}
+{_human_requirements_block(human_requirements)}
 {_memory_block(memory)}
 
 {reviewer_name} review:
@@ -550,6 +668,7 @@ def build_same_pr_followup_prompt(
     config: AgentLoopConfig,
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
+    human_requirements: Sequence[HumanReviewRequirement] | None = None,
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
@@ -563,6 +682,7 @@ current PR. Keep the change narrowly scoped to the listed items. Do not take on
 larger redesigns or unrelated future work; call that out instead.
 {_scratch_file_guidance()}
 {_issue_context_block(issue_context)}
+{_human_requirements_block(human_requirements)}
 {_memory_block(memory)}
 
 Same-PR follow-ups:
