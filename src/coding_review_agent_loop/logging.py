@@ -19,5 +19,5 @@ def log(config: AgentLoopConfig, message: str) -> None:
 
 
 def agent_log_path(config: AgentLoopConfig, agent: str) -> Path:
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     return config.log_dir / f"{stamp}-{agent}.log"

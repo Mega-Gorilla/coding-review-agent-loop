@@ -65,10 +65,16 @@ class ClaudeBackend:
             log_path=log_path,
             label="Claude",
             progress_interval_seconds=config.progress_interval_seconds,
+            check=False,
         )
         log(config, f"Claude finished; log: {log_path}")
         text, new_session_id = _parse_claude_output(result.stdout)
-        return AgentResult(text=read_public_response_file(response_path) or text, session_id=new_session_id)
+        return AgentResult(
+            text=read_public_response_file(response_path) or text,
+            session_id=new_session_id,
+            log_path=log_path,
+            returncode=result.returncode,
+        )
 
 
 BACKEND = ClaudeBackend()

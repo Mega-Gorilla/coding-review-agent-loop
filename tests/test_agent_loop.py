@@ -99,6 +99,12 @@ class FakeRunner(Runner):
         self.issue_urls = list(issue_urls) if issue_urls is not None else None
         self.public_response_outputs = list(public_response_outputs or [])
 
+    def _next_agent_output(self, outputs):
+        output = outputs.pop(0)
+        if isinstance(output, tuple):
+            return output
+        return output, 0
+
     def _record_command(self, args, cwd):
         cmd = [str(arg) for arg in args]
         cwd_path = Path(cwd)
@@ -133,24 +139,24 @@ class FakeRunner(Runner):
         ensure_log_dir_ignored(log_path.parent)
 
         if cmd[:1] == ["claude"]:
-            output = self.claude_outputs.pop(0)
+            output, returncode = self._next_agent_output(self.claude_outputs)
             self._maybe_write_public_response_file(cmd)
             log_path.write_text(f"$ {' '.join(cmd)}\n\n{output}", encoding="utf-8")
-            return CommandResult(cmd, cwd_path, output, "", 0)
+            return CommandResult(cmd, cwd_path, output, "", returncode)
 
         if cmd[:2] == ["codex", "exec"]:
-            output = self.codex_outputs.pop(0)
+            output, returncode = self._next_agent_output(self.codex_outputs)
             if "--output-last-message" in cmd:
                 out_path = Path(cmd[cmd.index("--output-last-message") + 1])
                 out_path.write_text(output, encoding="utf-8")
             log_path.write_text(f"$ {' '.join(cmd)}\n\ncodex completed", encoding="utf-8")
-            return CommandResult(cmd, cwd_path, "codex completed", "", 0)
+            return CommandResult(cmd, cwd_path, "codex completed", "", returncode)
 
         if cmd[:1] == ["gemini"]:
-            output = self.gemini_outputs.pop(0)
+            output, returncode = self._next_agent_output(self.gemini_outputs)
             self._maybe_write_public_response_file(cmd)
             log_path.write_text(f"$ {' '.join(cmd)}\n\n{output}", encoding="utf-8")
-            return CommandResult(cmd, cwd_path, output, "", 0)
+            return CommandResult(cmd, cwd_path, output, "", returncode)
 
         return self.run(args, cwd=cwd, check=check)
 
@@ -158,14 +164,15 @@ class FakeRunner(Runner):
         cmd, cwd_path = self._record_command(args, cwd)
 
         if cmd[:1] == ["claude"]:
-            return CommandResult(cmd, cwd_path, self.claude_outputs.pop(0), "", 0)
+            output, returncode = self._next_agent_output(self.claude_outputs)
+            return CommandResult(cmd, cwd_path, output, "", returncode)
 
         if cmd[:2] == ["codex", "exec"]:
-            output = self.codex_outputs.pop(0)
+            output, returncode = self._next_agent_output(self.codex_outputs)
             if "--output-last-message" in cmd:
                 out_path = Path(cmd[cmd.index("--output-last-message") + 1])
                 out_path.write_text(output, encoding="utf-8")
-            return CommandResult(cmd, cwd_path, "", "", 0)
+            return CommandResult(cmd, cwd_path, "", "", returncode)
 
         if cmd[:3] == ["gh", "pr", "comment"]:
             if "--body-file" in cmd:
@@ -295,6 +302,8 @@ def make_config(tmp_path, *, create_dirs=True, **overrides):
         "quiet": True,
         "log_dir": tmp_path / "logs",
         "progress_interval_seconds": 30,
+        "agent_max_retries": 2,
+        "agent_retry_backoff_seconds": (1, 1),
         "agent_memory": True,
         "refresh_agent_memory": False,
         "agent_memory_dir": tmp_path / "claude" / ".agent-loop" / "memory",
@@ -987,6 +996,91 @@ def test_pr_loop_runs_tests_and_merge_only_after_codex_approval(tmp_path):
         '[.check_runs[] | select(.name == "test")] | if length == 0 then "pending" else .[0].conclusion // .[0].status end',
     ] in commands
     assert ["gh", "pr", "merge", "77", "--repo", "OWNER/REPO", "--merge"] in commands
+
+
+def test_pr_loop_does_not_post_gemini_diagnostics_without_agent_state(tmp_path):
+    diagnostic = "[ERROR] Invalid stream: The model returned an empty response or malformed tool call."
+    runner = FakeRunner(gemini_outputs=[diagnostic, diagnostic, diagnostic])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    with pytest.raises(AgentLoopError, match="No review result was recorded"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert runner.comments == []
+    assert not any(diagnostic in comment for comment in runner.comments)
+    sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
+    assert sleep_commands == [["sleep", "1"], ["sleep", "1"]]
+
+
+def test_plan_review_does_not_post_diagnostics_without_plan_state(tmp_path):
+    diagnostic = "[ERROR] Invalid stream: The model returned an empty response or malformed tool call."
+    runner = FakeRunner(
+        claude_outputs=[
+            "Plan:\n- Update the CLI.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        gemini_outputs=[diagnostic, diagnostic, diagnostic],
+    )
+    config = make_config(tmp_path, reviewer="gemini")
+
+    with pytest.raises(AgentLoopError, match="AGENT_PLAN_STATE"):
+        run_issue_loop(runner, issue_number=56, config=config, plan_first=True)
+
+    assert len(runner.comments) == 1
+    assert runner.comments[0].startswith("Plan:")
+    assert not any(diagnostic in comment for comment in runner.comments)
+
+
+def test_pr_loop_retries_transient_gemini_diagnostic_and_posts_only_valid_response(tmp_path):
+    diagnostic = "[ERROR] Invalid stream: The model returned an empty response or malformed tool call."
+    valid = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    runner = FakeRunner(gemini_outputs=[diagnostic, valid])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert runner.comments == [valid]
+    assert diagnostic not in runner.comments[0]
+    sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
+    assert sleep_commands == [["sleep", "1"]]
+
+
+def test_pr_loop_exhausted_transient_retry_reports_attempt_logs(tmp_path):
+    diagnostic = "[ERROR] Invalid stream: The model returned an empty response or malformed tool call."
+    runner = FakeRunner(gemini_outputs=[(diagnostic, 1), (diagnostic, 1), (diagnostic, 1)])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    with pytest.raises(AgentLoopError) as exc_info:
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    message = str(exc_info.value)
+    assert "No review result was recorded" in message
+    assert "Attempt logs:" in message
+    assert "gemini.log" in message
+    assert runner.comments == []
+
+
+def test_pr_loop_does_not_retry_quota_failure(tmp_path):
+    output = "Quota exceeded: billing credits are exhausted."
+    runner = FakeRunner(gemini_outputs=[output])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    with pytest.raises(AgentLoopError, match="No review result was recorded"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert runner.comments == []
+    assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
+
+
+def test_pr_loop_does_not_retry_normal_missing_marker_response(tmp_path):
+    output = "I reviewed the PR and it looks fine."
+    runner = FakeRunner(gemini_outputs=[output])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    with pytest.raises(AgentLoopError, match="AGENT_STATE"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert runner.comments == []
+    assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
 
 
 def test_pr_loop_blocks_approval_without_human_requirement_resolution_marker(tmp_path):

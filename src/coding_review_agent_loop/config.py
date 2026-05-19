@@ -46,6 +46,8 @@ class AgentLoopConfig:
     quiet: bool
     log_dir: Path
     progress_interval_seconds: int
+    agent_max_retries: int
+    agent_retry_backoff_seconds: tuple[int, ...]
     agent_memory: bool
     refresh_agent_memory: bool
     agent_memory_dir: Path
@@ -410,6 +412,10 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
         raise AgentLoopError("--ci-poll-interval-seconds must be greater than zero.")
     if args.progress_interval_seconds <= 0:
         raise AgentLoopError("--progress-interval-seconds must be greater than zero.")
+    if args.agent_max_retries < 0:
+        raise AgentLoopError("--agent-max-retries must be zero or positive.")
+    if any(delay <= 0 for delay in args.agent_retry_backoff_seconds):
+        raise AgentLoopError("--agent-retry-backoff-seconds values must be greater than zero.")
     return AgentLoopConfig(
         repo=repo,
         claude_dir=claude_dir,
@@ -448,6 +454,8 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
         quiet=args.quiet,
         log_dir=(primary_dir / args.log_dir if not args.log_dir.is_absolute() else args.log_dir),
         progress_interval_seconds=args.progress_interval_seconds,
+        agent_max_retries=args.agent_max_retries,
+        agent_retry_backoff_seconds=tuple(args.agent_retry_backoff_seconds),
         agent_memory=args.agent_memory,
         refresh_agent_memory=args.refresh_agent_memory,
         agent_memory_dir=_resolve_agent_memory_dir(
