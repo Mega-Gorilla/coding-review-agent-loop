@@ -11,10 +11,6 @@ from typing import Sequence
 from .agents.registry import (
     agent_display_name,
     agent_signature,
-    run_agent,
-    run_claude,
-    run_codex,
-    run_gemini,
 )
 from .config import (
     AgentLoopConfig,

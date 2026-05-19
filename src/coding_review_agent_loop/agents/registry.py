@@ -40,30 +40,6 @@ def default_agent_args(agent: AgentName, *, dangerous: bool) -> tuple[str, ...]:
     return get_backend(agent).default_args(dangerous=dangerous)
 
 
-def run_agent(
-    runner: Runner,
-    *,
-    agent: AgentName,
-    config: AgentLoopConfig,
-    prompt: str,
-    session_id: str | None = None,
-) -> tuple[str, str | None]:
-    result = run_agent_result(
-        runner,
-        agent=agent,
-        config=config,
-        prompt=prompt,
-        session_id=session_id,
-    )
-    if result.returncode != 0:
-        log_context = f"\nlog: {result.log_path}" if result.log_path is not None else ""
-        raise AgentLoopError(
-            f"{agent_display_name(agent)} failed before producing a valid response "
-            f"(exit {result.returncode}).{log_context}"
-        )
-    return result.text, result.session_id
-
-
 def run_agent_result(
     runner: Runner,
     *,
@@ -73,22 +49,3 @@ def run_agent_result(
     session_id: str | None = None,
 ) -> AgentResult:
     return get_backend(agent).run(runner, config, prompt, session_id=session_id)
-
-
-def run_claude(
-    runner: Runner,
-    *,
-    config: AgentLoopConfig,
-    prompt: str,
-    session_id: str | None = None,
-) -> tuple[str, str | None]:
-    result = CLAUDE_BACKEND.run(runner, config, prompt, session_id=session_id)
-    return result.text, result.session_id
-
-
-def run_codex(runner: Runner, *, config: AgentLoopConfig, prompt: str) -> str:
-    return CODEX_BACKEND.run(runner, config, prompt).text
-
-
-def run_gemini(runner: Runner, *, config: AgentLoopConfig, prompt: str) -> str:
-    return GEMINI_BACKEND.run(runner, config, prompt).text
