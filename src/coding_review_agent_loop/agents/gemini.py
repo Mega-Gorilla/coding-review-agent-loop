@@ -100,7 +100,15 @@ class GeminiBackend:
         prompt: str,
         session_id: str | None = None,
     ) -> AgentResult:
-        response_path = public_response_path(config, "gemini")
+        # Gemini CLI only allows file writes inside the trusted workspace (or
+        # its own private temp dir, whose path we do not know ahead of time).
+        # Keep the response file inside .git so it is writable but never dirties
+        # the reviewed worktree.
+        response_path = public_response_path(
+            config,
+            "gemini",
+            root=config.gemini_dir / ".git" / "agent-loop" / "responses",
+        )
         log_path = agent_log_path(config, "gemini")
         log(config, f"Starting Gemini in {config.gemini_dir}; log: {log_path}; response: {response_path}")
         args = [

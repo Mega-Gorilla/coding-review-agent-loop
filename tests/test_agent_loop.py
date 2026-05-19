@@ -1044,6 +1044,35 @@ def test_pr_loop_retries_transient_gemini_diagnostic_and_posts_only_valid_respon
     assert sleep_commands == [["sleep", "1"]]
 
 
+def test_pr_loop_retries_plain_agent_state_near_miss_once(tmp_path):
+    near_miss = "LGTM.\nAGENT_STATE: approved\n-- Google Gemini"
+    valid = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    runner = FakeRunner(gemini_outputs=[near_miss, valid])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert runner.comments == [valid]
+    sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
+    assert sleep_commands == [["sleep", "1"]]
+
+
+def test_gemini_public_response_file_is_inside_git_dir(tmp_path):
+    valid = "LGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    runner = FakeRunner(gemini_outputs=["stdout should be ignored"], public_response_outputs=[valid])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert runner.comments == [valid]
+    gemini_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["gemini"]]
+    assert len(gemini_commands) == 1
+    prompt = "\n".join(gemini_commands[0])
+    expected_prefix = str(config.gemini_dir / ".git" / "agent-loop" / "responses" / "gemini")
+    assert expected_prefix in prompt
+    assert "/tmp/coding-review-agent-loop/responses/" not in prompt
+
+
 def test_pr_loop_exhausted_transient_retry_reports_attempt_logs(tmp_path):
     diagnostic = "[ERROR] Invalid stream: The model returned an empty response or malformed tool call."
     runner = FakeRunner(gemini_outputs=[(diagnostic, 1), (diagnostic, 1), (diagnostic, 1)])
@@ -3192,7 +3221,7 @@ def test_gemini_review_loop_prefers_public_response_file_over_stdout(tmp_path):
 
     gemini_call = next(cmd for cmd, _cwd in runner.commands if cmd[:1] == ["gemini"])
     assert "PUBLIC RESPONSE FILE:" in gemini_call[2]
-    assert "/coding-review-agent-loop/responses/OWNER-REPO/gemini/" in gemini_call[2]
+    assert str(config.gemini_dir / ".git" / "agent-loop" / "responses" / "gemini") in gemini_call[2]
     assert runner.comments == ["LGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"]
 
 

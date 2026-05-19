@@ -46,12 +46,22 @@ def _safe_repo_slug(repo: str) -> str:
     return repo.replace("/", "-").replace(":", "-")
 
 
-def public_response_path(config: AgentLoopConfig, agent: AgentName) -> Path:
-    path = (
-        Path(tempfile.gettempdir())
+def public_response_path(
+    config: AgentLoopConfig,
+    agent: AgentName,
+    *,
+    root: Path | None = None,
+) -> Path:
+    base_dir = (
+        root
+        if root is not None
+        else Path(tempfile.gettempdir())
         / "coding-review-agent-loop"
         / "responses"
         / _safe_repo_slug(config.repo)
+    )
+    path = (
+        base_dir
         / agent
         / f"{uuid.uuid4().hex}.md"
     )
