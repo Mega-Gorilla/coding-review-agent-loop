@@ -14,6 +14,7 @@ from .config import (
     ensure_agent_workdirs,
     reviewers,
     sync_coder_base_before_implementation,
+    sync_reviewer_pr_before_review,
 )
 from .errors import AgentLoopError
 from .github import (
@@ -568,6 +569,7 @@ def run_pr_loop(
         for reviewer in configured_reviewers:
             reviewer_name = agent_display_name(reviewer)
             log(config, f"Round {round_number}: {reviewer_name} reviewing PR #{pr_number}")
+            sync_reviewer_pr_before_review(config, runner, reviewer, pr_number, pr_metadata)
             review_output, new_session_id = run_agent(
                 runner,
                 agent=reviewer,

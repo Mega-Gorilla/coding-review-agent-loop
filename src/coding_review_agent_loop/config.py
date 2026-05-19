@@ -13,10 +13,10 @@ from pathlib import Path
 from .agents.base import AgentName
 from .agents.registry import default_agent_args
 from .errors import AgentLoopError
-from .github import detect_repo
+from .github import PullRequestMetadata, detect_repo
 from .logging import log
 from .runner import Runner
-from .workdirs import active_workdir
+from .workdirs import active_workdir, agent_workdir
 
 
 @dataclass(frozen=True)
@@ -264,6 +264,72 @@ def sync_coder_base_before_implementation(config: AgentLoopConfig, runner: Runne
         config=config,
         runner=runner,
     )
+
+
+def sync_reviewer_pr_before_review(
+    config: AgentLoopConfig,
+    runner: Runner,
+    reviewer: AgentName,
+    pr_number: int,
+    pr_metadata: PullRequestMetadata,
+) -> None:
+    """Refresh a reviewer checkout to the current PR head before invoking the reviewer."""
+    path = agent_workdir(config, reviewer)
+    option_name = _agent_dir_option(reviewer)
+    default_owned = reviewer in set(config.auto_agent_dirs)
+    label = f"Default {reviewer} workdir" if default_owned else option_name
+    pr_ref = f"refs/remotes/origin/pr/{pr_number}"
+
+    if runner.dry_run:
+        _run_git(runner, path, ("fetch", "origin"))
+        _run_git(runner, path, ("fetch", "origin", f"pull/{pr_number}/head:{pr_ref}"))
+        _run_git(runner, path, ("checkout", "--detach", pr_ref))
+        _run_git(runner, path, ("rev-parse", "HEAD"))
+        _run_git(runner, path, ("status", "--short", "--branch"))
+        log(config, f"{label} would refresh PR #{pr_number} before review")
+        return
+
+    if not path.is_dir():
+        raise AgentLoopError(f"{label} does not exist or is not a directory: {path}")
+
+    git_check = _run_git(runner, path, ("rev-parse", "--is-inside-work-tree"), check=False)
+    if git_check.returncode != 0 or git_check.stdout.strip() != "true":
+        if not default_owned:
+            raise AgentLoopError(
+                f"{label} is not a git checkout: {path}. "
+                "Use a clean checkout for PR review."
+            )
+        raise AgentLoopError(
+            f"{label} exists but is not a git checkout: {path}. "
+            "Remove it or pass an explicit agent directory."
+        )
+
+    _validate_repo_remote(path, label=label, config=config, runner=runner)
+    _clean_or_reject_checkout(
+        path,
+        label=label,
+        default_owned=default_owned,
+        config=config,
+        runner=runner,
+    )
+
+    _run_git(runner, path, ("fetch", "origin"))
+    _run_git(runner, path, ("fetch", "origin", f"pull/{pr_number}/head:{pr_ref}"))
+    _run_git(runner, path, ("checkout", "--detach", pr_ref))
+    local_head = _run_git(runner, path, ("rev-parse", "HEAD")).stdout.strip()
+    branch_state = _run_git(runner, path, ("status", "--short", "--branch")).stdout.strip()
+    advertised_head = (pr_metadata.head_sha or "").strip()
+    if advertised_head and local_head != advertised_head and not runner.dry_run:
+        raise AgentLoopError(
+            f"{label} at {path} is at {local_head or '(unknown)'}, "
+            f"but PR #{pr_number} metadata advertises head SHA {advertised_head}."
+        )
+    if advertised_head:
+        log(config, f"{label} refreshed for PR #{pr_number}: HEAD {local_head} (expected {advertised_head})")
+    else:
+        log(config, f"{label} refreshed for PR #{pr_number}: HEAD {local_head}; no PR head SHA available")
+    if branch_state:
+        log(config, f"{label} branch state before review: {branch_state}")
 
 
 def ensure_agent_workdirs(config: AgentLoopConfig, runner: Runner) -> None:
