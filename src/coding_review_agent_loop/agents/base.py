@@ -20,6 +20,8 @@ AgentName = Literal["claude", "codex", "gemini"]
 class AgentResult:
     text: str
     session_id: str | None = None
+    log_path: Path | None = None
+    returncode: int = 0
 
 
 class AgentBackend(Protocol):

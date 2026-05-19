@@ -48,12 +48,12 @@ class CodexBackend:
                 cwd=config.codex_dir,
             )
             log(config, f"Codex finished; log: {log_path}")
-            return AgentResult(text=result.stdout)
+            return AgentResult(text=result.stdout, log_path=log_path, returncode=result.returncode)
 
         with tempfile.NamedTemporaryFile("r", encoding="utf-8", delete=False) as handle:
             output_path = handle.name
         try:
-            runner.run_with_log(
+            result = runner.run_with_log(
                 [
                     config.codex_cmd,
                     "exec",
@@ -68,10 +68,13 @@ class CodexBackend:
                 log_path=log_path,
                 label="Codex",
                 progress_interval_seconds=config.progress_interval_seconds,
+                check=False,
             )
-            output = Path(output_path).read_text(encoding="utf-8")
+            output = Path(output_path).read_text(encoding="utf-8") if Path(output_path).exists() else ""
+            if not output:
+                output = result.stdout
             log(config, f"Codex finished; log: {log_path}")
-            return AgentResult(text=output)
+            return AgentResult(text=output, log_path=log_path, returncode=result.returncode)
         finally:
             try:
                 os.unlink(output_path)

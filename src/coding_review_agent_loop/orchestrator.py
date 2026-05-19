@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from .agents.base import AgentName
-from .agents.registry import agent_display_name, run_agent
+from .agents.base import AgentName, AgentResult
+from .agents.registry import agent_display_name, run_agent_result
 from .config import (
     AgentLoopConfig,
     ensure_agent_workdirs,
@@ -57,6 +57,161 @@ from .runner import Runner
 from .workdirs import active_workdir
 
 MAX_APPROVED_FOLLOWUP_ISSUES = 3
+
+TRANSIENT_AGENT_OUTPUT_RE = re.compile(
+    r"Invalid stream|empty response|malformed tool call|"
+    r"network (?:reset|timeout)|connection (?:reset|timed out|timeout)|"
+    r"\btimed out\b|\btimeout\b|"
+    r"\b5\d\d\b|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout",
+    re.I,
+)
+NON_RETRYABLE_AGENT_OUTPUT_RE = re.compile(
+    r"auth(?:entication|orization)?|unauthorized|forbidden|invalid api key|"
+    r"credit|quota|rate limit|billing|dirty (?:checkout|workdir|working tree)",
+    re.I,
+)
+
+
+@dataclass(frozen=True)
+class ValidatedAgentResponse:
+    text: str
+    session_id: str | None
+    marker_value: object
+
+
+def _agent_log_context(log_paths: Sequence[object]) -> str:
+    paths = [str(path) for path in log_paths if path is not None]
+    if not paths:
+        return ""
+    return "\nAttempt logs:\n" + "\n".join(f"- {path}" for path in paths)
+
+
+def _is_transient_agent_output(text: str) -> bool:
+    return bool(TRANSIENT_AGENT_OUTPUT_RE.search(text)) and not bool(
+        NON_RETRYABLE_AGENT_OUTPUT_RE.search(text)
+    )
+
+
+def _retry_delay(config: AgentLoopConfig, retry_index: int) -> int:
+    delays = config.agent_retry_backoff_seconds
+    if not delays:
+        return 1
+    return delays[min(retry_index - 1, len(delays) - 1)]
+
+
+def _format_invalid_agent_response_error(
+    *,
+    agent_name: str,
+    marker_description: str,
+    reason: str,
+    result: AgentResult | None,
+    log_paths: Sequence[object],
+) -> str:
+    exit_context = ""
+    if result is not None and result.returncode != 0:
+        exit_context = f" Agent exit code: {result.returncode}."
+    log_context = _agent_log_context(log_paths)
+    return (
+        f"{agent_name} failed before producing a valid public response. "
+        "No review result was recorded. "
+        f"Required marker: {marker_description}. Reason: {reason}.{exit_context}"
+        f"{log_context}"
+    )
+
+
+def _run_validated_agent(
+    runner: Runner,
+    *,
+    agent: AgentName,
+    config: AgentLoopConfig,
+    prompt: str,
+    marker_description: str,
+    validate: Callable[[str], object],
+    session_id: str | None = None,
+) -> ValidatedAgentResponse:
+    agent_name = agent_display_name(agent)
+    log_paths: list[object] = []
+    max_attempts = config.agent_max_retries + 1
+    last_error = f"{agent_name} produced no output."
+    last_result: AgentResult | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        result = run_agent_result(
+            runner,
+            agent=agent,
+            config=config,
+            prompt=prompt,
+            session_id=session_id,
+        )
+        last_result = result
+        if result.log_path is not None:
+            log_paths.append(result.log_path)
+        text = result.text
+
+        should_retry = False
+        if result.returncode != 0:
+            last_error = f"agent command exited with {result.returncode}"
+            should_retry = _is_transient_agent_output(text)
+        elif not text.strip():
+            last_error = "agent response was empty"
+            should_retry = _is_transient_agent_output(text)
+        else:
+            try:
+                marker_value = validate(text)
+            except AgentLoopError as exc:
+                last_error = str(exc)
+                should_retry = _is_transient_agent_output(text)
+            else:
+                return ValidatedAgentResponse(
+                    text=text,
+                    session_id=result.session_id,
+                    marker_value=marker_value,
+                )
+
+        if should_retry and attempt < max_attempts:
+            delay = _retry_delay(config, attempt)
+            log(
+                config,
+                f"{agent_name} produced a transient invalid response; "
+                f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})",
+            )
+            runner.run(("sleep", str(delay)), cwd=active_workdir(config))
+            continue
+        break
+
+    raise AgentLoopError(
+        _format_invalid_agent_response_error(
+            agent_name=agent_name,
+            marker_description=marker_description,
+            reason=last_error,
+            result=last_result,
+            log_paths=log_paths,
+        )
+    )
+
+
+def _require_pr_number(text: str) -> int:
+    pr_number = parse_pr_number(text)
+    if pr_number is None:
+        raise AgentLoopError("Agent response did not include a PR marker or PR URL.")
+    return pr_number
+
+
+def _require_pr_number_or_clarification(text: str) -> int | str:
+    pr_number = parse_pr_number(text)
+    if pr_number is not None:
+        return pr_number
+    if is_clarification_request(text):
+        return "clarification"
+    raise AgentLoopError(
+        "Agent response did not include a PR marker, PR URL, or clarification marker."
+    )
+
+
+def _require_plan_state_or_clarification(text: str) -> str:
+    if is_clarification_request(text):
+        return "clarification"
+    return parse_plan_state(text)
 
 
 @dataclass(frozen=True)
@@ -272,20 +427,21 @@ def _run_plan_first_loop(
     reviewer_session_ids: dict[AgentName, str | None] = {}
 
     log(config, f"Planning issue #{issue_number}: invoking {coder_name}")
-    plan_output, coder_session_id = run_agent(
+    plan_response = _run_validated_agent(
         runner,
         agent=config.coder,
         config=config,
         prompt=build_issue_plan_prompt(issue_number, config, memory, issue_context=issue_context),
+        marker_description="<!-- AGENT_PLAN_STATE: approved|blocking --> or <!-- AGENT_CLARIFY -->",
+        validate=_require_plan_state_or_clarification,
     )
-    if not plan_output.strip():
-        raise AgentLoopError(f"{coder_name} produced an empty response.")
+    plan_output = plan_response.text
+    coder_session_id = plan_response.session_id
     if is_clarification_request(plan_output):
         raise AgentLoopError(
             f"{coder_name} requested clarification during planning; human intervention required.\n\n"
             f"{coder_name}'s questions:\n{plan_output}"
         )
-    parse_plan_state(plan_output)
     post_issue_comment(runner, config=config, issue_number=issue_number, body=plan_output)
     current_plan = plan_output
 
@@ -294,7 +450,7 @@ def _run_plan_first_loop(
         for reviewer in configured_reviewers:
             reviewer_name = agent_display_name(reviewer)
             log(config, f"Planning round {round_number}: {reviewer_name} reviewing issue #{issue_number}")
-            review_output, new_session_id = run_agent(
+            review_response = _run_validated_agent(
                 runner,
                 agent=reviewer,
                 config=config,
@@ -308,12 +464,13 @@ def _run_plan_first_loop(
                     issue_context=issue_context,
                 ),
                 session_id=reviewer_session_ids.get(reviewer),
+                marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+                validate=parse_plan_state,
             )
-            reviewer_session_ids[reviewer] = new_session_id
-            if not review_output.strip():
-                raise AgentLoopError(f"{reviewer_name} produced an empty response.")
+            review_output = review_response.text
+            reviewer_session_ids[reviewer] = review_response.session_id
+            review_state = str(review_response.marker_value)
             post_issue_comment(runner, config=config, issue_number=issue_number, body=review_output)
-            review_state = parse_plan_state(review_output)
             log(config, f"Planning round {round_number}: {reviewer_name} state is {review_state}")
             if review_state == "blocking":
                 blocking_reviews.append((reviewer_name, review_output))
@@ -333,7 +490,7 @@ def _run_plan_first_loop(
 
             sync_coder_base_before_implementation(config, runner)
             log(config, f"Planning approved; invoking {coder_name} to implement issue #{issue_number}")
-            coder_output, coder_session_id = run_agent(
+            coder_response = _run_validated_agent(
                 runner,
                 agent=config.coder,
                 config=config,
@@ -345,12 +502,12 @@ def _run_plan_first_loop(
                     issue_context=issue_context,
                 ),
                 session_id=coder_session_id,
+                marker_description="<!-- AGENT_PR: <number> --> or PR URL",
+                validate=_require_pr_number,
             )
-            pr_number = parse_pr_number(coder_output)
-            if pr_number is None:
-                raise AgentLoopError(
-                    f"{coder_name} output did not include a PR marker or PR URL."
-                )
+            coder_output = coder_response.text
+            coder_session_id = coder_response.session_id
+            pr_number = int(coder_response.marker_value)
             log(config, f"{coder_name} reported PR #{pr_number}; validating it is open")
             validate_open_pr(runner, config=config, pr_number=pr_number)
             post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
@@ -373,7 +530,7 @@ def _run_plan_first_loop(
             f"{name} plan review:\n\n{review}" for name, review in blocking_reviews
         )
         log(config, f"Planning round {round_number}: {coder_name} revising the plan")
-        current_plan, coder_session_id = run_agent(
+        plan_response = _run_validated_agent(
             runner,
             agent=config.coder,
             config=config,
@@ -387,10 +544,11 @@ def _run_plan_first_loop(
                 issue_context=issue_context,
             ),
             session_id=coder_session_id,
+            marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+            validate=parse_plan_state,
         )
-        if not current_plan.strip():
-            raise AgentLoopError(f"{coder_name} produced an empty response.")
-        parse_plan_state(current_plan)
+        current_plan = plan_response.text
+        coder_session_id = plan_response.session_id
         post_issue_comment(runner, config=config, issue_number=issue_number, body=current_plan)
 
     raise AgentLoopError(
@@ -423,17 +581,17 @@ def run_issue_loop(
         )
 
     sync_coder_base_before_implementation(config, runner)
-    coder_output, coder_session_id = run_agent(
+    coder_response = _run_validated_agent(
         runner,
         agent=config.coder,
         config=config,
         prompt=build_issue_prompt(issue_number, config, memory, issue_context=issue_context),
+        marker_description="<!-- AGENT_PR: <number> --> or PR URL",
+        validate=_require_pr_number,
     )
-    pr_number = parse_pr_number(coder_output)
-    if pr_number is None:
-        raise AgentLoopError(
-            f"{agent_display_name(config.coder)} output did not include a PR marker or PR URL."
-        )
+    coder_output = coder_response.text
+    coder_session_id = coder_response.session_id
+    pr_number = int(coder_response.marker_value)
     log(config, f"{agent_display_name(config.coder)} reported PR #{pr_number}; validating it is open")
     validate_open_pr(runner, config=config, pr_number=pr_number)
 
@@ -492,18 +650,20 @@ def run_task_loop(
         if attempt == 0:
             sync_coder_base_before_implementation(config, runner)
         log(config, f"Task attempt {attempt + 1}: invoking {coder_name}")
-        coder_output, session_id = run_agent(
+        coder_response = _run_validated_agent(
             runner,
             agent=config.coder,
             config=config,
             prompt=prompt,
             session_id=session_id,
+            marker_description="<!-- AGENT_PR: <number> -->, PR URL, or <!-- AGENT_CLARIFY -->",
+            validate=_require_pr_number_or_clarification,
         )
-        if not coder_output.strip():
-            raise AgentLoopError(f"{coder_name} produced an empty response.")
+        coder_output = coder_response.text
+        session_id = coder_response.session_id
 
-        pr_number = parse_pr_number(coder_output)
-        if pr_number is not None:
+        if isinstance(coder_response.marker_value, int):
+            pr_number = coder_response.marker_value
             log(config, f"{coder_name} reported PR #{pr_number}; validating it is open")
             validate_open_pr(runner, config=config, pr_number=pr_number)
             post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
@@ -513,12 +673,6 @@ def run_task_loop(
                 config=config,
                 coder_session_id=session_id,
                 workdirs_ready=True,
-            )
-
-        if not is_clarification_request(coder_output):
-            raise AgentLoopError(
-                f"{coder_name} output did not include a PR marker, PR URL, "
-                "or clarification marker."
             )
 
         if not interactive:
@@ -579,7 +733,7 @@ def run_pr_loop(
             reviewer_name = agent_display_name(reviewer)
             log(config, f"Round {round_number}: {reviewer_name} reviewing PR #{pr_number}")
             sync_reviewer_pr_before_review(config, runner, reviewer, pr_number, pr_metadata)
-            review_output, new_session_id = run_agent(
+            review_response = _run_validated_agent(
                 runner,
                 agent=reviewer,
                 config=config,
@@ -594,13 +748,14 @@ def run_pr_loop(
                     human_requirements=human_requirements,
                 ),
                 session_id=reviewer_session_ids.get(reviewer),
+                marker_description="<!-- AGENT_STATE: approved|blocking -->",
+                validate=parse_agent_state,
             )
-            reviewer_session_ids[reviewer] = new_session_id
-            if not review_output.strip():
-                raise AgentLoopError(f"{reviewer_name} produced an empty response.")
+            review_output = review_response.text
+            reviewer_session_ids[reviewer] = review_response.session_id
+            review_state = str(review_response.marker_value)
 
             post_pr_comment(runner, config=config, pr_number=pr_number, body=review_output)
-            review_state = parse_agent_state(review_output)
             log(config, f"Round {round_number}: {reviewer_name} state is {review_state}")
             if review_state == "blocking":
                 blocking_reviews.append((reviewer_name, review_output))
@@ -703,19 +858,19 @@ def run_pr_loop(
                 human_requirements=human_requirements,
             )
         log(config, f"Round {round_number}: {coder_name} addressing reviewer feedback")
-        coder_output, coder_session_id = run_agent(
+        coder_response = _run_validated_agent(
             runner,
             agent=config.coder,
             config=config,
             prompt=followup_prompt,
             session_id=coder_session_id,
+            marker_description="<!-- AGENT_STATE: approved|blocking -->",
+            validate=parse_agent_state,
         )
-        if not coder_output.strip():
-            raise AgentLoopError(f"{coder_name} produced an empty response.")
+        coder_output = coder_response.text
+        coder_session_id = coder_response.session_id
 
         post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
-        # Validate marker presence; reviewer remains the merge gate on the next round.
-        parse_agent_state(coder_output)
         log(config, f"Round {round_number}: {coder_name} pushed updates for re-review")
 
     raise AgentLoopError(

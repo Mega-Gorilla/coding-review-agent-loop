@@ -367,7 +367,7 @@ agent-loop issue 56 \
   --gemini-arg=--approval-mode --gemini-arg=auto_edit
 ```
 
-Providing any `--claude-arg`, `--codex-arg`, or `--gemini-arg` replaces that agent's default entirely. Claude and Gemini prompts include a tool-owned response-file path under `/tmp/coding-review-agent-loop/responses/`; when the file exists and is non-empty, the loop posts that file instead of stdout so CLI diagnostics and tool narration do not leak into GitHub comments. Gemini still supports stdout marker filtering as a fallback. If you pass `--gemini-arg=--output-format --gemini-arg=json`, the loop extracts the JSON `response` field before parsing markers when no response file was written.
+Providing any `--claude-arg`, `--codex-arg`, or `--gemini-arg` replaces that agent's default entirely. Claude and Gemini prompts include a tool-owned response-file path under `/tmp/coding-review-agent-loop/responses/`; when the file exists and is non-empty, the loop validates and posts that file instead of stdout so CLI diagnostics and tool narration do not leak into GitHub comments. Gemini still supports stdout marker filtering as a fallback. If you pass `--gemini-arg=--output-format --gemini-arg=json`, the loop extracts the JSON `response` field before parsing markers when no response file was written. Fallback stdout is never posted unless the required protocol marker validates.
 
 ## Protocol
 
@@ -386,6 +386,18 @@ Agent responses are parsed using HTML comment markers:
 include a final `AGENT_STATE` marker. Plan-first coder/reviewer responses use
 `AGENT_PLAN_STATE` instead. If a response quotes older markers, the final
 matching marker is treated as authoritative.
+
+The loop validates required markers before posting agent output to GitHub. If
+an agent exits or returns only diagnostics, empty output, or normal prose
+without the required marker, the loop fails locally with `AgentLoopError` and
+the attempt log path instead of posting that raw output as a review.
+
+Known transient agent/model failures are retried before local failure. The
+default is two retries with bounded backoff; tune this with
+`--agent-max-retries` and `--agent-retry-backoff-seconds`. Retry matching is
+narrow and intended for stream/tool-call failures, empty responses, network
+timeouts/resets, and provider 5xx errors. Auth, credit, quota, dirty workdir,
+and normal missing-marker responses are not retried.
 
 When `--approved-followups` is set to `summarize`, `issue`, or a `fix-and-*`
 mode, approved reviewer responses may also include optional future-work items
@@ -452,5 +464,6 @@ Use `tail -f` on the displayed path to see live output. Logs are diagnostic
 output and may include CLI status text or tool narration. For Claude and
 Gemini, prompts also include a public response-file path under
 `/tmp/coding-review-agent-loop/responses/`; when that file exists and is
-non-empty, the loop posts the file contents to GitHub instead of stdout. The log
-directory gets its own `.gitignore` on first use.
+non-empty, the loop validates and posts the file contents to GitHub instead of
+stdout. Fallback stdout is still validated before posting. The log directory
+gets its own `.gitignore` on first use.

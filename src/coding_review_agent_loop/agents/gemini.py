@@ -119,10 +119,16 @@ class GeminiBackend:
             log_path=log_path,
             label="Gemini",
             progress_interval_seconds=config.progress_interval_seconds,
+            check=False,
         )
         log(config, f"Gemini finished; log: {log_path}")
         text, new_session_id = _parse_gemini_output(result.stdout)
-        return AgentResult(text=read_public_response_file(response_path) or text, session_id=new_session_id)
+        return AgentResult(
+            text=read_public_response_file(response_path) or text,
+            session_id=new_session_id,
+            log_path=log_path,
+            returncode=result.returncode,
+        )
 
 
 BACKEND = GeminiBackend()

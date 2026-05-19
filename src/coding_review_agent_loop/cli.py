@@ -180,6 +180,22 @@ def build_parser() -> argparse.ArgumentParser:
             default=30,
             help="How often to print long-running agent heartbeats (default: 30).",
         )
+        subparser.add_argument(
+            "--agent-max-retries",
+            type=int,
+            default=2,
+            help="Maximum retries for narrow transient agent/model failures (default: 2).",
+        )
+        subparser.add_argument(
+            "--agent-retry-backoff-seconds",
+            type=int,
+            nargs="+",
+            default=[15, 45],
+            help=(
+                "Backoff delays for transient agent retries. The final value is reused "
+                "when retries exceed the number of provided delays (default: 15 45)."
+            ),
+        )
         memory_group = subparser.add_mutually_exclusive_group()
         memory_group.add_argument(
             "--agent-memory",

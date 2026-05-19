@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .base import AgentBackend, AgentName
+from .base import AgentBackend, AgentName, AgentResult
 from .claude import BACKEND as CLAUDE_BACKEND
 from .codex import BACKEND as CODEX_BACKEND
 from .gemini import BACKEND as GEMINI_BACKEND
@@ -48,8 +48,31 @@ def run_agent(
     prompt: str,
     session_id: str | None = None,
 ) -> tuple[str, str | None]:
-    result = get_backend(agent).run(runner, config, prompt, session_id=session_id)
+    result = run_agent_result(
+        runner,
+        agent=agent,
+        config=config,
+        prompt=prompt,
+        session_id=session_id,
+    )
+    if result.returncode != 0:
+        log_context = f"\nlog: {result.log_path}" if result.log_path is not None else ""
+        raise AgentLoopError(
+            f"{agent_display_name(agent)} failed before producing a valid response "
+            f"(exit {result.returncode}).{log_context}"
+        )
     return result.text, result.session_id
+
+
+def run_agent_result(
+    runner: Runner,
+    *,
+    agent: AgentName,
+    config: AgentLoopConfig,
+    prompt: str,
+    session_id: str | None = None,
+) -> AgentResult:
+    return get_backend(agent).run(runner, config, prompt, session_id=session_id)
 
 
 def run_claude(
