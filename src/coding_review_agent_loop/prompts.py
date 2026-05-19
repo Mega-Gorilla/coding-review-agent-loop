@@ -175,7 +175,7 @@ def format_human_requirements(
             f"Older signed human requirement(s) omitted: {len(entries) - len(candidate_entries)}. "
             "Newest requirements were kept preferentially."
         )
-        candidate = header + notice + "".join(candidate_entries)
+        candidate = header + notice + "\n".join(candidate_entries)
         if len(candidate) <= max_chars:
             kept_entries = candidate_entries
             omitted_count = len(entries) - len(candidate_entries)
@@ -206,7 +206,7 @@ def format_human_requirements(
             + "\n\n"
             + f"Older signed human requirement(s) omitted: {omitted_count}. "
             "Newest requirements were kept preferentially."
-            + "".join(kept_entries)
+            + "\n".join(kept_entries)
         )
     return (
         header

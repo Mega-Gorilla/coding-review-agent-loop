@@ -896,6 +896,40 @@ def test_format_human_requirements_uses_distinct_high_priority_section():
     assert "Please use the absolute URL." in text
 
 
+def test_format_human_requirements_preserves_entry_spacing_when_truncated():
+    requirements = (
+        HumanReviewRequirement(
+            source_type="PR comment",
+            author="reviewer",
+            created_at="2026-05-18T10:00:00Z",
+            url="https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+            body="Oldest requirement.",
+        ),
+        HumanReviewRequirement(
+            source_type="PR comment",
+            author="reviewer",
+            created_at="2026-05-18T11:00:00Z",
+            url="https://github.com/OWNER/REPO/pull/77#issuecomment-2",
+            body="Middle requirement.",
+        ),
+        HumanReviewRequirement(
+            source_type="PR comment",
+            author="reviewer",
+            created_at="2026-05-18T12:00:00Z",
+            url="https://github.com/OWNER/REPO/pull/77#issuecomment-3",
+            body="Newest requirement.",
+        ),
+    )
+    full_text = format_human_requirements(requirements)
+
+    text = format_human_requirements(requirements, max_chars=len(full_text) - 1)
+
+    assert "Older signed human requirement(s) omitted: 1." in text
+    assert "Oldest requirement." not in text
+    assert "Middle requirement.\n\nRequirement 3:" in text
+    assert "Newest requirement." in text
+
+
 def test_issue_loop_can_use_codex_as_coder_and_claude_as_reviewer(tmp_path):
     runner = FakeRunner(
         codex_outputs=[
