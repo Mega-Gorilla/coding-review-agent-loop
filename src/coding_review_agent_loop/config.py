@@ -281,10 +281,11 @@ def sync_reviewer_pr_before_review(
     default_owned = reviewer in set(config.auto_agent_dirs)
     label = f"Default {reviewer} workdir" if default_owned else option_name
     pr_ref = f"refs/remotes/origin/pr/{pr_number}"
+    pr_fetch_refspec = f"+pull/{pr_number}/head:{pr_ref}"
 
     if runner.dry_run:
         _run_git(runner, path, ("fetch", "origin"))
-        _run_git(runner, path, ("fetch", "origin", f"pull/{pr_number}/head:{pr_ref}"))
+        _run_git(runner, path, ("fetch", "origin", pr_fetch_refspec))
         _run_git(runner, path, ("checkout", "--detach", pr_ref))
         _run_git(runner, path, ("rev-parse", "HEAD"))
         _run_git(runner, path, ("status", "--short", "--branch"))
@@ -316,7 +317,7 @@ def sync_reviewer_pr_before_review(
     )
 
     _run_git(runner, path, ("fetch", "origin"))
-    _run_git(runner, path, ("fetch", "origin", f"pull/{pr_number}/head:{pr_ref}"))
+    _run_git(runner, path, ("fetch", "origin", pr_fetch_refspec))
     _run_git(runner, path, ("checkout", "--detach", pr_ref))
     local_head = _run_git(runner, path, ("rev-parse", "HEAD")).stdout.strip()
     branch_state = _run_git(runner, path, ("status", "--short", "--branch")).stdout.strip()

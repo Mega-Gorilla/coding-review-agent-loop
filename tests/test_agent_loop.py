@@ -2331,7 +2331,7 @@ def test_reviewer_checkout_is_refreshed_to_pr_head_before_review(tmp_path):
     fetch_index = command_index(runner.commands, ["git", "fetch", "origin"], start=0)
     pr_fetch_index = command_index(
         runner.commands,
-        ["git", "fetch", "origin", "pull/77/head:refs/remotes/origin/pr/77"],
+        ["git", "fetch", "origin", "+pull/77/head:refs/remotes/origin/pr/77"],
     )
     checkout_index = command_index(
         runner.commands,
@@ -2339,7 +2339,7 @@ def test_reviewer_checkout_is_refreshed_to_pr_head_before_review(tmp_path):
     )
     head_index = command_index(runner.commands, ["git", "rev-parse", "HEAD"], start=checkout_index)
 
-    assert commands[pr_fetch_index] == ["git", "fetch", "origin", "pull/77/head:refs/remotes/origin/pr/77"]
+    assert commands[pr_fetch_index] == ["git", "fetch", "origin", "+pull/77/head:refs/remotes/origin/pr/77"]
     assert fetch_index < pr_fetch_index < checkout_index < head_index < review_index
 
 
@@ -2359,7 +2359,7 @@ def test_reviewer_checkout_refreshes_each_round_before_review(tmp_path):
     pr_fetches = [
         index
         for index, cmd in enumerate(commands)
-        if cmd == ["git", "fetch", "origin", "pull/77/head:refs/remotes/origin/pr/77"]
+        if cmd == ["git", "fetch", "origin", "+pull/77/head:refs/remotes/origin/pr/77"]
     ]
     review_indices = [index for index, cmd in enumerate(commands) if cmd[:2] == ["codex", "exec"]]
 
@@ -3071,7 +3071,7 @@ def test_pr_loop_refreshes_pr_head_without_just_in_time_base_sync(tmp_path):
 
     commands = [cmd for cmd, _cwd in runner.commands]
     assert ["git", "fetch", "origin"] in commands
-    assert ["git", "fetch", "origin", "pull/77/head:refs/remotes/origin/pr/77"] in commands
+    assert ["git", "fetch", "origin", "+pull/77/head:refs/remotes/origin/pr/77"] in commands
     assert ["git", "switch", "main"] not in commands
     assert ["git", "pull", "--ff-only", "origin", "main"] not in commands
 
