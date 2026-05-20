@@ -100,35 +100,6 @@ def validate_open_pr(runner: Runner, *, config: AgentLoopConfig, pr_number: int)
         )
 
 
-def get_pr_metadata(runner: Runner, *, config: AgentLoopConfig, pr_number: int) -> PullRequestMetadata:
-    if config.dry_run:
-        return PullRequestMetadata(
-            number=pr_number,
-            repo=config.repo,
-            title=None,
-            head_branch=None,
-            base_branch=None,
-            head_sha=None,
-            url=None,
-        )
-
-    result = runner.run(
-        [
-            config.gh_cmd,
-            "pr",
-            "view",
-            str(pr_number),
-            "--repo",
-            config.repo,
-            "--json",
-            PR_METADATA_FIELDS,
-        ],
-        cwd=active_workdir(config),
-    )
-    data = json.loads(result.stdout or "{}")
-    return _parse_pr_metadata(data, config=config, pr_number=pr_number)
-
-
 def _parse_pr_metadata(
     data: dict[str, object], *, config: AgentLoopConfig, pr_number: int
 ) -> PullRequestMetadata:
@@ -156,32 +127,6 @@ def _human_requirement_sort_key(requirement: HumanReviewRequirement) -> str:
 
 def _optional_str(raw: object) -> str | None:
     return str(raw) if raw is not None else None
-
-
-def get_pr_human_requirements(
-    runner: Runner,
-    *,
-    config: AgentLoopConfig,
-    pr_number: int,
-) -> tuple[HumanReviewRequirement, ...]:
-    if config.dry_run:
-        return ()
-
-    result = runner.run(
-        [
-            config.gh_cmd,
-            "pr",
-            "view",
-            str(pr_number),
-            "--repo",
-            config.repo,
-            "--json",
-            "comments,reviews",
-        ],
-        cwd=active_workdir(config),
-    )
-    data = json.loads(result.stdout or "{}")
-    return _parse_pr_human_requirements(data)
 
 
 def get_pr_review_context(
