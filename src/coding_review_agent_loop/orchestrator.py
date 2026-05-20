@@ -70,8 +70,8 @@ NON_RETRYABLE_AGENT_OUTPUT_RE = re.compile(
     r"credit|quota|rate limit|billing|dirty (?:checkout|workdir|working tree)",
     re.I,
 )
-NEAR_MISS_AGENT_STATE_RE = re.compile(
-    r"(?m)^\s*AGENT_STATE:\s*(?:approved|blocking)\s*$",
+NEAR_MISS_AGENT_MARKER_RE = re.compile(
+    r"(?m)^[ \t]*AGENT_(?:PLAN_)?STATE:[ \t]*(?:approved|blocking)[ \t.]*$",
     re.I,
 )
 
@@ -97,7 +97,7 @@ def _is_transient_agent_output(text: str) -> bool:
 
 
 def _is_retryable_marker_near_miss(text: str) -> bool:
-    return bool(NEAR_MISS_AGENT_STATE_RE.search(text)) and not bool(
+    return bool(NEAR_MISS_AGENT_MARKER_RE.search(text)) and not bool(
         NON_RETRYABLE_AGENT_OUTPUT_RE.search(text)
     )
 

@@ -1044,8 +1044,9 @@ def test_pr_loop_retries_transient_gemini_diagnostic_and_posts_only_valid_respon
     assert sleep_commands == [["sleep", "1"]]
 
 
-def test_pr_loop_retries_plain_agent_state_near_miss_once(tmp_path):
-    near_miss = "LGTM.\nAGENT_STATE: approved\n-- Google Gemini"
+@pytest.mark.parametrize("terminator", ["", "."])
+def test_pr_loop_retries_plain_agent_state_near_miss_once(tmp_path, terminator):
+    near_miss = f"LGTM.\nAGENT_STATE: approved{terminator}\n-- Google Gemini"
     valid = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
     runner = FakeRunner(gemini_outputs=[near_miss, valid])
     config = make_config(tmp_path, reviewer="gemini")
@@ -1053,6 +1054,25 @@ def test_pr_loop_retries_plain_agent_state_near_miss_once(tmp_path):
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
     assert runner.comments == [valid]
+    sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
+    assert sleep_commands == [["sleep", "1"]]
+
+
+def test_plan_loop_retries_plain_agent_plan_state_near_miss_once(tmp_path):
+    near_miss = "Plan looks sound.\nAGENT_PLAN_STATE: approved.\n-- Google Gemini"
+    valid = "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- Google Gemini"
+    runner = FakeRunner(
+        claude_outputs=[
+            "Plan:\n- Update the CLI.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        gemini_outputs=[near_miss, valid],
+    )
+    config = make_config(tmp_path, reviewer="gemini")
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    assert near_miss not in runner.comments
+    assert any(comment == valid for comment in runner.comments)
     sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
     assert sleep_commands == [["sleep", "1"]]
 
@@ -1071,6 +1091,22 @@ def test_gemini_public_response_file_is_inside_git_dir(tmp_path):
     expected_prefix = str(config.gemini_dir / ".git" / "agent-loop" / "responses" / "gemini")
     assert expected_prefix in prompt
     assert "/tmp/coding-review-agent-loop/responses/" not in prompt
+
+
+def test_gemini_public_response_file_resolves_worktree_git_dir(tmp_path):
+    valid = "LGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    runner = FakeRunner(gemini_outputs=["stdout should be ignored"], public_response_outputs=[valid])
+    config = make_config(tmp_path, reviewer="gemini")
+    git_dir = tmp_path / "main-repo" / ".git" / "worktrees" / "gemini"
+    git_dir.mkdir(parents=True)
+    (config.gemini_dir / ".git").write_text(f"gitdir: {git_dir}\n", encoding="utf-8")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert runner.comments == [valid]
+    gemini_call = next(cmd for cmd, _cwd in runner.commands if cmd[:1] == ["gemini"])
+    assert str(git_dir / "agent-loop" / "responses" / "gemini") in gemini_call[2]
+    assert str(config.gemini_dir / ".git" / "agent-loop") not in gemini_call[2]
 
 
 def test_pr_loop_exhausted_transient_retry_reports_attempt_logs(tmp_path):

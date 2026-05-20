@@ -82,6 +82,24 @@ def _parse_gemini_output(raw: str) -> tuple[str, str | None]:
     return _strip_gemini_preamble(raw), None
 
 
+def _gemini_public_response_root(gemini_dir: Path) -> Path:
+    git_marker = gemini_dir / ".git"
+    if git_marker.is_file():
+        gitdir_prefix = "gitdir:"
+        try:
+            gitdir_text = git_marker.read_text(encoding="utf-8").strip()
+        except OSError:
+            gitdir_text = ""
+        if gitdir_text.lower().startswith(gitdir_prefix):
+            git_dir = Path(gitdir_text[len(gitdir_prefix) :].strip())
+            if not git_dir.is_absolute():
+                git_dir = gemini_dir / git_dir
+            return git_dir.resolve() / "agent-loop" / "responses"
+        return gemini_dir / ".agent-loop-responses"
+
+    return git_marker / "agent-loop" / "responses"
+
+
 class GeminiBackend:
     name: AgentName = "gemini"
     display_name = "Gemini"
@@ -102,12 +120,13 @@ class GeminiBackend:
     ) -> AgentResult:
         # Gemini CLI only allows file writes inside the trusted workspace (or
         # its own private temp dir, whose path we do not know ahead of time).
-        # Keep the response file inside .git so it is writable but never dirties
-        # the reviewed worktree.
+        # Keep the response file inside the git dir so it is writable but never
+        # dirties the reviewed worktree. In linked worktrees, .git is a pointer
+        # file, so resolve it before creating children beneath it.
         response_path = public_response_path(
             config,
             "gemini",
-            root=config.gemini_dir / ".git" / "agent-loop" / "responses",
+            root=_gemini_public_response_root(config.gemini_dir),
         )
         log_path = agent_log_path(config, "gemini")
         log(config, f"Starting Gemini in {config.gemini_dir}; log: {log_path}; response: {response_path}")
