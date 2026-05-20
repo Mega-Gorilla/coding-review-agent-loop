@@ -70,6 +70,10 @@ NON_RETRYABLE_AGENT_OUTPUT_RE = re.compile(
     r"credit|quota|rate limit|billing|dirty (?:checkout|workdir|working tree)",
     re.I,
 )
+NEAR_MISS_AGENT_MARKER_RE = re.compile(
+    r"(?m)^[ \t]*AGENT_(?:PLAN_)?STATE:[ \t]*(?:approved|blocking)[ \t.]*$",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -88,6 +92,12 @@ def _agent_log_context(log_paths: Sequence[object]) -> str:
 
 def _is_transient_agent_output(text: str) -> bool:
     return bool(TRANSIENT_AGENT_OUTPUT_RE.search(text)) and not bool(
+        NON_RETRYABLE_AGENT_OUTPUT_RE.search(text)
+    )
+
+
+def _is_retryable_marker_near_miss(text: str) -> bool:
+    return bool(NEAR_MISS_AGENT_MARKER_RE.search(text)) and not bool(
         NON_RETRYABLE_AGENT_OUTPUT_RE.search(text)
     )
 
@@ -160,7 +170,9 @@ def _run_validated_agent(
                 marker_value = validate(text)
             except AgentLoopError as exc:
                 last_error = str(exc)
-                should_retry = _is_transient_agent_output(text)
+                should_retry = _is_transient_agent_output(text) or (
+                    attempt == 1 and _is_retryable_marker_near_miss(text)
+                )
             else:
                 return ValidatedAgentResponse(
                     text=text,
