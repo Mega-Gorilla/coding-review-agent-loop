@@ -56,6 +56,16 @@ class HumanReviewRequirement:
     body: str
 
 
+@dataclass(frozen=True)
+class PullRequestReviewContext:
+    metadata: PullRequestMetadata
+    human_requirements: tuple[HumanReviewRequirement, ...]
+
+
+PR_METADATA_FIELDS = "number,title,headRefName,baseRefName,headRefOid,url"
+PR_REVIEW_CONTEXT_FIELDS = f"{PR_METADATA_FIELDS},comments,reviews"
+
+
 def detect_repo(runner: Runner, cwd: Path, gh_cmd: str) -> str:
     result = runner.run(
         [gh_cmd, "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"],
@@ -90,40 +100,17 @@ def validate_open_pr(runner: Runner, *, config: AgentLoopConfig, pr_number: int)
         )
 
 
-def get_pr_metadata(runner: Runner, *, config: AgentLoopConfig, pr_number: int) -> PullRequestMetadata:
-    if config.dry_run:
-        return PullRequestMetadata(
-            number=pr_number,
-            repo=config.repo,
-            title=None,
-            head_branch=None,
-            base_branch=None,
-            head_sha=None,
-            url=None,
-        )
-
-    result = runner.run(
-        [
-            config.gh_cmd,
-            "pr",
-            "view",
-            str(pr_number),
-            "--repo",
-            config.repo,
-            "--json",
-            "number,title,headRefName,baseRefName,headRefOid,url",
-        ],
-        cwd=active_workdir(config),
-    )
-    data = json.loads(result.stdout or "{}")
+def _parse_pr_metadata(
+    data: dict[str, object], *, config: AgentLoopConfig, pr_number: int
+) -> PullRequestMetadata:
     return PullRequestMetadata(
         number=int(data.get("number") or pr_number),
         repo=config.repo,
-        title=data.get("title"),
-        head_branch=data.get("headRefName"),
-        base_branch=data.get("baseRefName"),
-        head_sha=data.get("headRefOid"),
-        url=data.get("url"),
+        title=_optional_str(data.get("title")),
+        head_branch=_optional_str(data.get("headRefName")),
+        base_branch=_optional_str(data.get("baseRefName")),
+        head_sha=_optional_str(data.get("headRefOid")),
+        url=_optional_str(data.get("url")),
     )
 
 
@@ -138,14 +125,29 @@ def _human_requirement_sort_key(requirement: HumanReviewRequirement) -> str:
     return requirement.created_at or ""
 
 
-def get_pr_human_requirements(
+def _optional_str(raw: object) -> str | None:
+    return str(raw) if raw is not None else None
+
+
+def get_pr_review_context(
     runner: Runner,
     *,
     config: AgentLoopConfig,
     pr_number: int,
-) -> tuple[HumanReviewRequirement, ...]:
+) -> PullRequestReviewContext:
     if config.dry_run:
-        return ()
+        return PullRequestReviewContext(
+            metadata=PullRequestMetadata(
+                number=pr_number,
+                repo=config.repo,
+                title=None,
+                head_branch=None,
+                base_branch=None,
+                head_sha=None,
+                url=None,
+            ),
+            human_requirements=(),
+        )
 
     result = runner.run(
         [
@@ -156,13 +158,22 @@ def get_pr_human_requirements(
             "--repo",
             config.repo,
             "--json",
-            "comments,reviews",
+            PR_REVIEW_CONTEXT_FIELDS,
         ],
         cwd=active_workdir(config),
     )
     data = json.loads(result.stdout or "{}")
+    return PullRequestReviewContext(
+        metadata=_parse_pr_metadata(data, config=config, pr_number=pr_number),
+        human_requirements=_parse_pr_human_requirements(data),
+    )
+
+
+def _parse_pr_human_requirements(data: dict[str, object]) -> tuple[HumanReviewRequirement, ...]:
     requirements: list[HumanReviewRequirement] = []
     for raw_comment in data.get("comments") or []:
+        if not isinstance(raw_comment, dict):
+            continue
         body = parse_signed_human_requirement_body(raw_comment.get("body"))
         if body is None:
             continue
@@ -176,6 +187,8 @@ def get_pr_human_requirements(
             )
         )
     for raw_review in data.get("reviews") or []:
+        if not isinstance(raw_review, dict):
+            continue
         body = parse_signed_human_requirement_body(raw_review.get("body"))
         if body is None:
             continue
