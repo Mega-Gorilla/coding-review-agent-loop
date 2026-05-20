@@ -1528,7 +1528,8 @@ def test_pr_loop_requires_all_reviewers_to_approve(tmp_path):
         for cmd in commands
         if cmd[:3] == ["gh", "pr", "view"]
         and "--json" in cmd
-        and cmd[cmd.index("--json") + 1] == "number,title,headRefName,baseRefName,headRefOid,url"
+        and cmd[cmd.index("--json") + 1]
+        == "number,title,headRefName,baseRefName,headRefOid,url,comments,reviews"
     ]
     assert len(metadata_fetches) == 1
     assert ["pytest", "tests/test_agent_loop.py"] in commands
@@ -1939,7 +1940,8 @@ def test_pr_loop_reruns_all_reviewers_when_any_reviewer_blocks(tmp_path):
         for cmd in commands
         if cmd[:3] == ["gh", "pr", "view"]
         and "--json" in cmd
-        and cmd[cmd.index("--json") + 1] == "number,title,headRefName,baseRefName,headRefOid,url"
+        and cmd[cmd.index("--json") + 1]
+        == "number,title,headRefName,baseRefName,headRefOid,url,comments,reviews"
     ]
     assert len(metadata_fetches) == 2
 

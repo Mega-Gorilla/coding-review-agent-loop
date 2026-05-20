@@ -21,8 +21,7 @@ from .github import (
     IssueContext,
     create_issue,
     get_issue_context,
-    get_pr_human_requirements,
-    get_pr_metadata,
+    get_pr_review_context,
     merge_pr,
     post_issue_comment,
     post_pr_comment,
@@ -739,8 +738,9 @@ def run_pr_loop(
         same_pr_followups: list[ApprovedFollowup] = []
         round_future_followups: list[ApprovedFollowup] = []
         approved_review_outputs: list[tuple[str, str]] = []
-        pr_metadata = get_pr_metadata(runner, config=config, pr_number=pr_number)
-        human_requirements = get_pr_human_requirements(runner, config=config, pr_number=pr_number)
+        pr_context = get_pr_review_context(runner, config=config, pr_number=pr_number)
+        pr_metadata = pr_context.metadata
+        human_requirements = pr_context.human_requirements
         for reviewer in configured_reviewers:
             reviewer_name = agent_display_name(reviewer)
             log(config, f"Round {round_number}: {reviewer_name} reviewing PR #{pr_number}")
