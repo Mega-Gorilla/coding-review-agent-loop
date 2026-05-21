@@ -390,6 +390,7 @@ def make_config(tmp_path, *, create_dirs=True, **overrides):
         "codex_args": (),
         "gemini_args": (),
         "test_command": None,
+        "pre_review_tests": True,
         "ci_check_name": "test",
         "ci_timeout_seconds": 1200,
         "ci_poll_interval_seconds": 30,
@@ -1371,6 +1372,51 @@ def test_issue_loop_can_use_codex_as_coder_and_claude_as_reviewer(tmp_path):
     assert runner.comments[-1].startswith("LGTM.")
 
 
+def test_issue_loop_runs_pre_review_tests_after_coder_changes(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Created PR.\nTests: pytest passed.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->",
+            "Fixed review.\nTests: pytest passed.\n<!-- AGENT_STATE: blocking -->",
+        ],
+        codex_outputs=[
+            "Finding: bug remains.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, test_command=("pytest", "tests/test_agent_loop.py"))
+
+    assert run_issue_loop(runner, issue_number=56, config=config) == 0
+
+    commands = [cmd for cmd, _cwd in runner.commands]
+    first_coder = command_index(runner.commands, ["claude", "--print"])
+    first_test = commands.index(["pytest", "tests/test_agent_loop.py"])
+    first_review = command_index(runner.commands, ["codex", "exec"])
+    assert first_coder < first_test < first_review
+    assert commands.count(["pytest", "tests/test_agent_loop.py"]) == 3
+
+
+def test_pre_review_tests_can_be_disabled(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Created PR.\nTests: pytest passed.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->",
+        ],
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+    )
+    config = make_config(
+        tmp_path,
+        test_command=("pytest", "tests/test_agent_loop.py"),
+        pre_review_tests=False,
+    )
+
+    assert run_issue_loop(runner, issue_number=56, config=config) == 0
+
+    commands = [cmd for cmd, _cwd in runner.commands]
+    first_test = commands.index(["pytest", "tests/test_agent_loop.py"])
+    first_review = command_index(runner.commands, ["codex", "exec"])
+    assert first_review < first_test
+    assert commands.count(["pytest", "tests/test_agent_loop.py"]) == 1
+
+
 def test_codex_usage_summary_records_exact_tokens_from_jsonl_and_public_response(tmp_path):
     public_response = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
     runner = FakeRunner(
@@ -1770,10 +1816,13 @@ def test_pr_loop_routes_migration_validation_failure_through_coder_followup(tmp_
 
     commands = runner.commands
     pytest_index = command_index(commands, ["pytest", "tests/test_agent_loop.py"])
+    first_review_index = [
+        index for index, (cmd, _cwd) in enumerate(commands) if cmd[:2] == ["codex", "exec"]
+    ][0]
     second_review_index = [
         index for index, (cmd, _cwd) in enumerate(commands) if cmd[:2] == ["codex", "exec"]
     ][1]
-    assert second_review_index < pytest_index
+    assert first_review_index < pytest_index < second_review_index
 
 
 def test_review_prompt_includes_pr_metadata_and_suggested_commands(tmp_path):
@@ -2782,6 +2831,36 @@ def test_omitted_agent_dirs_default_to_repo_scoped_temp_checkouts(monkeypatch, t
     assert config.agent_memory_dir == (
         cache_home / "coding-review-agent-loop" / "repos" / "OWNER-REPO" / "memory"
     ).resolve()
+
+
+def test_pre_review_tests_cli_defaults_on_and_can_be_disabled(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args([
+        "task",
+        "Fix the bug",
+        "--repo",
+        "OWNER/REPO",
+        "--claude-dir",
+        str(tmp_path / "claude"),
+        "--codex-dir",
+        str(tmp_path / "codex"),
+    ])
+    config = config_from_args(args, FakeRunner())
+    assert config.pre_review_tests is True
+
+    args = parser.parse_args([
+        "task",
+        "Fix the bug",
+        "--repo",
+        "OWNER/REPO",
+        "--claude-dir",
+        str(tmp_path / "claude"),
+        "--codex-dir",
+        str(tmp_path / "codex"),
+        "--no-pre-review-tests",
+    ])
+    config = config_from_args(args, FakeRunner())
+    assert config.pre_review_tests is False
 
 
 @pytest.mark.parametrize("repo", ["OWNER", "OWNER/", "/REPO", "OWNER/REPO/EXTRA"])

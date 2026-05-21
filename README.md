@@ -156,6 +156,18 @@ short-lived location. If the previous memory commit is unavailable or no longer
 diffable, the loop logs the git failure and treats all tracked files as changed
 for that refresh.
 
+Use `--test-command` to add a local test gate:
+
+```bash
+agent-loop task "Fix the flaky test" --repo OWNER/REPO --test-command "python -m pytest"
+```
+
+By default, the command runs after coder-created or coder-updated changes before
+reviewer rounds, and again after final reviewer approval before auto-merge. Add
+`--no-pre-review-tests` if you only want the final post-approval local test
+gate. The coder prompt also asks the coding agent to report the exact tests it
+ran, or explain why it could not run tests.
+
 By default Claude is the coder and Codex is the reviewer. Reverse that with:
 
 ```bash

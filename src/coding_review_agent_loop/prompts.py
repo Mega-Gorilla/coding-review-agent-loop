@@ -36,6 +36,15 @@ def _scratch_file_guidance() -> str:
     )
 
 
+def _coder_test_reporting_guidance() -> str:
+    return (
+        "Before opening or updating the PR, run the relevant tests you can run "
+        "locally. In your final response, include a short `Tests:` line listing "
+        "the exact commands run and whether they passed. If you cannot run tests, "
+        "explain why in that `Tests:` line.\n"
+    )
+
+
 def _truncate_issue_text(text: str, *, max_chars: int, label: str) -> str:
     if len(text) <= max_chars:
         return text
@@ -288,6 +297,7 @@ def build_issue_prompt(
 Use this local checkout as your workspace. Create a branch, implement the fix,
 run relevant tests, commit, push, and open a pull request against {config.base}.
 {_scratch_file_guidance()}
+{_coder_test_reporting_guidance()}
 {_issue_context_block(issue_context)}
 {_memory_block(memory)}
 
@@ -436,6 +446,7 @@ Use this local checkout as your workspace. Create a branch, implement the
 approved plan, run relevant tests, commit, push, and open a pull request against
 {config.base}.
 {_scratch_file_guidance()}
+{_coder_test_reporting_guidance()}
 {_issue_context_block(issue_context)}
 {_memory_block(memory)}
 
@@ -479,6 +490,7 @@ Use this local checkout as your workspace. Decide between two paths:
     will run {reviewer_name} after you create the PR. End your final response
     with both markers:
 {_scratch_file_guidance()}
+{_coder_test_reporting_guidance()}
 
     <!-- AGENT_PR: <number> -->
     <!-- AGENT_STATE: blocking -->
@@ -521,6 +533,7 @@ Now proceed. Strongly prefer to implement the task and open a PR. Only ask
 again if a critical detail is still missing. Use the same response markers as
 before:
 {_scratch_file_guidance()}
+{_coder_test_reporting_guidance()}
 
 - For implementation: include both <!-- AGENT_PR: <number> --> and
   <!-- AGENT_STATE: blocking --> at the end of your final response.
@@ -675,6 +688,7 @@ Address the review below in this local checkout. Pull/sync the PR branch if
 needed, implement fixes, run relevant tests, commit, and push to the same PR.
 Do not create a new PR.
 {_scratch_file_guidance()}
+{_coder_test_reporting_guidance()}
 {_issue_context_block(issue_context)}
 {_human_requirements_block(human_requirements)}
 {_memory_block(memory)}
@@ -714,6 +728,7 @@ These same-PR follow-ups are intended to be small, localized cleanup for the
 current PR. Keep the change narrowly scoped to the listed items. Do not take on
 larger redesigns or unrelated future work; call that out instead.
 {_scratch_file_guidance()}
+{_coder_test_reporting_guidance()}
 {_issue_context_block(issue_context)}
 {_human_requirements_block(human_requirements)}
 {_memory_block(memory)}
