@@ -40,6 +40,7 @@ class AgentLoopConfig:
     codex_args: tuple[str, ...]
     gemini_args: tuple[str, ...]
     test_command: tuple[str, ...] | None
+    pre_review_tests: bool
     ci_check_name: str
     ci_timeout_seconds: int
     ci_poll_interval_seconds: int
@@ -493,6 +494,7 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
             else default_agent_args("gemini", dangerous=args.dangerous_agent_permissions)
         ),
         test_command=test_command,
+        pre_review_tests=args.pre_review_tests,
         ci_check_name=args.ci_check_name,
         ci_timeout_seconds=args.ci_timeout_seconds,
         ci_poll_interval_seconds=args.ci_poll_interval_seconds,

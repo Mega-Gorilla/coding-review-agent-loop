@@ -140,7 +140,24 @@ def build_parser() -> argparse.ArgumentParser:
         )
         subparser.add_argument(
             "--test-command",
-            help="Optional command to run after the reviewer approves, before auto-merge.",
+            help=(
+                "Optional command to run as a local test gate. By default it runs after "
+                "coder changes before review and again after reviewer approval before auto-merge."
+            ),
+        )
+        pre_review_tests_group = subparser.add_mutually_exclusive_group()
+        pre_review_tests_group.add_argument(
+            "--pre-review-tests",
+            dest="pre_review_tests",
+            action="store_true",
+            default=True,
+            help="Run --test-command after coder changes before reviewer rounds (default).",
+        )
+        pre_review_tests_group.add_argument(
+            "--no-pre-review-tests",
+            dest="pre_review_tests",
+            action="store_false",
+            help="Do not run --test-command before reviewer rounds.",
         )
         subparser.add_argument(
             "--ci-check-name",

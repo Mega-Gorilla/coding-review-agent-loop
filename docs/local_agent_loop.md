@@ -34,7 +34,8 @@ flowchart LR
     Orchestrator --> Protocol[Marker and follow-up parsing<br/>protocol.py]
     Orchestrator --> Registry[Agent registry<br/>agents/registry.py]
     Orchestrator --> GitHubOps[GitHub operations<br/>github.py]
-    Orchestrator --> OptionalTests[Optional local test command<br/>--test-command]
+    Orchestrator --> PreReviewTests[Optional pre-review local test command<br/>--test-command]
+    Orchestrator --> OptionalTests[Optional post-approval local test command<br/>--test-command]
     Orchestrator --> Followups[Approved follow-up handling<br/>summaries / issues / same-PR fixes]
 
     Registry --> Claude[Claude backend<br/>claude]
@@ -45,6 +46,7 @@ flowchart LR
     Codex --> Runner
     Gemini --> Runner
     GitHubOps --> Runner
+    PreReviewTests --> Runner
     OptionalTests --> Runner
 
     Runner --> AgentCLIs[Local agent CLIs]
@@ -335,7 +337,7 @@ agent-loop pr 123 \
   --ci-check-name test
 ```
 
-When enabled, the tool waits for the configured GitHub check-run to pass before merging. Local `--test-command` is an additional local gate, not a replacement for CI.
+When enabled, the tool waits for the configured GitHub check-run to pass before merging. Local `--test-command` is an additional local gate, not a replacement for CI. By default, `--test-command` also runs after coder-created or coder-updated changes before reviewer rounds, so reviewers are less likely to spend rounds on code that already fails the configured local test command. Use `--no-pre-review-tests` to keep `--test-command` as a post-approval gate only.
 
 ## Agent Permission Flags
 

@@ -298,6 +298,14 @@ def run_optional_tests(runner: Runner, config: AgentLoopConfig) -> None:
     log(config, "Local test command passed")
 
 
+def run_pre_review_tests(runner: Runner, config: AgentLoopConfig) -> None:
+    if not config.pre_review_tests or not config.test_command:
+        return
+    log(config, f"Running pre-review test command: {' '.join(config.test_command)}")
+    runner.run(config.test_command, cwd=active_workdir(config))
+    log(config, "Pre-review test command passed")
+
+
 def _format_approved_followup_summary(pr_number: int, followups: list[ApprovedFollowup]) -> str:
     lines = [
         f"Approved-review future follow-ups for PR #{pr_number}:",
@@ -644,6 +652,7 @@ def _run_plan_first_loop(
                 issue_context=issue_context,
                 workdirs_ready=True,
                 usage_context=usage_context,
+                pre_review_test_pending=True,
             )
 
         if round_number == config.max_rounds:
@@ -737,6 +746,7 @@ def run_issue_loop(
             issue_context=issue_context,
             workdirs_ready=True,
             usage_context=usage_context,
+            pre_review_test_pending=True,
         )
     finally:
         if owned_usage_context:
@@ -816,6 +826,7 @@ def run_task_loop(
                     coder_session_id=session_id,
                     workdirs_ready=True,
                     usage_context=usage_context,
+                    pre_review_test_pending=True,
                 )
 
             if not interactive:
@@ -856,6 +867,7 @@ def run_pr_loop(
     issue_context: IssueContext | None = None,
     workdirs_ready: bool = False,
     usage_context: RunUsageContext | None = None,
+    pre_review_test_pending: bool = False,
 ) -> int:
     owned_usage_context = usage_context is None
     usage_context = usage_context or _new_usage_context(config)
@@ -877,6 +889,9 @@ def run_pr_loop(
             same_pr_followups: list[ApprovedFollowup] = []
             round_future_followups: list[ApprovedFollowup] = []
             approved_review_outputs: list[tuple[str, str]] = []
+            if pre_review_test_pending:
+                run_pre_review_tests(runner, config)
+                pre_review_test_pending = False
             pr_context = get_pr_review_context(runner, config=config, pr_number=pr_number)
             pr_metadata = pr_context.metadata
             human_requirements = pr_context.human_requirements
@@ -1070,6 +1085,7 @@ def run_pr_loop(
 
             post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
             log(config, f"Round {round_number}: {coder_name} pushed updates for re-review")
+            pre_review_test_pending = True
 
         raise AgentLoopError(
             f"Reached max rounds ({config.max_rounds}) for PR #{pr_number}; human review required."
