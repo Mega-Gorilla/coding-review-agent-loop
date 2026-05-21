@@ -606,6 +606,9 @@ commands, or produce a blocking review explaining the limitation.
 Focus on correctness, security, test coverage, and maintainability. Review the
 full diff and any existing PR discussion. Do not make code changes in this
 review step; report blocking findings if {coder_name} needs to fix anything.
+When the PR changes files under `alembic/versions/`, verify migration topology:
+new revisions should descend from the current head unless the PR intentionally
+adds a merge migration.
 {human_requirements_guidance}
 {followup_guidance}
 Use blocking only for issues that should prevent merge.

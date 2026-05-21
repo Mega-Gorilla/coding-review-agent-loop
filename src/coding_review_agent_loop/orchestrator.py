@@ -14,6 +14,7 @@ from .config import (
     ensure_agent_workdirs,
     reviewers,
     sync_coder_base_before_implementation,
+    sync_coder_pr_before_validation,
     sync_reviewer_pr_before_review,
 )
 from .errors import AgentLoopError
@@ -31,6 +32,7 @@ from .github import (
 )
 from .logging import log, new_run_id, run_usage_summary_path
 from .memory import prepare_agent_memory
+from .migrations import validate_pr_migration_topology
 from .prompts import (
     build_followup_prompt,
     build_issue_implementation_prompt,
@@ -887,31 +889,44 @@ def run_pr_loop(
                             f"{', '.join(missing_acknowledgements)}. "
                             "Human intervention is required."
                         )
-                approved_followups = round_future_followups
-                if (
-                    config.approved_followups in ("summarize", "fix-and-summarize")
-                    and approved_followups
-                ):
-                    body = _format_approved_followup_summary(pr_number, approved_followups)
-                    post_pr_comment(runner, config=config, pr_number=pr_number, body=body)
-                elif config.approved_followups in ("issue", "fix-and-issue") and approved_followups:
-                    issue_urls, skipped_count = _create_approved_followup_issues(
-                        runner,
-                        config=config,
-                        pr_number=pr_number,
-                        followups=approved_followups,
+                sync_coder_pr_before_validation(config, runner, pr_number, pr_metadata)
+                migration_validation = validate_pr_migration_topology(
+                    runner,
+                    config=config,
+                    checkout=active_workdir(config),
+                    pr_metadata=pr_metadata,
+                )
+                if not migration_validation.ok:
+                    log(config, f"Round {round_number}: Alembic migration validation blocked approval")
+                    blocking_reviews.append(
+                        ("Alembic migration validation", migration_validation.message or "")
                     )
-                    if issue_urls:
-                        body = _format_created_followup_issue_summary(
-                            pr_number, issue_urls, skipped_count
-                        )
+                if not blocking_reviews:
+                    approved_followups = round_future_followups
+                    if (
+                        config.approved_followups in ("summarize", "fix-and-summarize")
+                        and approved_followups
+                    ):
+                        body = _format_approved_followup_summary(pr_number, approved_followups)
                         post_pr_comment(runner, config=config, pr_number=pr_number, body=body)
-                run_optional_tests(runner, config)
-                if config.auto_merge:
-                    wait_for_ci(runner, config, pr_number)
-                    merge_pr(runner, config, pr_number)
-                print(f"PR #{pr_number} approved by {format_agent_list(configured_reviewers)}.")
-                return 0
+                    elif config.approved_followups in ("issue", "fix-and-issue") and approved_followups:
+                        issue_urls, skipped_count = _create_approved_followup_issues(
+                            runner,
+                            config=config,
+                            pr_number=pr_number,
+                            followups=approved_followups,
+                        )
+                        if issue_urls:
+                            body = _format_created_followup_issue_summary(
+                                pr_number, issue_urls, skipped_count
+                            )
+                            post_pr_comment(runner, config=config, pr_number=pr_number, body=body)
+                    run_optional_tests(runner, config)
+                    if config.auto_merge:
+                        wait_for_ci(runner, config, pr_number)
+                        merge_pr(runner, config, pr_number)
+                    print(f"PR #{pr_number} approved by {format_agent_list(configured_reviewers)}.")
+                    return 0
             if round_number == config.max_rounds:
                 raise AgentLoopError(
                     f"One or more reviewers still reported blocking issues after round {round_number}; "
