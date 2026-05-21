@@ -32,8 +32,13 @@ from coding_review_agent_loop.config import (
     default_agent_workdir,
     default_cache_root,
 )
-from coding_review_agent_loop.github import HumanReviewRequirement, IssueComment, IssueContext
-from coding_review_agent_loop.github import PullRequestMetadata
+from coding_review_agent_loop.github import (
+    HumanReviewRequirement,
+    IssueComment,
+    IssueContext,
+    PullRequestMetadata,
+    get_pr_checks,
+)
 from coding_review_agent_loop.migrations import MigrationValidationResult, validate_pr_migration_topology
 from coding_review_agent_loop.prompts import format_human_requirements, format_issue_context
 from coding_review_agent_loop.protocol import (
@@ -1909,7 +1914,7 @@ def test_pr_loop_allows_repos_without_github_checks_when_branch_protection_404(t
         codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
         pr_check_runs_payload={"check_runs": []},
         pr_status_payload={"state": "pending", "statuses": []},
-        pr_branch_protection_returncode=404,
+        pr_branch_protection_returncode=1,
         pr_branch_protection_stderr="404 Not Found",
     )
     config = make_config(tmp_path)
@@ -1923,7 +1928,7 @@ def test_pr_loop_allows_repos_without_github_checks_when_branch_protection_403(t
         codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
         pr_check_runs_payload={"check_runs": []},
         pr_status_payload={"state": "pending", "statuses": []},
-        pr_branch_protection_returncode=403,
+        pr_branch_protection_returncode=1,
         pr_branch_protection_stderr="403 Forbidden",
     )
     config = make_config(tmp_path)
@@ -1959,7 +1964,7 @@ def test_review_prompt_mentions_branch_protection_forbidden_when_checks_exist(tm
         pr_check_runs_payload={
             "check_runs": [{"name": "test", "status": "completed", "conclusion": "success"}]
         },
-        pr_branch_protection_returncode=403,
+        pr_branch_protection_returncode=1,
         pr_branch_protection_stderr="403 Forbidden",
     )
     config = make_config(tmp_path)
@@ -1968,6 +1973,29 @@ def test_review_prompt_mentions_branch_protection_forbidden_when_checks_exist(tm
 
     prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"])
     assert "Current GitHub token cannot inspect branch protection on the PR base branch." in prompt
+
+
+def test_get_pr_checks_returns_no_checks_in_dry_run(tmp_path):
+    runner = FakeRunner()
+    config = make_config(tmp_path, dry_run=True)
+
+    pr_checks = get_pr_checks(
+        runner,
+        config=config,
+        metadata=PullRequestMetadata(
+            number=77,
+            repo="OWNER/REPO",
+            title="Improve review prompt context",
+            head_branch="feature/review-context",
+            base_branch="main",
+            head_sha="abc123",
+            url="https://github.com/OWNER/REPO/pull/77",
+        ),
+    )
+
+    assert pr_checks.state == "no_checks"
+    assert pr_checks.branch_protection_status == "unavailable"
+    assert pr_checks.branch_protection_note == "Dry run mode does not query live GitHub PR checks."
 
 
 def test_blocking_followup_prompt_reinjects_issue_context(tmp_path):

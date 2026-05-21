@@ -20,6 +20,7 @@ from .config import (
 from .errors import AgentLoopError
 from .github import (
     IssueContext,
+    PullRequestChecks,
     create_issue,
     get_issue_context,
     get_pr_checks,
@@ -507,7 +508,7 @@ def _pr_check_blocking_review(pr_number: int, state: str, details: list[str]) ->
     return "\n".join(lines)
 
 
-def _pr_check_details(pr_checks) -> list[str]:
+def _pr_check_details(pr_checks: PullRequestChecks) -> list[str]:
     details: list[str] = []
     if pr_checks.required_checks:
         details.append(f"Required checks: {', '.join(pr_checks.required_checks)}")

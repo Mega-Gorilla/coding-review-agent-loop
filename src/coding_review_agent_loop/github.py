@@ -260,13 +260,13 @@ def _fetch_branch_protection_required_checks(
     stderr = (result.stderr or "").lower()
     stdout = (result.stdout or "").lower()
     combined = f"{stdout}\n{stderr}"
-    if result.returncode == 404 or "404" in combined:
+    if "404" in combined:
         return (
             "not_found",
             (),
             "Required status checks are not configured on the PR base branch.",
         )
-    if result.returncode == 403 or "403" in combined or "forbidden" in combined:
+    if "403" in combined or "forbidden" in combined:
         return (
             "forbidden",
             (),
@@ -287,7 +287,7 @@ def get_pr_checks(
 ) -> PullRequestChecks:
     if config.dry_run:
         return PullRequestChecks(
-            state="unavailable",
+            state="no_checks",
             required_checks=(),
             passing=(),
             pending=(),
