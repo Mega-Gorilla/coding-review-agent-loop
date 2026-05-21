@@ -216,6 +216,14 @@ By default, `--approved-followups=ignore` asks reviewers not to include
 approved-review follow-up sections. Reviewers should mark the review blocking
 instead when cleanup should be fixed before merge.
 
+Each top-level `issue`, `task`, or `pr` run also writes a machine-readable
+usage summary beside the normal agent logs in `--log-dir` as
+`<run-id>-usage-summary.json`. The file aggregates per-call, per-agent, and
+whole-run usage, including retries. When a backend exposes token counters, the
+summary records them as `exact` or `partial`; when a backend exposes no usable
+usage data, the loop falls back to a clearly labeled estimate based on prompt
+and public-response size. `--dry-run` does not fabricate token usage.
+
 `--approved-followups` accepts:
 
 - `ignore`: ignore approved follow-up sections. This is the default.

@@ -467,3 +467,12 @@ Gemini, prompts also include a public response-file path under
 non-empty, the loop validates and posts the file contents to GitHub instead of
 stdout. Fallback stdout is still validated before posting. The log directory
 gets its own `.gitignore` on first use.
+
+Each top-level run also writes `<run-id>-usage-summary.json` in the same
+directory. That sidecar aggregates usage by call, by agent, and for the full
+run, including retries and marker-near-miss attempts. Backend-provided token
+counts are normalized as `exact` when the counters are complete or `partial`
+when only some counters are available. When a backend exposes no usable usage
+data, the orchestrator records an `estimated` fallback based on prompt and
+public-response size, along with raw character and byte counts. `--dry-run`
+does not invent token usage records.

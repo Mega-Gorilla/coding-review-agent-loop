@@ -9,6 +9,7 @@ import uuid
 from typing import TYPE_CHECKING, Literal, Protocol
 
 from ..runner import Runner
+from ..usage import UsageMetadata
 
 if TYPE_CHECKING:
     from ..config import AgentLoopConfig
@@ -22,6 +23,8 @@ class AgentResult:
     session_id: str | None = None
     log_path: Path | None = None
     returncode: int = 0
+    usage: UsageMetadata | None = None
+    raw_usage: object | None = None
 
 
 class AgentBackend(Protocol):
@@ -39,6 +42,7 @@ class AgentBackend(Protocol):
         config: AgentLoopConfig,
         prompt: str,
         session_id: str | None = None,
+        run_id: str | None = None,
     ) -> AgentResult: ...
 
 

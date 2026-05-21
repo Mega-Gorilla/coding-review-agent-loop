@@ -18,6 +18,15 @@ def log(config: AgentLoopConfig, message: str) -> None:
     print(f"[agent-loop {now}] {message}", file=sys.stderr, flush=True)
 
 
-def agent_log_path(config: AgentLoopConfig, agent: str) -> Path:
+def new_run_id() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+
+
+def agent_log_path(config: AgentLoopConfig, agent: str, *, run_id: str | None = None) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-    return config.log_dir / f"{stamp}-{agent}.log"
+    prefix = f"{run_id}-" if run_id else ""
+    return config.log_dir / f"{prefix}{stamp}-{agent}.log"
+
+
+def run_usage_summary_path(config: AgentLoopConfig, run_id: str) -> Path:
+    return config.log_dir / f"{run_id}-usage-summary.json"

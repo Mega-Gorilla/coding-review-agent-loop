@@ -29,7 +29,7 @@ from .github import (
     validate_open_pr,
     wait_for_ci,
 )
-from .logging import log
+from .logging import log, new_run_id, run_usage_summary_path
 from .memory import prepare_agent_memory
 from .prompts import (
     build_followup_prompt,
@@ -53,6 +53,7 @@ from .protocol import (
 )
 from .protocol import ApprovedFollowup, parse_approved_followups
 from .runner import Runner
+from .usage import RunUsageContext, UsageMetadata, estimate_usage
 from .workdirs import active_workdir
 
 MAX_APPROVED_FOLLOWUP_ISSUES = 3
@@ -80,6 +81,7 @@ class ValidatedAgentResponse:
     text: str
     session_id: str | None
     marker_value: object
+    usage: UsageMetadata | None = None
 
 
 def _agent_log_context(log_paths: Sequence[object]) -> str:
@@ -128,6 +130,36 @@ def _format_invalid_agent_response_error(
     )
 
 
+def _new_usage_context(config: AgentLoopConfig) -> RunUsageContext:
+    run_id = new_run_id()
+    return RunUsageContext(run_id=run_id, summary_path=run_usage_summary_path(config, run_id))
+
+
+def _resolve_usage_metadata(
+    *,
+    config: AgentLoopConfig,
+    prompt: str,
+    result: AgentResult,
+) -> UsageMetadata | None:
+    if result.usage is not None:
+        return result.usage.with_io_sizes(prompt=prompt, response=result.text)
+    if config.dry_run:
+        return None
+    return estimate_usage(prompt, result.text)
+
+
+def _persist_usage_summary(config: AgentLoopConfig, usage_context: RunUsageContext) -> None:
+    usage_context.write_summary()
+    totals = usage_context.totals()
+    log(
+        config,
+        "Usage summary written to "
+        f"{usage_context.summary_path} "
+        f"(calls={totals.call_count}, exact={totals.exact_calls}, "
+        f"partial={totals.partial_calls}, estimated={totals.estimated_calls})",
+    )
+
+
 def _run_validated_agent(
     runner: Runner,
     *,
@@ -137,6 +169,7 @@ def _run_validated_agent(
     marker_description: str,
     validate: Callable[[str], object],
     session_id: str | None = None,
+    usage_context: RunUsageContext | None = None,
 ) -> ValidatedAgentResponse:
     agent_name = agent_display_name(agent)
     log_paths: list[object] = []
@@ -151,11 +184,22 @@ def _run_validated_agent(
             config=config,
             prompt=prompt,
             session_id=session_id,
+            run_id=usage_context.run_id if usage_context is not None else None,
         )
         last_result = result
         if result.log_path is not None:
             log_paths.append(result.log_path)
         text = result.text
+        usage = _resolve_usage_metadata(config=config, prompt=prompt, result=result)
+        usage_record = None
+        if usage_context is not None and usage is not None:
+            usage_record = usage_context.add_record(
+                agent=agent,
+                session_id=result.session_id,
+                returncode=result.returncode,
+                usage=usage,
+                raw_backend_usage=result.raw_usage,
+            )
 
         should_retry = False
         if result.returncode != 0:
@@ -173,10 +217,13 @@ def _run_validated_agent(
                     attempt == 1 and _is_retryable_marker_near_miss(text)
                 )
             else:
+                if usage_record is not None:
+                    usage_record.validation_status = "validated"
                 return ValidatedAgentResponse(
                     text=text,
                     session_id=result.session_id,
                     marker_value=marker_value,
+                    usage=usage,
                 )
 
         if should_retry and attempt < max_attempts:
@@ -431,6 +478,7 @@ def _run_plan_first_loop(
     memory,
     issue_context: IssueContext,
     implement_after_approval: bool,
+    usage_context: RunUsageContext,
 ) -> int:
     coder_name = agent_display_name(config.coder)
     configured_reviewers = reviewers(config)
@@ -445,6 +493,7 @@ def _run_plan_first_loop(
         prompt=build_issue_plan_prompt(issue_number, config, memory, issue_context=issue_context),
         marker_description="<!-- AGENT_PLAN_STATE: approved|blocking --> or <!-- AGENT_CLARIFY -->",
         validate=_require_plan_state_or_clarification,
+        usage_context=usage_context,
     )
     plan_output = plan_response.text
     coder_session_id = plan_response.session_id
@@ -477,6 +526,7 @@ def _run_plan_first_loop(
                 session_id=reviewer_session_ids.get(reviewer),
                 marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
                 validate=parse_plan_state,
+                usage_context=usage_context,
             )
             review_output = review_response.text
             reviewer_session_ids[reviewer] = review_response.session_id
@@ -515,6 +565,7 @@ def _run_plan_first_loop(
                 session_id=coder_session_id,
                 marker_description="<!-- AGENT_PR: <number> --> or PR URL",
                 validate=_require_pr_number,
+                usage_context=usage_context,
             )
             coder_output = coder_response.text
             coder_session_id = coder_response.session_id
@@ -529,6 +580,7 @@ def _run_plan_first_loop(
                 coder_session_id=coder_session_id,
                 issue_context=issue_context,
                 workdirs_ready=True,
+                usage_context=usage_context,
             )
 
         if round_number == config.max_rounds:
@@ -557,6 +609,7 @@ def _run_plan_first_loop(
             session_id=coder_session_id,
             marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
             validate=parse_plan_state,
+            usage_context=usage_context,
         )
         current_plan = plan_response.text
         coder_session_id = plan_response.session_id
@@ -575,46 +628,56 @@ def run_issue_loop(
     config: AgentLoopConfig,
     plan_first: bool = False,
     implement_after_approval: bool = False,
+    usage_context: RunUsageContext | None = None,
 ) -> int:
-    ensure_agent_workdirs(config, runner)
-    log(config, f"Validating issue #{issue_number}")
-    validate_open_issue(runner, config=config, issue_number=issue_number)
-    issue_context = get_issue_context(runner, config=config, issue_number=issue_number)
-    memory = prepare_agent_memory(runner, config)
-    if plan_first:
-        return _run_plan_first_loop(
+    owned_usage_context = usage_context is None
+    usage_context = usage_context or _new_usage_context(config)
+    try:
+        ensure_agent_workdirs(config, runner)
+        log(config, f"Validating issue #{issue_number}")
+        validate_open_issue(runner, config=config, issue_number=issue_number)
+        issue_context = get_issue_context(runner, config=config, issue_number=issue_number)
+        memory = prepare_agent_memory(runner, config)
+        if plan_first:
+            return _run_plan_first_loop(
+                runner,
+                issue_number=issue_number,
+                config=config,
+                memory=memory,
+                issue_context=issue_context,
+                implement_after_approval=implement_after_approval,
+                usage_context=usage_context,
+            )
+
+        sync_coder_base_before_implementation(config, runner)
+        coder_response = _run_validated_agent(
             runner,
-            issue_number=issue_number,
+            agent=config.coder,
             config=config,
-            memory=memory,
-            issue_context=issue_context,
-            implement_after_approval=implement_after_approval,
+            prompt=build_issue_prompt(issue_number, config, memory, issue_context=issue_context),
+            marker_description="<!-- AGENT_PR: <number> --> or PR URL",
+            validate=_require_pr_number,
+            usage_context=usage_context,
         )
+        coder_output = coder_response.text
+        coder_session_id = coder_response.session_id
+        pr_number = int(coder_response.marker_value)
+        log(config, f"{agent_display_name(config.coder)} reported PR #{pr_number}; validating it is open")
+        validate_open_pr(runner, config=config, pr_number=pr_number)
 
-    sync_coder_base_before_implementation(config, runner)
-    coder_response = _run_validated_agent(
-        runner,
-        agent=config.coder,
-        config=config,
-        prompt=build_issue_prompt(issue_number, config, memory, issue_context=issue_context),
-        marker_description="<!-- AGENT_PR: <number> --> or PR URL",
-        validate=_require_pr_number,
-    )
-    coder_output = coder_response.text
-    coder_session_id = coder_response.session_id
-    pr_number = int(coder_response.marker_value)
-    log(config, f"{agent_display_name(config.coder)} reported PR #{pr_number}; validating it is open")
-    validate_open_pr(runner, config=config, pr_number=pr_number)
-
-    post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
-    return run_pr_loop(
-        runner,
-        pr_number=pr_number,
-        config=config,
-        coder_session_id=coder_session_id,
-        issue_context=issue_context,
-        workdirs_ready=True,
-    )
+        post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
+        return run_pr_loop(
+            runner,
+            pr_number=pr_number,
+            config=config,
+            coder_session_id=coder_session_id,
+            issue_context=issue_context,
+            workdirs_ready=True,
+            usage_context=usage_context,
+        )
+    finally:
+        if owned_usage_context:
+            _persist_usage_summary(config, usage_context)
 
 
 def _read_clarification_from_stdin() -> str:
@@ -643,72 +706,81 @@ def run_task_loop(
     interactive: bool = False,
     max_clarification_rounds: int = 3,
     clarification_input=None,
+    usage_context: RunUsageContext | None = None,
 ) -> int:
-    if not task_text.strip():
-        raise AgentLoopError("Task text is empty; provide a non-empty description.")
-    if max_clarification_rounds < 0:
-        raise AgentLoopError("--max-clarification-rounds must be zero or positive.")
-    ensure_agent_workdirs(config, runner)
-    memory = prepare_agent_memory(runner, config)
+    owned_usage_context = usage_context is None
+    usage_context = usage_context or _new_usage_context(config)
+    try:
+        if not task_text.strip():
+            raise AgentLoopError("Task text is empty; provide a non-empty description.")
+        if max_clarification_rounds < 0:
+            raise AgentLoopError("--max-clarification-rounds must be zero or positive.")
+        ensure_agent_workdirs(config, runner)
+        memory = prepare_agent_memory(runner, config)
 
-    history: list[tuple[str, str]] = []
-    prompt = build_task_prompt(task_text, config, memory)
-    read_clarification = clarification_input or _read_clarification_from_stdin
-    coder_name = agent_display_name(config.coder)
-    session_id: str | None = None
+        history: list[tuple[str, str]] = []
+        prompt = build_task_prompt(task_text, config, memory)
+        read_clarification = clarification_input or _read_clarification_from_stdin
+        coder_name = agent_display_name(config.coder)
+        session_id: str | None = None
 
-    for attempt in range(max_clarification_rounds + 1):
-        if attempt == 0:
-            sync_coder_base_before_implementation(config, runner)
-        log(config, f"Task attempt {attempt + 1}: invoking {coder_name}")
-        coder_response = _run_validated_agent(
-            runner,
-            agent=config.coder,
-            config=config,
-            prompt=prompt,
-            session_id=session_id,
-            marker_description="<!-- AGENT_PR: <number> -->, PR URL, or <!-- AGENT_CLARIFY -->",
-            validate=_require_pr_number_or_clarification,
-        )
-        coder_output = coder_response.text
-        session_id = coder_response.session_id
-
-        if isinstance(coder_response.marker_value, int):
-            pr_number = coder_response.marker_value
-            log(config, f"{coder_name} reported PR #{pr_number}; validating it is open")
-            validate_open_pr(runner, config=config, pr_number=pr_number)
-            post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
-            return run_pr_loop(
+        for attempt in range(max_clarification_rounds + 1):
+            if attempt == 0:
+                sync_coder_base_before_implementation(config, runner)
+            log(config, f"Task attempt {attempt + 1}: invoking {coder_name}")
+            coder_response = _run_validated_agent(
                 runner,
-                pr_number=pr_number,
+                agent=config.coder,
                 config=config,
-                coder_session_id=session_id,
-                workdirs_ready=True,
+                prompt=prompt,
+                session_id=session_id,
+                marker_description="<!-- AGENT_PR: <number> -->, PR URL, or <!-- AGENT_CLARIFY -->",
+                validate=_require_pr_number_or_clarification,
+                usage_context=usage_context,
             )
+            coder_output = coder_response.text
+            session_id = coder_response.session_id
 
-        if not interactive:
-            raise AgentLoopError(
-                f"{coder_name} requested clarification but the loop is non-interactive. "
-                "Add the missing details to the task text or rerun with --interactive.\n\n"
-                f"{coder_name}'s questions:\n{coder_output}"
-            )
+            if isinstance(coder_response.marker_value, int):
+                pr_number = coder_response.marker_value
+                log(config, f"{coder_name} reported PR #{pr_number}; validating it is open")
+                validate_open_pr(runner, config=config, pr_number=pr_number)
+                post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
+                return run_pr_loop(
+                    runner,
+                    pr_number=pr_number,
+                    config=config,
+                    coder_session_id=session_id,
+                    workdirs_ready=True,
+                    usage_context=usage_context,
+                )
 
-        if attempt >= max_clarification_rounds:
-            raise AgentLoopError(
-                f"{coder_name} still requested clarification after "
-                f"{max_clarification_rounds} rounds; "
-                "human intervention required."
-            )
+            if not interactive:
+                raise AgentLoopError(
+                    f"{coder_name} requested clarification but the loop is non-interactive. "
+                    "Add the missing details to the task text or rerun with --interactive.\n\n"
+                    f"{coder_name}'s questions:\n{coder_output}"
+                )
 
-        log(config, f"{coder_name} requested clarification (round {attempt + 1}); awaiting user input")
-        print(coder_output, flush=True)
-        answers = read_clarification()
-        if not answers.strip():
-            raise AgentLoopError("Empty clarification reply; aborting task.")
-        history.append((coder_output, answers))
-        prompt = build_task_clarification_prompt(task_text, history, config, memory)
+            if attempt >= max_clarification_rounds:
+                raise AgentLoopError(
+                    f"{coder_name} still requested clarification after "
+                    f"{max_clarification_rounds} rounds; "
+                    "human intervention required."
+                )
 
-    raise AgentLoopError("run_task_loop exited unexpectedly without producing a PR.")
+            log(config, f"{coder_name} requested clarification (round {attempt + 1}); awaiting user input")
+            print(coder_output, flush=True)
+            answers = read_clarification()
+            if not answers.strip():
+                raise AgentLoopError("Empty clarification reply; aborting task.")
+            history.append((coder_output, answers))
+            prompt = build_task_clarification_prompt(task_text, history, config, memory)
+
+        raise AgentLoopError("run_task_loop exited unexpectedly without producing a PR.")
+    finally:
+        if owned_usage_context:
+            _persist_usage_summary(config, usage_context)
 
 
 def run_pr_loop(
@@ -720,171 +792,185 @@ def run_pr_loop(
     reviewer_session_id: str | None = None,
     issue_context: IssueContext | None = None,
     workdirs_ready: bool = False,
+    usage_context: RunUsageContext | None = None,
 ) -> int:
-    if not workdirs_ready:
-        ensure_agent_workdirs(config, runner)
-    log(config, f"Validating PR #{pr_number}")
-    validate_open_pr(runner, config=config, pr_number=pr_number)
-    memory = prepare_agent_memory(runner, config)
-    reviewer_session_ids: dict[AgentName, str | None] = {}
-    configured_reviewers = reviewers(config)
-    if reviewer_session_id is not None and configured_reviewers:
-        # Backward-compatible single-reviewer resume support: older callers
-        # pass one reviewer session, so attach it to the first configured reviewer.
-        reviewer_session_ids[configured_reviewers[0]] = reviewer_session_id
-    for round_number in range(1, config.max_rounds + 1):
-        coder_name = agent_display_name(config.coder)
-        blocking_reviews: list[tuple[str, str]] = []
-        same_pr_followups: list[ApprovedFollowup] = []
-        round_future_followups: list[ApprovedFollowup] = []
-        approved_review_outputs: list[tuple[str, str]] = []
-        pr_context = get_pr_review_context(runner, config=config, pr_number=pr_number)
-        pr_metadata = pr_context.metadata
-        human_requirements = pr_context.human_requirements
-        for reviewer in configured_reviewers:
-            reviewer_name = agent_display_name(reviewer)
-            log(config, f"Round {round_number}: {reviewer_name} reviewing PR #{pr_number}")
-            sync_reviewer_pr_before_review(config, runner, reviewer, pr_number, pr_metadata)
-            review_response = _run_validated_agent(
-                runner,
-                agent=reviewer,
-                config=config,
-                prompt=build_review_prompt(
+    owned_usage_context = usage_context is None
+    usage_context = usage_context or _new_usage_context(config)
+    try:
+        if not workdirs_ready:
+            ensure_agent_workdirs(config, runner)
+        log(config, f"Validating PR #{pr_number}")
+        validate_open_pr(runner, config=config, pr_number=pr_number)
+        memory = prepare_agent_memory(runner, config)
+        reviewer_session_ids: dict[AgentName, str | None] = {}
+        configured_reviewers = reviewers(config)
+        if reviewer_session_id is not None and configured_reviewers:
+            # Backward-compatible single-reviewer resume support: older callers
+            # pass one reviewer session, so attach it to the first configured reviewer.
+            reviewer_session_ids[configured_reviewers[0]] = reviewer_session_id
+        for round_number in range(1, config.max_rounds + 1):
+            coder_name = agent_display_name(config.coder)
+            blocking_reviews: list[tuple[str, str]] = []
+            same_pr_followups: list[ApprovedFollowup] = []
+            round_future_followups: list[ApprovedFollowup] = []
+            approved_review_outputs: list[tuple[str, str]] = []
+            pr_context = get_pr_review_context(runner, config=config, pr_number=pr_number)
+            pr_metadata = pr_context.metadata
+            human_requirements = pr_context.human_requirements
+            for reviewer in configured_reviewers:
+                reviewer_name = agent_display_name(reviewer)
+                log(config, f"Round {round_number}: {reviewer_name} reviewing PR #{pr_number}")
+                sync_reviewer_pr_before_review(config, runner, reviewer, pr_number, pr_metadata)
+                review_response = _run_validated_agent(
+                    runner,
+                    agent=reviewer,
+                    config=config,
+                    prompt=build_review_prompt(
+                        pr_number,
+                        round_number,
+                        config,
+                        reviewer=reviewer,
+                        pr_metadata=pr_metadata,
+                        memory=memory,
+                        issue_context=issue_context,
+                        human_requirements=human_requirements,
+                    ),
+                    session_id=reviewer_session_ids.get(reviewer),
+                    marker_description="<!-- AGENT_STATE: approved|blocking -->",
+                    validate=parse_agent_state,
+                    usage_context=usage_context,
+                )
+                review_output = review_response.text
+                reviewer_session_ids[reviewer] = review_response.session_id
+                review_state = str(review_response.marker_value)
+
+                post_pr_comment(runner, config=config, pr_number=pr_number, body=review_output)
+                log(config, f"Round {round_number}: {reviewer_name} state is {review_state}")
+                if review_state == "blocking":
+                    blocking_reviews.append((reviewer_name, review_output))
+                    continue
+
+                approved_review_outputs.append((reviewer_name, review_output))
+                if config.approved_followups != "ignore":
+                    followups = parse_approved_followups(review_output, reviewer=reviewer_name)
+                    round_future_followups.extend(followups.future)
+                    if followups.same_pr:
+                        if config.approved_followups.startswith("fix-and-"):
+                            same_pr_followups.extend(followups.same_pr)
+                        else:
+                            blocking_reviews.append(
+                                (
+                                    reviewer_name,
+                                    "\n".join(
+                                        [
+                                            "Approved review included Same-PR follow-ups, "
+                                            f"but --approved-followups={config.approved_followups} "
+                                            "does not enable a same-PR fix path.",
+                                            "",
+                                            _format_same_pr_followups(followups.same_pr),
+                                        ]
+                                    ),
+                                )
+                            )
+
+            if not blocking_reviews and not same_pr_followups:
+                if human_requirements:
+                    missing_acknowledgements = [
+                        reviewer_name
+                        for reviewer_name, review_output in approved_review_outputs
+                        if not human_requirements_resolved(review_output)
+                    ]
+                    if missing_acknowledgements:
+                        raise AgentLoopError(
+                            "Signed human reviewer requirements remain unresolved or "
+                            "unacknowledged by approved reviewer response(s): "
+                            f"{', '.join(missing_acknowledgements)}. "
+                            "Human intervention is required."
+                        )
+                approved_followups = round_future_followups
+                if (
+                    config.approved_followups in ("summarize", "fix-and-summarize")
+                    and approved_followups
+                ):
+                    body = _format_approved_followup_summary(pr_number, approved_followups)
+                    post_pr_comment(runner, config=config, pr_number=pr_number, body=body)
+                elif config.approved_followups in ("issue", "fix-and-issue") and approved_followups:
+                    issue_urls, skipped_count = _create_approved_followup_issues(
+                        runner,
+                        config=config,
+                        pr_number=pr_number,
+                        followups=approved_followups,
+                    )
+                    if issue_urls:
+                        body = _format_created_followup_issue_summary(
+                            pr_number, issue_urls, skipped_count
+                        )
+                        post_pr_comment(runner, config=config, pr_number=pr_number, body=body)
+                run_optional_tests(runner, config)
+                if config.auto_merge:
+                    wait_for_ci(runner, config, pr_number)
+                    merge_pr(runner, config, pr_number)
+                print(f"PR #{pr_number} approved by {format_agent_list(configured_reviewers)}.")
+                return 0
+            if round_number == config.max_rounds:
+                raise AgentLoopError(
+                    f"One or more reviewers still reported blocking issues after round {round_number}; "
+                    "human review required."
+                )
+
+            if same_pr_followups and not blocking_reviews:
+                combined_review = _format_same_pr_followups(same_pr_followups)
+                followup_prompt = build_same_pr_followup_prompt(
                     pr_number,
                     round_number,
+                    combined_review,
                     config,
-                    reviewer=reviewer,
-                    pr_metadata=pr_metadata,
-                    memory=memory,
+                    memory,
                     issue_context=issue_context,
                     human_requirements=human_requirements,
-                ),
-                session_id=reviewer_session_ids.get(reviewer),
+                )
+            else:
+                # Discard future-work suggestions from non-final rounds so reviewers
+                # can restate still-relevant items after the PR has been updated.
+                if same_pr_followups:
+                    blocking_reviews.append(
+                        (
+                            "Approved same-PR follow-ups",
+                            _format_same_pr_followups(same_pr_followups),
+                        )
+                    )
+                combined_review = "\n\n".join(
+                    f"{name} review:\n\n{review}" for name, review in blocking_reviews
+                )
+                followup_prompt = build_followup_prompt(
+                    pr_number,
+                    round_number,
+                    combined_review,
+                    config,
+                    memory,
+                    issue_context=issue_context,
+                    human_requirements=human_requirements,
+                )
+            log(config, f"Round {round_number}: {coder_name} addressing reviewer feedback")
+            coder_response = _run_validated_agent(
+                runner,
+                agent=config.coder,
+                config=config,
+                prompt=followup_prompt,
+                session_id=coder_session_id,
                 marker_description="<!-- AGENT_STATE: approved|blocking -->",
                 validate=parse_agent_state,
+                usage_context=usage_context,
             )
-            review_output = review_response.text
-            reviewer_session_ids[reviewer] = review_response.session_id
-            review_state = str(review_response.marker_value)
+            coder_output = coder_response.text
+            coder_session_id = coder_response.session_id
 
-            post_pr_comment(runner, config=config, pr_number=pr_number, body=review_output)
-            log(config, f"Round {round_number}: {reviewer_name} state is {review_state}")
-            if review_state == "blocking":
-                blocking_reviews.append((reviewer_name, review_output))
-                continue
+            post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
+            log(config, f"Round {round_number}: {coder_name} pushed updates for re-review")
 
-            approved_review_outputs.append((reviewer_name, review_output))
-            if config.approved_followups != "ignore":
-                followups = parse_approved_followups(review_output, reviewer=reviewer_name)
-                round_future_followups.extend(followups.future)
-                if followups.same_pr:
-                    if config.approved_followups.startswith("fix-and-"):
-                        same_pr_followups.extend(followups.same_pr)
-                    else:
-                        blocking_reviews.append(
-                            (
-                                reviewer_name,
-                                "\n".join(
-                                    [
-                                        "Approved review included Same-PR follow-ups, "
-                                        f"but --approved-followups={config.approved_followups} "
-                                        "does not enable a same-PR fix path.",
-                                        "",
-                                        _format_same_pr_followups(followups.same_pr),
-                                    ]
-                                ),
-                            )
-                        )
-
-        if not blocking_reviews and not same_pr_followups:
-            if human_requirements:
-                missing_acknowledgements = [
-                    reviewer_name
-                    for reviewer_name, review_output in approved_review_outputs
-                    if not human_requirements_resolved(review_output)
-                ]
-                if missing_acknowledgements:
-                    raise AgentLoopError(
-                        "Signed human reviewer requirements remain unresolved or "
-                        "unacknowledged by approved reviewer response(s): "
-                        f"{', '.join(missing_acknowledgements)}. "
-                        "Human intervention is required."
-                    )
-            approved_followups = round_future_followups
-            if config.approved_followups in ("summarize", "fix-and-summarize") and approved_followups:
-                body = _format_approved_followup_summary(pr_number, approved_followups)
-                post_pr_comment(runner, config=config, pr_number=pr_number, body=body)
-            elif config.approved_followups in ("issue", "fix-and-issue") and approved_followups:
-                issue_urls, skipped_count = _create_approved_followup_issues(
-                    runner,
-                    config=config,
-                    pr_number=pr_number,
-                    followups=approved_followups,
-                )
-                if issue_urls:
-                    body = _format_created_followup_issue_summary(pr_number, issue_urls, skipped_count)
-                    post_pr_comment(runner, config=config, pr_number=pr_number, body=body)
-            run_optional_tests(runner, config)
-            if config.auto_merge:
-                wait_for_ci(runner, config, pr_number)
-                merge_pr(runner, config, pr_number)
-            print(f"PR #{pr_number} approved by {format_agent_list(configured_reviewers)}.")
-            return 0
-        if round_number == config.max_rounds:
-            raise AgentLoopError(
-                f"One or more reviewers still reported blocking issues after round {round_number}; "
-                "human review required."
-            )
-
-        if same_pr_followups and not blocking_reviews:
-            combined_review = _format_same_pr_followups(same_pr_followups)
-            followup_prompt = build_same_pr_followup_prompt(
-                pr_number,
-                round_number,
-                combined_review,
-                config,
-                memory,
-                issue_context=issue_context,
-                human_requirements=human_requirements,
-            )
-        else:
-            # Discard future-work suggestions from non-final rounds so reviewers
-            # can restate still-relevant items after the PR has been updated.
-            if same_pr_followups:
-                blocking_reviews.append(
-                    (
-                        "Approved same-PR follow-ups",
-                        _format_same_pr_followups(same_pr_followups),
-                    )
-                )
-            combined_review = "\n\n".join(
-                f"{name} review:\n\n{review}" for name, review in blocking_reviews
-            )
-            followup_prompt = build_followup_prompt(
-                pr_number,
-                round_number,
-                combined_review,
-                config,
-                memory,
-                issue_context=issue_context,
-                human_requirements=human_requirements,
-            )
-        log(config, f"Round {round_number}: {coder_name} addressing reviewer feedback")
-        coder_response = _run_validated_agent(
-            runner,
-            agent=config.coder,
-            config=config,
-            prompt=followup_prompt,
-            session_id=coder_session_id,
-            marker_description="<!-- AGENT_STATE: approved|blocking -->",
-            validate=parse_agent_state,
+        raise AgentLoopError(
+            f"Reached max rounds ({config.max_rounds}) for PR #{pr_number}; human review required."
         )
-        coder_output = coder_response.text
-        coder_session_id = coder_response.session_id
-
-        post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
-        log(config, f"Round {round_number}: {coder_name} pushed updates for re-review")
-
-    raise AgentLoopError(
-        f"Reached max rounds ({config.max_rounds}) for PR #{pr_number}; human review required."
-    )
+    finally:
+        if owned_usage_context:
+            _persist_usage_summary(config, usage_context)
