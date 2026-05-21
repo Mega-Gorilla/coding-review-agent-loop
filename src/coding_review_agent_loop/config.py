@@ -280,6 +280,50 @@ def sync_reviewer_pr_before_review(
     option_name = _agent_dir_option(reviewer)
     default_owned = reviewer in set(config.auto_agent_dirs)
     label = f"Default {reviewer} workdir" if default_owned else option_name
+    sync_checkout_to_pr(
+        config,
+        runner,
+        path=path,
+        label=label,
+        default_owned=default_owned,
+        pr_number=pr_number,
+        pr_metadata=pr_metadata,
+    )
+
+
+def sync_coder_pr_before_validation(
+    config: AgentLoopConfig,
+    runner: Runner,
+    pr_number: int,
+    pr_metadata: PullRequestMetadata,
+) -> None:
+    """Refresh the active coder checkout to the current PR head before local validation."""
+    path = active_workdir(config)
+    option_name = _agent_dir_option(config.coder)
+    default_owned = config.coder in set(config.auto_agent_dirs)
+    label = f"Default {config.coder} workdir" if default_owned else option_name
+    sync_checkout_to_pr(
+        config,
+        runner,
+        path=path,
+        label=label,
+        default_owned=default_owned,
+        pr_number=pr_number,
+        pr_metadata=pr_metadata,
+    )
+
+
+def sync_checkout_to_pr(
+    config: AgentLoopConfig,
+    runner: Runner,
+    *,
+    path: Path,
+    label: str,
+    default_owned: bool,
+    pr_number: int,
+    pr_metadata: PullRequestMetadata,
+) -> None:
+    """Refresh a checkout to the current PR head."""
     pr_ref = f"refs/remotes/origin/pr/{pr_number}"
     pr_fetch_refspec = f"+pull/{pr_number}/head:{pr_ref}"
 
