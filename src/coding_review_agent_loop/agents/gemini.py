@@ -16,7 +16,7 @@ from .base import (
 from ..logging import agent_log_path, log
 from ..protocol import CLARIFY_RE, STATE_RE
 from ..runner import Runner
-from ..usage import UsageMetadata
+from ..usage import UsageMetadata, coerce_int, first_present
 
 if TYPE_CHECKING:
     from ..config import AgentLoopConfig
@@ -67,51 +67,19 @@ def _strip_gemini_preamble(raw: str) -> str:
 
     return raw[separator_at + len(separator) :].lstrip("\n")
 
-
-def _parse_gemini_output(raw: str) -> tuple[str, str | None]:
-    """Extract (text, session_id) from Gemini's optional --output-format json response."""
-    try:
-        data = json.loads(raw)
-        if isinstance(data, dict):
-            text = data.get("response", raw)
-            if not isinstance(text, str):
-                text = raw
-            session_id = data.get("session_id")
-            return _strip_gemini_preamble(text), session_id if isinstance(session_id, str) else None
-    except (json.JSONDecodeError, ValueError):
-        pass
-    return _strip_gemini_preamble(raw), None
-
-
-def _coerce_int(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    return None
-
-
 def _normalize_gemini_usage(payload: object) -> UsageMetadata | None:
     if not isinstance(payload, dict):
         return None
-    input_tokens = _coerce_int(
-        payload.get("input_tokens")
-        or payload.get("inputTokenCount")
-        or payload.get("promptTokenCount")
+    input_tokens = coerce_int(
+        first_present(payload, "input_tokens", "inputTokenCount", "promptTokenCount")
     )
-    cached_input_tokens = _coerce_int(
-        payload.get("cached_input_tokens") or payload.get("cachedInputTokenCount")
+    cached_input_tokens = coerce_int(
+        first_present(payload, "cached_input_tokens", "cachedInputTokenCount")
     )
-    output_tokens = _coerce_int(
-        payload.get("output_tokens")
-        or payload.get("outputTokenCount")
-        or payload.get("candidatesTokenCount")
+    output_tokens = coerce_int(
+        first_present(payload, "output_tokens", "outputTokenCount", "candidatesTokenCount")
     )
-    total_tokens = _coerce_int(
-        payload.get("total_tokens") or payload.get("totalTokenCount")
-    )
+    total_tokens = coerce_int(first_present(payload, "total_tokens", "totalTokenCount"))
     if total_tokens is None and any(value is not None for value in (input_tokens, output_tokens)):
         total_tokens = sum(value or 0 for value in (input_tokens, output_tokens))
     if not any(
@@ -139,7 +107,7 @@ def _parse_gemini_payload(
             if not isinstance(text, str):
                 text = raw
             session_id = data.get("session_id")
-            raw_usage = data.get("stats") or data.get("usage") or data.get("usageMetadata")
+            raw_usage = first_present(data, "stats", "usage", "usageMetadata")
             return (
                 _strip_gemini_preamble(text),
                 session_id if isinstance(session_id, str) else None,

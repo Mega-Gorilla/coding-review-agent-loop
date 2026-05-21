@@ -31,6 +31,23 @@ def estimate_token_count(text: str) -> int:
     return max(1, (byte_count + 3) // 4)
 
 
+def coerce_int(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    return None
+
+
+def first_present(payload: dict[str, object], *keys: str) -> object | None:
+    for key in keys:
+        if key in payload:
+            return payload[key]
+    return None
+
+
 @dataclass(frozen=True)
 class UsageMetadata:
     mode: UsageMode

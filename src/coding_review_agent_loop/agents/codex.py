@@ -11,32 +11,21 @@ from typing import TYPE_CHECKING
 from .base import AgentName, AgentResult
 from ..logging import agent_log_path, log
 from ..runner import Runner
-from ..usage import UsageMetadata
+from ..usage import UsageMetadata, coerce_int, first_present
 
 if TYPE_CHECKING:
     from ..config import AgentLoopConfig
 
-
-def _coerce_int(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    return None
-
-
 def _normalize_codex_usage(payload: object) -> UsageMetadata | None:
     if not isinstance(payload, dict):
         return None
-    input_tokens = _coerce_int(payload.get("input_tokens"))
-    cached_input_tokens = _coerce_int(payload.get("cached_input_tokens"))
-    output_tokens = _coerce_int(payload.get("output_tokens"))
-    reasoning_tokens = _coerce_int(
-        payload.get("reasoning_tokens") or payload.get("reasoning_output_tokens")
+    input_tokens = coerce_int(payload.get("input_tokens"))
+    cached_input_tokens = coerce_int(payload.get("cached_input_tokens"))
+    output_tokens = coerce_int(payload.get("output_tokens"))
+    reasoning_tokens = coerce_int(
+        first_present(payload, "reasoning_tokens", "reasoning_output_tokens")
     )
-    total_tokens = _coerce_int(payload.get("total_tokens"))
+    total_tokens = coerce_int(payload.get("total_tokens"))
     if total_tokens is None and any(
         value is not None for value in (input_tokens, output_tokens, reasoning_tokens)
     ):

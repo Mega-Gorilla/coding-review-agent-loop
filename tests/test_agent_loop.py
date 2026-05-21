@@ -4,9 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from coding_review_agent_loop.agents.claude import _parse_claude_output
-from coding_review_agent_loop.agents.codex import _extract_codex_usage
-from coding_review_agent_loop.agents.gemini import PUBLIC_RESPONSE_MARKER, _parse_gemini_output
+from coding_review_agent_loop.agents.claude import _normalize_claude_usage, _parse_claude_output
+from coding_review_agent_loop.agents.codex import _extract_codex_usage, _normalize_codex_usage
+from coding_review_agent_loop.agents.gemini import (
+    PUBLIC_RESPONSE_MARKER,
+    _normalize_gemini_usage,
+    _parse_gemini_payload,
+)
 from coding_review_agent_loop.cli import (
     AgentLoopConfig,
     AgentLoopError,
@@ -372,22 +376,28 @@ def test_parse_gemini_output_extracts_json_response():
         "response": "Reviewed.\n<!-- AGENT_STATE: approved -->",
         "session_id": "gemini-session-1",
     })
-    text, sid = _parse_gemini_output(raw)
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text == "Reviewed.\n<!-- AGENT_STATE: approved -->"
     assert sid == "gemini-session-1"
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_falls_back_on_plain_text():
-    text, sid = _parse_gemini_output("plain response")
+    text, sid, usage, raw_usage = _parse_gemini_payload("plain response")
     assert text == "plain response"
     assert sid is None
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_falls_back_on_non_string_response():
     raw = json.dumps({"response": 42, "session_id": "gemini-session-1"})
-    text, sid = _parse_gemini_output(raw)
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text == raw
     assert sid == "gemini-session-1"
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_prefers_public_response_marker():
@@ -404,7 +414,7 @@ No blocking findings.
 
 -- Google Gemini
 """
-    text, sid = _parse_gemini_output(raw)
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text.startswith("## Review")
     assert "True color" not in text
     assert "YOLO mode" not in text
@@ -412,6 +422,8 @@ No blocking findings.
     assert "Error executing tool" not in text
     assert "<!-- AGENT_STATE: approved -->" in text
     assert sid is None
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_uses_last_public_response_marker():
@@ -422,8 +434,10 @@ intermediate draft
 Final answer.
 <!-- AGENT_STATE: approved -->
 """
-    text, _sid = _parse_gemini_output(raw)
+    text, _sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text == "Final answer.\n<!-- AGENT_STATE: approved -->\n"
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_json_response_strips_public_response_marker():
@@ -431,9 +445,11 @@ def test_parse_gemini_json_response_strips_public_response_marker():
         "response": f"diagnostic\n{PUBLIC_RESPONSE_MARKER}\nReviewed.\n<!-- AGENT_STATE: approved -->",
         "session_id": "gemini-session-1",
     })
-    text, sid = _parse_gemini_output(raw)
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text == "Reviewed.\n<!-- AGENT_STATE: approved -->"
     assert sid == "gemini-session-1"
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_strips_cli_preamble_before_final_response():
@@ -457,12 +473,14 @@ Looks good.
 
 -- Google Gemini
 """
-    text, sid = _parse_gemini_output(raw)
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text.startswith("## Code Review")
     assert "_GaxiosError" not in text
     assert "YOLO mode" not in text
     assert "<!-- AGENT_STATE: approved -->" in text
     assert sid is None
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_preserves_markdown_rules_after_preamble():
@@ -483,12 +501,14 @@ Still looks good.
 
 <!-- AGENT_STATE: approved -->
 """
-    text, sid = _parse_gemini_output(raw)
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text.startswith("## Summary")
     assert "YOLO mode" not in text
     assert "## Details" in text
     assert "\n---\n\n## Details" in text
     assert sid is None
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_strips_preamble_before_clarification_marker():
@@ -500,11 +520,60 @@ I need to ask a question.
     Which endpoint should I update?
 <!-- AGENT_CLARIFY -->
 """
-    text, sid = _parse_gemini_output(raw)
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text.startswith("    Which endpoint")
     assert "True color" not in text
     assert "<!-- AGENT_CLARIFY -->" in text
     assert sid is None
+    assert usage is None
+    assert raw_usage is None
+
+
+def test_normalize_claude_usage_keeps_zero_cached_tokens_exact():
+    usage = _normalize_claude_usage(
+        {
+            "input_tokens": 12,
+            "cached_input_tokens": 0,
+            "output_tokens": 8,
+            "total_tokens": 20,
+        }
+    )
+
+    assert usage is not None
+    assert usage.mode == "exact"
+    assert usage.cached_input_tokens == 0
+
+
+def test_normalize_codex_usage_keeps_zero_reasoning_tokens():
+    usage = _normalize_codex_usage(
+        {
+            "input_tokens": 12,
+            "cached_input_tokens": 0,
+            "output_tokens": 8,
+            "reasoning_tokens": 0,
+            "total_tokens": 20,
+        }
+    )
+
+    assert usage is not None
+    assert usage.mode == "exact"
+    assert usage.reasoning_tokens == 0
+
+
+def test_normalize_gemini_usage_keeps_zero_token_values_exact():
+    usage = _normalize_gemini_usage(
+        {
+            "inputTokenCount": 0,
+            "cachedInputTokenCount": 0,
+            "outputTokenCount": 4,
+            "totalTokenCount": 4,
+        }
+    )
+
+    assert usage is not None
+    assert usage.mode == "exact"
+    assert usage.input_tokens == 0
+    assert usage.cached_input_tokens == 0
 
 
 def test_extract_codex_usage_reads_turn_completed_jsonl():

@@ -15,31 +15,20 @@ from .base import (
 )
 from ..logging import agent_log_path, log
 from ..runner import Runner
-from ..usage import UsageMetadata
+from ..usage import UsageMetadata, coerce_int, first_present
 
 if TYPE_CHECKING:
     from ..config import AgentLoopConfig
 
-
-def _coerce_int(value: object) -> int | None:
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float) and value.is_integer():
-        return int(value)
-    return None
-
-
 def _normalize_claude_usage(payload: object) -> UsageMetadata | None:
     if not isinstance(payload, dict):
         return None
-    input_tokens = _coerce_int(payload.get("input_tokens") or payload.get("inputTokens"))
-    cached_input_tokens = _coerce_int(
-        payload.get("cached_input_tokens") or payload.get("cache_read_input_tokens")
+    input_tokens = coerce_int(first_present(payload, "input_tokens", "inputTokens"))
+    cached_input_tokens = coerce_int(
+        first_present(payload, "cached_input_tokens", "cache_read_input_tokens")
     )
-    output_tokens = _coerce_int(payload.get("output_tokens") or payload.get("outputTokens"))
-    total_tokens = _coerce_int(payload.get("total_tokens"))
+    output_tokens = coerce_int(first_present(payload, "output_tokens", "outputTokens"))
+    total_tokens = coerce_int(payload.get("total_tokens"))
     if total_tokens is None and any(value is not None for value in (input_tokens, output_tokens)):
         total_tokens = sum(value or 0 for value in (input_tokens, output_tokens))
     if not any(
