@@ -4,8 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from coding_review_agent_loop.agents.claude import _parse_claude_output
-from coding_review_agent_loop.agents.gemini import PUBLIC_RESPONSE_MARKER, _parse_gemini_output
+from coding_review_agent_loop.agents.claude import _normalize_claude_usage, _parse_claude_output
+from coding_review_agent_loop.agents.codex import _extract_codex_usage, _normalize_codex_usage
+from coding_review_agent_loop.agents.gemini import (
+    PUBLIC_RESPONSE_MARKER,
+    _normalize_gemini_usage,
+    _parse_gemini_payload,
+)
 from coding_review_agent_loop.cli import (
     AgentLoopConfig,
     AgentLoopError,
@@ -101,6 +106,8 @@ class FakeRunner(Runner):
 
     def _next_agent_output(self, outputs):
         output = outputs.pop(0)
+        if isinstance(output, dict):
+            return output
         if isinstance(output, tuple):
             return output
         return output, 0
@@ -145,12 +152,19 @@ class FakeRunner(Runner):
             return CommandResult(cmd, cwd_path, output, "", returncode)
 
         if cmd[:2] == ["codex", "exec"]:
-            output, returncode = self._next_agent_output(self.codex_outputs)
+            output = self._next_agent_output(self.codex_outputs)
+            if isinstance(output, dict):
+                public_response = output.get("public_response", "")
+                stdout = output.get("stdout", "")
+                returncode = output.get("returncode", 0)
+            else:
+                public_response, returncode = output
+                stdout = public_response
             if "--output-last-message" in cmd:
                 out_path = Path(cmd[cmd.index("--output-last-message") + 1])
-                out_path.write_text(output, encoding="utf-8")
+                out_path.write_text(public_response, encoding="utf-8")
             log_path.write_text(f"$ {' '.join(cmd)}\n\ncodex completed", encoding="utf-8")
-            return CommandResult(cmd, cwd_path, "codex completed", "", returncode)
+            return CommandResult(cmd, cwd_path, stdout, "", returncode)
 
         if cmd[:1] == ["gemini"]:
             output, returncode = self._next_agent_output(self.gemini_outputs)
@@ -168,11 +182,18 @@ class FakeRunner(Runner):
             return CommandResult(cmd, cwd_path, output, "", returncode)
 
         if cmd[:2] == ["codex", "exec"]:
-            output, returncode = self._next_agent_output(self.codex_outputs)
+            output = self._next_agent_output(self.codex_outputs)
+            if isinstance(output, dict):
+                public_response = output.get("public_response", "")
+                stdout = output.get("stdout", "")
+                returncode = output.get("returncode", 0)
+            else:
+                public_response, returncode = output
+                stdout = public_response
             if "--output-last-message" in cmd:
                 out_path = Path(cmd[cmd.index("--output-last-message") + 1])
-                out_path.write_text(output, encoding="utf-8")
-            return CommandResult(cmd, cwd_path, "", "", returncode)
+                out_path.write_text(public_response, encoding="utf-8")
+            return CommandResult(cmd, cwd_path, stdout, "", returncode)
 
         if cmd[:3] == ["gh", "pr", "comment"]:
             if "--body-file" in cmd:
@@ -275,6 +296,12 @@ def command_index(commands, prefix, *, start=0):
     raise AssertionError(f"Command with prefix {prefix!r} not found.")
 
 
+def read_usage_summary(log_dir: Path) -> dict:
+    summary_paths = list(log_dir.glob("*-usage-summary.json"))
+    assert len(summary_paths) == 1
+    return json.loads(summary_paths[0].read_text(encoding="utf-8"))
+
+
 def make_config(tmp_path, *, create_dirs=True, **overrides):
     config = {
         "repo": "OWNER/REPO",
@@ -319,23 +346,29 @@ def make_config(tmp_path, *, create_dirs=True, **overrides):
 
 def test_parse_claude_output_extracts_text_and_session_id():
     raw = json.dumps({"result": "Hello.", "session_id": "abc123"})
-    text, sid = _parse_claude_output(raw)
+    text, sid, usage, raw_usage = _parse_claude_output(raw)
     assert text == "Hello."
     assert sid == "abc123"
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_claude_output_falls_back_on_plain_text():
     raw = "plain response"
-    text, sid = _parse_claude_output(raw)
+    text, sid, usage, raw_usage = _parse_claude_output(raw)
     assert text == "plain response"
     assert sid is None
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_claude_output_falls_back_on_non_string_result():
     raw = json.dumps({"result": 42, "session_id": "abc"})
-    text, sid = _parse_claude_output(raw)
+    text, sid, usage, raw_usage = _parse_claude_output(raw)
     assert text == raw  # non-string result → fall back to raw
     assert sid == "abc"
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_extracts_json_response():
@@ -343,22 +376,28 @@ def test_parse_gemini_output_extracts_json_response():
         "response": "Reviewed.\n<!-- AGENT_STATE: approved -->",
         "session_id": "gemini-session-1",
     })
-    text, sid = _parse_gemini_output(raw)
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text == "Reviewed.\n<!-- AGENT_STATE: approved -->"
     assert sid == "gemini-session-1"
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_falls_back_on_plain_text():
-    text, sid = _parse_gemini_output("plain response")
+    text, sid, usage, raw_usage = _parse_gemini_payload("plain response")
     assert text == "plain response"
     assert sid is None
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_falls_back_on_non_string_response():
     raw = json.dumps({"response": 42, "session_id": "gemini-session-1"})
-    text, sid = _parse_gemini_output(raw)
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text == raw
     assert sid == "gemini-session-1"
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_prefers_public_response_marker():
@@ -375,7 +414,7 @@ No blocking findings.
 
 -- Google Gemini
 """
-    text, sid = _parse_gemini_output(raw)
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text.startswith("## Review")
     assert "True color" not in text
     assert "YOLO mode" not in text
@@ -383,6 +422,8 @@ No blocking findings.
     assert "Error executing tool" not in text
     assert "<!-- AGENT_STATE: approved -->" in text
     assert sid is None
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_uses_last_public_response_marker():
@@ -393,8 +434,10 @@ intermediate draft
 Final answer.
 <!-- AGENT_STATE: approved -->
 """
-    text, _sid = _parse_gemini_output(raw)
+    text, _sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text == "Final answer.\n<!-- AGENT_STATE: approved -->\n"
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_json_response_strips_public_response_marker():
@@ -402,9 +445,11 @@ def test_parse_gemini_json_response_strips_public_response_marker():
         "response": f"diagnostic\n{PUBLIC_RESPONSE_MARKER}\nReviewed.\n<!-- AGENT_STATE: approved -->",
         "session_id": "gemini-session-1",
     })
-    text, sid = _parse_gemini_output(raw)
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text == "Reviewed.\n<!-- AGENT_STATE: approved -->"
     assert sid == "gemini-session-1"
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_strips_cli_preamble_before_final_response():
@@ -428,12 +473,14 @@ Looks good.
 
 -- Google Gemini
 """
-    text, sid = _parse_gemini_output(raw)
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text.startswith("## Code Review")
     assert "_GaxiosError" not in text
     assert "YOLO mode" not in text
     assert "<!-- AGENT_STATE: approved -->" in text
     assert sid is None
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_preserves_markdown_rules_after_preamble():
@@ -454,12 +501,14 @@ Still looks good.
 
 <!-- AGENT_STATE: approved -->
 """
-    text, sid = _parse_gemini_output(raw)
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text.startswith("## Summary")
     assert "YOLO mode" not in text
     assert "## Details" in text
     assert "\n---\n\n## Details" in text
     assert sid is None
+    assert usage is None
+    assert raw_usage is None
 
 
 def test_parse_gemini_output_strips_preamble_before_clarification_marker():
@@ -471,11 +520,97 @@ I need to ask a question.
     Which endpoint should I update?
 <!-- AGENT_CLARIFY -->
 """
-    text, sid = _parse_gemini_output(raw)
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
     assert text.startswith("    Which endpoint")
     assert "True color" not in text
     assert "<!-- AGENT_CLARIFY -->" in text
     assert sid is None
+    assert usage is None
+    assert raw_usage is None
+
+
+def test_normalize_claude_usage_keeps_zero_cached_tokens_exact():
+    usage = _normalize_claude_usage(
+        {
+            "input_tokens": 12,
+            "cached_input_tokens": 0,
+            "output_tokens": 8,
+            "total_tokens": 20,
+        }
+    )
+
+    assert usage is not None
+    assert usage.mode == "exact"
+    assert usage.cached_input_tokens == 0
+
+
+def test_normalize_codex_usage_keeps_zero_reasoning_tokens():
+    usage = _normalize_codex_usage(
+        {
+            "input_tokens": 12,
+            "cached_input_tokens": 0,
+            "output_tokens": 8,
+            "reasoning_tokens": 0,
+            "total_tokens": 20,
+        }
+    )
+
+    assert usage is not None
+    assert usage.mode == "exact"
+    assert usage.reasoning_tokens == 0
+
+
+def test_normalize_gemini_usage_keeps_zero_token_values_exact():
+    usage = _normalize_gemini_usage(
+        {
+            "inputTokenCount": 0,
+            "cachedInputTokenCount": 0,
+            "outputTokenCount": 4,
+            "totalTokenCount": 4,
+        }
+    )
+
+    assert usage is not None
+    assert usage.mode == "exact"
+    assert usage.input_tokens == 0
+    assert usage.cached_input_tokens == 0
+
+
+def test_extract_codex_usage_reads_turn_completed_jsonl():
+    usage, raw_usage = _extract_codex_usage(
+        "\n".join(
+            [
+                json.dumps({"type": "turn.started"}),
+                json.dumps(
+                    {
+                        "type": "turn.completed",
+                        "usage": {
+                            "input_tokens": 120,
+                            "cached_input_tokens": 30,
+                            "output_tokens": 45,
+                            "reasoning_tokens": 11,
+                            "total_tokens": 206,
+                        },
+                    }
+                ),
+            ]
+        )
+    )
+
+    assert usage is not None
+    assert usage.mode == "exact"
+    assert usage.input_tokens == 120
+    assert usage.cached_input_tokens == 30
+    assert usage.output_tokens == 45
+    assert usage.reasoning_tokens == 11
+    assert usage.total_tokens == 206
+    assert raw_usage == {
+        "input_tokens": 120,
+        "cached_input_tokens": 30,
+        "output_tokens": 45,
+        "reasoning_tokens": 11,
+        "total_tokens": 206,
+    }
 
 
 def test_parse_agent_state_accepts_html_marker():
@@ -963,6 +1098,108 @@ def test_issue_loop_can_use_codex_as_coder_and_claude_as_reviewer(tmp_path):
     ]
     assert len(runner.comments) == 4
     assert runner.comments[-1].startswith("LGTM.")
+
+
+def test_codex_usage_summary_records_exact_tokens_from_jsonl_and_public_response(tmp_path):
+    public_response = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+    runner = FakeRunner(
+        codex_outputs=[
+            {
+                "public_response": public_response,
+                "stdout": "\n".join(
+                    [
+                        json.dumps({"type": "turn.started"}),
+                        json.dumps(
+                            {
+                                "type": "turn.completed",
+                                "usage": {
+                                    "input_tokens": 200,
+                                    "cached_input_tokens": 40,
+                                    "output_tokens": 50,
+                                    "reasoning_tokens": 10,
+                                    "total_tokens": 300,
+                                },
+                            }
+                        ),
+                    ]
+                ),
+            }
+        ]
+    )
+    config = make_config(tmp_path, reviewer="codex")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert runner.comments == [public_response]
+    summary = read_usage_summary(tmp_path / "logs")
+    assert summary["totals"]["exact_calls"] == 1
+    assert summary["totals"]["estimated_calls"] == 0
+    assert summary["totals"]["input_tokens"] == 200
+    assert summary["totals"]["cached_input_tokens"] == 40
+    assert summary["totals"]["output_tokens"] == 50
+    assert summary["totals"]["reasoning_tokens"] == 10
+    assert summary["totals"]["total_tokens"] == 300
+    assert summary["calls"][0]["raw_backend_usage"]["cached_input_tokens"] == 40
+    assert summary["calls"][0]["validation_status"] == "validated"
+
+
+def test_usage_summary_estimates_tokens_when_backend_exposes_none(tmp_path):
+    public_response = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    runner = FakeRunner(gemini_outputs=[public_response])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    summary = read_usage_summary(tmp_path / "logs")
+    call = summary["calls"][0]
+    assert call["usage"]["mode"] == "estimated"
+    assert call["usage"]["input_tokens"] == max(1, (call["usage"]["input_bytes"] + 3) // 4)
+    assert call["usage"]["output_tokens"] == max(1, (call["usage"]["output_bytes"] + 3) // 4)
+    assert call["usage"]["output_chars"] == len(public_response)
+
+
+def test_usage_summary_keeps_retry_attempts_and_marks_only_validated_call_successful(tmp_path):
+    near_miss = "LGTM.\nAGENT_STATE: approved.\n-- Google Gemini"
+    valid = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    runner = FakeRunner(gemini_outputs=[near_miss, valid])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    summary = read_usage_summary(tmp_path / "logs")
+    assert len(summary["calls"]) == 2
+    assert summary["totals"]["call_count"] == 2
+    assert summary["totals"]["success_count"] == 1
+    assert summary["calls"][0]["validation_status"] == "invalid"
+    assert summary["calls"][1]["validation_status"] == "validated"
+
+
+def test_plan_first_issue_run_writes_one_summary_for_planning_implementation_and_review(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Plan:\n- Implement usage logging.\n<!-- AGENT_PLAN_STATE: approved -->\n-- Anthropic Claude",
+            "Opened PR.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Plan reviewed.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path)
+
+    assert run_issue_loop(
+        runner,
+        issue_number=56,
+        config=config,
+        plan_first=True,
+        implement_after_approval=True,
+    ) == 0
+
+    summary = read_usage_summary(tmp_path / "logs")
+    assert len(list((tmp_path / "logs").glob("*-usage-summary.json"))) == 1
+    assert summary["totals"]["call_count"] == 4
+    assert set(summary["per_agent"]) == {"claude", "codex"}
+    assert [call["agent"] for call in summary["calls"]] == ["claude", "codex", "claude", "codex"]
 
 
 def test_ensure_log_dir_ignored_does_not_overwrite_existing_file(tmp_path):

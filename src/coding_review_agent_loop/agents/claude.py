@@ -15,12 +15,36 @@ from .base import (
 )
 from ..logging import agent_log_path, log
 from ..runner import Runner
+from ..usage import UsageMetadata, coerce_int, first_present
 
 if TYPE_CHECKING:
     from ..config import AgentLoopConfig
 
+def _normalize_claude_usage(payload: object) -> UsageMetadata | None:
+    if not isinstance(payload, dict):
+        return None
+    input_tokens = coerce_int(first_present(payload, "input_tokens", "inputTokens"))
+    cached_input_tokens = coerce_int(
+        first_present(payload, "cached_input_tokens", "cache_read_input_tokens")
+    )
+    output_tokens = coerce_int(first_present(payload, "output_tokens", "outputTokens"))
+    total_tokens = coerce_int(payload.get("total_tokens"))
+    if total_tokens is None and any(value is not None for value in (input_tokens, output_tokens)):
+        total_tokens = sum(value or 0 for value in (input_tokens, output_tokens))
+    if not any(
+        value is not None for value in (input_tokens, cached_input_tokens, output_tokens, total_tokens)
+    ):
+        return None
+    return UsageMetadata(
+        mode="partial" if cached_input_tokens is None else "exact",
+        input_tokens=input_tokens,
+        cached_input_tokens=cached_input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+    )
 
-def _parse_claude_output(raw: str) -> tuple[str, str | None]:
+
+def _parse_claude_output(raw: str) -> tuple[str, str | None, UsageMetadata | None, object | None]:
     """Extract (text, session_id) from Claude's --output-format json response."""
     try:
         data = json.loads(raw)
@@ -28,10 +52,13 @@ def _parse_claude_output(raw: str) -> tuple[str, str | None]:
             text = data.get("result", raw)
             if not isinstance(text, str):
                 text = raw
-            return text, data.get("session_id")
+            raw_usage = data.get("usage")
+            if raw_usage is None and isinstance(data.get("result_message"), dict):
+                raw_usage = data["result_message"].get("usage")
+            return text, data.get("session_id"), _normalize_claude_usage(raw_usage), raw_usage
     except (json.JSONDecodeError, ValueError):
         pass
-    return raw, None
+    return raw, None, None, None
 
 
 class ClaudeBackend:
@@ -51,13 +78,14 @@ class ClaudeBackend:
         config: AgentLoopConfig,
         prompt: str,
         session_id: str | None = None,
+        run_id: str | None = None,
     ) -> AgentResult:
         response_path = public_response_path(config, "claude")
         args = [config.claude_cmd, "--print", "--output-format", "json", *config.claude_args]
         if session_id:
             args += ["--resume", session_id]
         args.append(with_public_response_file_instruction(prompt, response_path))
-        log_path = agent_log_path(config, "claude")
+        log_path = agent_log_path(config, "claude", run_id=run_id)
         log(config, f"Starting Claude in {config.claude_dir}; log: {log_path}; response: {response_path}")
         result = runner.run_with_log(
             args,
@@ -68,12 +96,14 @@ class ClaudeBackend:
             check=False,
         )
         log(config, f"Claude finished; log: {log_path}")
-        text, new_session_id = _parse_claude_output(result.stdout)
+        text, new_session_id, usage, raw_usage = _parse_claude_output(result.stdout)
         return AgentResult(
             text=read_public_response_file(response_path) or text,
             session_id=new_session_id,
             log_path=log_path,
             returncode=result.returncode,
+            usage=usage,
+            raw_usage=raw_usage,
         )
 
 

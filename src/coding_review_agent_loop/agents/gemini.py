@@ -16,6 +16,7 @@ from .base import (
 from ..logging import agent_log_path, log
 from ..protocol import CLARIFY_RE, STATE_RE
 from ..runner import Runner
+from ..usage import UsageMetadata, coerce_int, first_present
 
 if TYPE_CHECKING:
     from ..config import AgentLoopConfig
@@ -66,9 +67,39 @@ def _strip_gemini_preamble(raw: str) -> str:
 
     return raw[separator_at + len(separator) :].lstrip("\n")
 
+def _normalize_gemini_usage(payload: object) -> UsageMetadata | None:
+    if not isinstance(payload, dict):
+        return None
+    input_tokens = coerce_int(
+        first_present(payload, "input_tokens", "inputTokenCount", "promptTokenCount")
+    )
+    cached_input_tokens = coerce_int(
+        first_present(payload, "cached_input_tokens", "cachedInputTokenCount")
+    )
+    output_tokens = coerce_int(
+        first_present(payload, "output_tokens", "outputTokenCount", "candidatesTokenCount")
+    )
+    total_tokens = coerce_int(first_present(payload, "total_tokens", "totalTokenCount"))
+    if total_tokens is None and any(value is not None for value in (input_tokens, output_tokens)):
+        total_tokens = sum(value or 0 for value in (input_tokens, output_tokens))
+    if not any(
+        value is not None for value in (input_tokens, cached_input_tokens, output_tokens, total_tokens)
+    ):
+        return None
+    mode = "exact" if all(value is not None for value in (input_tokens, output_tokens, total_tokens)) else "partial"
+    return UsageMetadata(
+        mode=mode,
+        input_tokens=input_tokens,
+        cached_input_tokens=cached_input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+    )
 
-def _parse_gemini_output(raw: str) -> tuple[str, str | None]:
-    """Extract (text, session_id) from Gemini's optional --output-format json response."""
+
+def _parse_gemini_payload(
+    raw: str,
+) -> tuple[str, str | None, UsageMetadata | None, object | None]:
+    """Extract (text, session_id, usage, raw_usage) from Gemini output."""
     try:
         data = json.loads(raw)
         if isinstance(data, dict):
@@ -76,10 +107,16 @@ def _parse_gemini_output(raw: str) -> tuple[str, str | None]:
             if not isinstance(text, str):
                 text = raw
             session_id = data.get("session_id")
-            return _strip_gemini_preamble(text), session_id if isinstance(session_id, str) else None
+            raw_usage = first_present(data, "stats", "usage", "usageMetadata")
+            return (
+                _strip_gemini_preamble(text),
+                session_id if isinstance(session_id, str) else None,
+                _normalize_gemini_usage(raw_usage),
+                raw_usage,
+            )
     except (json.JSONDecodeError, ValueError):
         pass
-    return _strip_gemini_preamble(raw), None
+    return _strip_gemini_preamble(raw), None, None, None
 
 
 def _gemini_public_response_root(gemini_dir: Path) -> Path:
@@ -117,6 +154,7 @@ class GeminiBackend:
         config: AgentLoopConfig,
         prompt: str,
         session_id: str | None = None,
+        run_id: str | None = None,
     ) -> AgentResult:
         # Gemini CLI only allows file writes inside the trusted workspace (or
         # its own private temp dir, whose path we do not know ahead of time).
@@ -128,7 +166,7 @@ class GeminiBackend:
             "gemini",
             root=_gemini_public_response_root(config.gemini_dir),
         )
-        log_path = agent_log_path(config, "gemini")
+        log_path = agent_log_path(config, "gemini", run_id=run_id)
         log(config, f"Starting Gemini in {config.gemini_dir}; log: {log_path}; response: {response_path}")
         args = [
             config.gemini_cmd,
@@ -149,12 +187,14 @@ class GeminiBackend:
             check=False,
         )
         log(config, f"Gemini finished; log: {log_path}")
-        text, new_session_id = _parse_gemini_output(result.stdout)
+        text, new_session_id, usage, raw_usage = _parse_gemini_payload(result.stdout)
         return AgentResult(
             text=read_public_response_file(response_path) or text,
             session_id=new_session_id,
             log_path=log_path,
             returncode=result.returncode,
+            usage=usage,
+            raw_usage=raw_usage,
         )
 
 
