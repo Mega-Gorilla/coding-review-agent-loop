@@ -7,7 +7,7 @@ import os
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from .errors import AgentLoopError
 from .logging import log
@@ -60,6 +60,26 @@ class HumanReviewRequirement:
 class PullRequestReviewContext:
     metadata: PullRequestMetadata
     human_requirements: tuple[HumanReviewRequirement, ...]
+
+
+@dataclass(frozen=True)
+class PullRequestCheck:
+    name: str
+    kind: Literal["check_run", "status_context"]
+    status: str
+    url: str | None = None
+
+
+@dataclass(frozen=True)
+class PullRequestChecks:
+    state: Literal["passing", "failing", "pending", "no_checks", "unavailable"]
+    required_checks: tuple[str, ...]
+    passing: tuple[PullRequestCheck, ...]
+    pending: tuple[PullRequestCheck, ...]
+    failing: tuple[PullRequestCheck, ...]
+    missing_required: tuple[str, ...]
+    branch_protection_status: Literal["configured", "not_found", "forbidden", "unavailable"]
+    branch_protection_note: str | None = None
 
 
 PR_METADATA_FIELDS = "number,title,headRefName,baseRefName,headRefOid,url"
@@ -166,6 +186,239 @@ def get_pr_review_context(
     return PullRequestReviewContext(
         metadata=_parse_pr_metadata(data, config=config, pr_number=pr_number),
         human_requirements=_parse_pr_human_requirements(data),
+    )
+
+
+def _normalize_check_run_status(raw_run: object) -> str:
+    if not isinstance(raw_run, dict):
+        return "unknown"
+    status = _optional_str(raw_run.get("status"))
+    conclusion = _optional_str(raw_run.get("conclusion"))
+    if status != "completed":
+        return status or "pending"
+    return conclusion or "completed"
+
+
+def _classify_check_status(status: str) -> Literal["passing", "pending", "failing"]:
+    normalized = status.strip().lower()
+    if normalized in {"success", "neutral", "skipped"}:
+        return "passing"
+    if normalized in {
+        "failure",
+        "cancelled",
+        "timed_out",
+        "action_required",
+        "startup_failure",
+        "stale",
+        "error",
+    }:
+        return "failing"
+    return "pending"
+
+
+def _dedupe_checks(checks: list[PullRequestCheck]) -> tuple[PullRequestCheck, ...]:
+    deduped: dict[tuple[str, str], PullRequestCheck] = {}
+    for check in checks:
+        deduped.setdefault((check.kind, check.name), check)
+    return tuple(deduped.values())
+
+
+def _fetch_branch_protection_required_checks(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    base_branch: str | None,
+) -> tuple[Literal["configured", "not_found", "forbidden", "unavailable"], tuple[str, ...], str | None]:
+    if not base_branch:
+        return ("unavailable", (), "PR base branch is unavailable, so branch protection could not be checked.")
+
+    result = runner.run(
+        [
+            config.gh_cmd,
+            "api",
+            f"repos/{config.repo}/branches/{base_branch}/protection/required_status_checks",
+        ],
+        cwd=active_workdir(config),
+        check=False,
+    )
+    if result.returncode == 0:
+        try:
+            payload = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            return ("unavailable", (), "Branch protection response was not valid JSON.")
+        required_checks: list[str] = []
+        for context in payload.get("contexts") or []:
+            if isinstance(context, str) and context:
+                required_checks.append(context)
+        for check in payload.get("checks") or []:
+            if isinstance(check, dict):
+                context = _optional_str(check.get("context"))
+                if context:
+                    required_checks.append(context)
+        return ("configured", tuple(dict.fromkeys(required_checks)), None)
+
+    stderr = (result.stderr or "").lower()
+    stdout = (result.stdout or "").lower()
+    combined = f"{stdout}\n{stderr}"
+    if "404" in combined:
+        return (
+            "not_found",
+            (),
+            "Required status checks are not configured on the PR base branch.",
+        )
+    if "403" in combined or "forbidden" in combined:
+        return (
+            "forbidden",
+            (),
+            "Current GitHub token cannot inspect branch protection on the PR base branch.",
+        )
+    return (
+        "unavailable",
+        (),
+        "GitHub branch protection could not be inspected due to an unexpected API failure.",
+    )
+
+
+def get_pr_checks(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    metadata: PullRequestMetadata,
+) -> PullRequestChecks:
+    if config.dry_run:
+        return PullRequestChecks(
+            state="no_checks",
+            required_checks=(),
+            passing=(),
+            pending=(),
+            failing=(),
+            missing_required=(),
+            branch_protection_status="unavailable",
+            branch_protection_note="Dry run mode does not query live GitHub PR checks.",
+        )
+
+    if not metadata.head_sha:
+        return PullRequestChecks(
+            state="unavailable",
+            required_checks=(),
+            passing=(),
+            pending=(),
+            failing=(),
+            missing_required=(),
+            branch_protection_status="unavailable",
+            branch_protection_note="PR head SHA is unavailable, so GitHub PR checks could not be queried.",
+        )
+
+    branch_protection_status, required_checks, branch_protection_note = (
+        _fetch_branch_protection_required_checks(
+            runner,
+            config=config,
+            base_branch=metadata.base_branch,
+        )
+    )
+    check_runs_result = runner.run(
+        [
+            config.gh_cmd,
+            "api",
+            f"repos/{config.repo}/commits/{metadata.head_sha}/check-runs",
+        ],
+        cwd=active_workdir(config),
+        check=False,
+    )
+    statuses_result = runner.run(
+        [
+            config.gh_cmd,
+            "api",
+            f"repos/{config.repo}/commits/{metadata.head_sha}/status",
+        ],
+        cwd=active_workdir(config),
+        check=False,
+    )
+
+    check_errors: list[str] = []
+    checks: list[PullRequestCheck] = []
+
+    if check_runs_result.returncode == 0:
+        try:
+            payload = json.loads(check_runs_result.stdout or "{}")
+        except json.JSONDecodeError:
+            check_errors.append("check-runs response was not valid JSON")
+        else:
+            for raw_check in payload.get("check_runs") or []:
+                if not isinstance(raw_check, dict):
+                    continue
+                name = _optional_str(raw_check.get("name"))
+                if not name:
+                    continue
+                checks.append(
+                    PullRequestCheck(
+                        name=name,
+                        kind="check_run",
+                        status=_normalize_check_run_status(raw_check),
+                        url=_optional_str(raw_check.get("html_url") or raw_check.get("details_url")),
+                    )
+                )
+    else:
+        check_errors.append("check-runs query failed")
+
+    if statuses_result.returncode == 0:
+        try:
+            payload = json.loads(statuses_result.stdout or "{}")
+        except json.JSONDecodeError:
+            check_errors.append("commit-status response was not valid JSON")
+        else:
+            for raw_status in payload.get("statuses") or []:
+                if not isinstance(raw_status, dict):
+                    continue
+                name = _optional_str(raw_status.get("context"))
+                if not name:
+                    continue
+                checks.append(
+                    PullRequestCheck(
+                        name=name,
+                        kind="status_context",
+                        status=_optional_str(raw_status.get("state")) or "pending",
+                        url=_optional_str(raw_status.get("target_url")),
+                    )
+                )
+    else:
+        check_errors.append("commit-status query failed")
+
+    deduped_checks = _dedupe_checks(checks)
+    passing = tuple(check for check in deduped_checks if _classify_check_status(check.status) == "passing")
+    pending = tuple(check for check in deduped_checks if _classify_check_status(check.status) == "pending")
+    failing = tuple(check for check in deduped_checks if _classify_check_status(check.status) == "failing")
+    observed_names = {check.name for check in deduped_checks}
+    missing_required = tuple(name for name in required_checks if name not in observed_names)
+
+    state: Literal["passing", "failing", "pending", "no_checks", "unavailable"]
+    if failing:
+        state = "failing"
+    elif pending or missing_required:
+        state = "pending"
+    elif passing:
+        state = "passing"
+    elif branch_protection_status == "configured" and required_checks:
+        state = "pending"
+    elif branch_protection_status in {"configured", "not_found", "forbidden"}:
+        state = "no_checks"
+    elif check_errors:
+        state = "unavailable"
+    else:
+        state = "no_checks"
+
+    if state == "unavailable" and not branch_protection_note and check_errors:
+        branch_protection_note = "; ".join(check_errors)
+
+    return PullRequestChecks(
+        state=state,
+        required_checks=required_checks,
+        passing=passing,
+        pending=pending,
+        failing=failing,
+        missing_required=missing_required,
+        branch_protection_status=branch_protection_status,
+        branch_protection_note=branch_protection_note,
     )
 
 

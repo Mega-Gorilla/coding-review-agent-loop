@@ -7,7 +7,7 @@ from typing import Sequence
 from .agents.base import AgentName
 from .agents.registry import agent_display_name, agent_signature
 from .config import AgentLoopConfig, reviewers
-from .github import HumanReviewRequirement, IssueContext, PullRequestMetadata
+from .github import HumanReviewRequirement, IssueContext, PullRequestChecks, PullRequestMetadata
 from .memory import AgentMemoryContext, format_agent_memory_context
 
 
@@ -239,6 +239,30 @@ review must include exactly:
 
 If any signed human reviewer requirement is unresolved, return blocking.
 """
+
+
+def format_pr_checks(checks: PullRequestChecks) -> str:
+    lines = [
+        "GitHub PR checks:",
+        f"- Overall state: {checks.state}",
+    ]
+    if checks.required_checks:
+        lines.append(f"- Required checks: {', '.join(checks.required_checks)}")
+    if checks.failing:
+        lines.append(
+            "- Failing checks: "
+            + ", ".join(f"{check.name} ({check.status})" for check in checks.failing)
+        )
+    if checks.pending:
+        lines.append(
+            "- Pending checks: "
+            + ", ".join(f"{check.name} ({check.status})" for check in checks.pending)
+        )
+    if checks.missing_required:
+        lines.append(f"- Required checks not yet reporting: {', '.join(checks.missing_required)}")
+    if checks.branch_protection_note:
+        lines.append(f"- Branch protection: {checks.branch_protection_note}")
+    return "\n".join(lines)
 
 
 def _issue_context_block(issue_context: IssueContext | None) -> str:
@@ -515,6 +539,7 @@ def build_review_prompt(
     *,
     reviewer: AgentName,
     pr_metadata: PullRequestMetadata | None = None,
+    pr_checks: PullRequestChecks | None = None,
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
     human_requirements: Sequence[HumanReviewRequirement] | None = None,
@@ -536,6 +561,7 @@ def build_review_prompt(
     base_branch = metadata.base_branch or "(unknown)"
     head_sha = metadata.head_sha or "(unknown)"
     url_line = f"- URL: {metadata.url}\n" if metadata.url else ""
+    checks_block = f"{format_pr_checks(pr_checks)}\n" if pr_checks is not None else ""
     human_requirements_guidance = _human_requirements_review_guidance(human_requirements)
     if config.approved_followups == "ignore":
         followup_guidance = """Do not include Same-PR follow-ups, Future follow-ups, or legacy
@@ -591,7 +617,7 @@ checkout before reviewing. Do not spend time discovering the PR
 branch. Do not report findings based on untracked files unless those files are
 present in the PR diff.
 {_scratch_file_guidance()}
-{_issue_context_block(issue_context)}
+{checks_block}{_issue_context_block(issue_context)}
 {_human_requirements_block(human_requirements)}
 {_memory_block(memory)}
 
@@ -606,6 +632,10 @@ commands, or produce a blocking review explaining the limitation.
 Focus on correctness, security, test coverage, and maintainability. Review the
 full diff and any existing PR discussion. Do not make code changes in this
 review step; report blocking findings if {coder_name} needs to fix anything.
+Treat the GitHub PR checks block above as authoritative for current CI state.
+Do not say or imply that tests passed globally unless the GitHub PR checks
+state is `passing` or `no_checks`. If only a local subset passed while GitHub
+checks are `failing`, `pending`, or `unavailable`, say that explicitly.
 When the PR changes files under `alembic/versions/`, verify migration topology:
 new revisions should descend from the current head unless the PR intentionally
 adds a merge migration.

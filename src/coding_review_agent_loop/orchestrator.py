@@ -20,8 +20,10 @@ from .config import (
 from .errors import AgentLoopError
 from .github import (
     IssueContext,
+    PullRequestChecks,
     create_issue,
     get_issue_context,
+    get_pr_checks,
     get_pr_review_context,
     merge_pr,
     post_issue_comment,
@@ -472,6 +474,65 @@ def _format_plan_approval_summary(issue_number: int, approved_plan: str) -> str:
     )
 
 
+def _format_pr_checks_comment(pr_number: int, state: str, details: list[str]) -> str:
+    headline = {
+        "failing": f"GitHub PR checks are failing for PR #{pr_number}.",
+        "pending": f"GitHub PR checks are still pending for PR #{pr_number}.",
+        "unavailable": f"GitHub PR check status is unavailable for PR #{pr_number}.",
+    }[state]
+    lines = [
+        headline,
+        "",
+        "Reviewer approvals do not make this PR merge-ready until GitHub PR checks are green, or the PR explicitly states that only a local subset passed.",
+        "",
+    ]
+    lines.extend(f"- {detail}" for detail in details)
+    lines.extend(["", "-- coding-review-agent-loop"])
+    return "\n".join(lines)
+
+
+def _pr_check_blocking_review(pr_number: int, state: str, details: list[str]) -> str:
+    headline = {
+        "failing": "GitHub PR checks are failing and must be resolved before approval.",
+        "pending": "GitHub PR checks are still pending, so this PR cannot be treated as merge-ready yet.",
+        "unavailable": "GitHub PR check status is unavailable, so merge readiness cannot be confirmed yet.",
+    }[state]
+    lines = [headline, ""]
+    lines.extend(f"- {detail}" for detail in details)
+    lines.extend(
+        [
+            "",
+            "Do not claim global test success unless GitHub PR checks are green. If only local tests passed, say that explicitly.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _pr_check_details(pr_checks: PullRequestChecks) -> list[str]:
+    details: list[str] = []
+    if pr_checks.required_checks:
+        details.append(f"Required checks: {', '.join(pr_checks.required_checks)}")
+    if pr_checks.failing:
+        details.append(
+            "Failing checks: "
+            + ", ".join(f"{check.name} ({check.status})" for check in pr_checks.failing)
+        )
+    if pr_checks.pending:
+        details.append(
+            "Pending checks: "
+            + ", ".join(f"{check.name} ({check.status})" for check in pr_checks.pending)
+        )
+    if pr_checks.missing_required:
+        details.append(
+            "Required checks not yet reporting: " + ", ".join(pr_checks.missing_required)
+        )
+    if pr_checks.branch_protection_note:
+        details.append(pr_checks.branch_protection_note)
+    if not details:
+        details.append("No individual check names were available from the GitHub API.")
+    return details
+
+
 def _run_plan_first_loop(
     runner: Runner,
     *,
@@ -819,6 +880,7 @@ def run_pr_loop(
             pr_context = get_pr_review_context(runner, config=config, pr_number=pr_number)
             pr_metadata = pr_context.metadata
             human_requirements = pr_context.human_requirements
+            pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
             for reviewer in configured_reviewers:
                 reviewer_name = agent_display_name(reviewer)
                 log(config, f"Round {round_number}: {reviewer_name} reviewing PR #{pr_number}")
@@ -833,6 +895,7 @@ def run_pr_loop(
                         config,
                         reviewer=reviewer,
                         pr_metadata=pr_metadata,
+                        pr_checks=pr_checks,
                         memory=memory,
                         issue_context=issue_context,
                         human_requirements=human_requirements,
@@ -901,6 +964,31 @@ def run_pr_loop(
                     blocking_reviews.append(
                         ("Alembic migration validation", migration_validation.message or "")
                     )
+                if not blocking_reviews:
+                    if pr_checks.state in {"failing", "pending", "unavailable"}:
+                        details = _pr_check_details(pr_checks)
+                        post_pr_comment(
+                            runner,
+                            config=config,
+                            pr_number=pr_number,
+                            body=_format_pr_checks_comment(pr_number, pr_checks.state, details),
+                        )
+                        if pr_checks.state == "failing":
+                            log(
+                                config,
+                                f"Round {round_number}: GitHub PR checks blocked approval ({pr_checks.state})",
+                            )
+                            blocking_reviews.append(
+                                (
+                                    "GitHub PR checks",
+                                    _pr_check_blocking_review(pr_number, pr_checks.state, details),
+                                )
+                            )
+                        else:
+                            raise AgentLoopError(
+                                f"GitHub PR checks for PR #{pr_number} are {pr_checks.state}; "
+                                "wait for CI or investigate GitHub API access before treating the PR as approved."
+                            )
                 if not blocking_reviews:
                     approved_followups = round_future_followups
                     if (

@@ -32,8 +32,13 @@ from coding_review_agent_loop.config import (
     default_agent_workdir,
     default_cache_root,
 )
-from coding_review_agent_loop.github import HumanReviewRequirement, IssueComment, IssueContext
-from coding_review_agent_loop.github import PullRequestMetadata
+from coding_review_agent_loop.github import (
+    HumanReviewRequirement,
+    IssueComment,
+    IssueContext,
+    PullRequestMetadata,
+    get_pr_checks,
+)
 from coding_review_agent_loop.migrations import MigrationValidationResult, validate_pr_migration_topology
 from coding_review_agent_loop.prompts import format_human_requirements, format_issue_context
 from coding_review_agent_loop.protocol import (
@@ -53,6 +58,15 @@ class FakeRunner(Runner):
         issue_payload=None,
         issue_comments=None,
         pr_payload=None,
+        pr_check_runs_payload=None,
+        pr_status_payload=None,
+        pr_branch_protection_payload=None,
+        pr_branch_protection_returncode=0,
+        pr_branch_protection_stderr="",
+        pr_check_runs_returncode=0,
+        pr_check_runs_stderr="",
+        pr_status_returncode=0,
+        pr_status_stderr="",
         git_status="",
         git_remote="git@github.com:OWNER/REPO.git",
         git_inside=True,
@@ -68,7 +82,7 @@ class FakeRunner(Runner):
         self.claude_outputs = list(claude_outputs or [])
         self.codex_outputs = list(codex_outputs or [])
         self.gemini_outputs = list(gemini_outputs or [])
-        self.issue_payload = issue_payload or {
+        self.issue_payload = {
             "number": 56,
             "state": "open",
             "is_pr": False,
@@ -76,8 +90,10 @@ class FakeRunner(Runner):
             "title": "Fix issue-mode context",
             "body": "Original issue body.",
         }
+        if issue_payload:
+            self.issue_payload.update(issue_payload)
         self.issue_comments = list(issue_comments or [])
-        self.pr_payload = pr_payload or {
+        self.pr_payload = {
             "number": 77,
             "state": "OPEN",
             "url": "https://github.com/OWNER/REPO/pull/77",
@@ -88,6 +104,19 @@ class FakeRunner(Runner):
             "comments": [],
             "reviews": [],
         }
+        if pr_payload:
+            self.pr_payload.update(pr_payload)
+        self.pr_check_runs_payload = pr_check_runs_payload or {
+            "check_runs": [{"name": "test", "status": "completed", "conclusion": "success"}]
+        }
+        self.pr_status_payload = pr_status_payload or {"state": "success", "statuses": []}
+        self.pr_branch_protection_payload = pr_branch_protection_payload or {"contexts": ["test"]}
+        self.pr_branch_protection_returncode = pr_branch_protection_returncode
+        self.pr_branch_protection_stderr = pr_branch_protection_stderr
+        self.pr_check_runs_returncode = pr_check_runs_returncode
+        self.pr_check_runs_stderr = pr_check_runs_stderr
+        self.pr_status_returncode = pr_status_returncode
+        self.pr_status_stderr = pr_status_stderr
         self.commands = []
         self.comments = []
         self.issues = []
@@ -247,7 +276,42 @@ class FakeRunner(Runner):
             return CommandResult(cmd, cwd_path, json_dumps(self.issue_payload), "", 0)
 
         if cmd[:2] == ["gh", "api"] and cmd[2].endswith("/check-runs"):
-            return CommandResult(cmd, cwd_path, "success\n", "", 0)
+            if "--jq" in cmd:
+                return CommandResult(cmd, cwd_path, "success\n", "", 0)
+            stdout = (
+                json_dumps(self.pr_check_runs_payload) if self.pr_check_runs_returncode == 0 else ""
+            )
+            return CommandResult(
+                cmd,
+                cwd_path,
+                stdout,
+                self.pr_check_runs_stderr,
+                self.pr_check_runs_returncode,
+            )
+
+        if cmd[:2] == ["gh", "api"] and cmd[2].endswith("/status"):
+            stdout = json_dumps(self.pr_status_payload) if self.pr_status_returncode == 0 else ""
+            return CommandResult(
+                cmd,
+                cwd_path,
+                stdout,
+                self.pr_status_stderr,
+                self.pr_status_returncode,
+            )
+
+        if cmd[:2] == ["gh", "api"] and "/protection/required_status_checks" in cmd[2]:
+            stdout = (
+                json_dumps(self.pr_branch_protection_payload)
+                if self.pr_branch_protection_returncode == 0
+                else ""
+            )
+            return CommandResult(
+                cmd,
+                cwd_path,
+                stdout,
+                self.pr_branch_protection_stderr,
+                self.pr_branch_protection_returncode,
+            )
 
         if cmd[:1] == ["sleep"]:
             return CommandResult(cmd, cwd_path, "", "", 0)
@@ -1436,8 +1500,16 @@ def test_pr_loop_runs_tests_and_merge_only_after_codex_approval(tmp_path):
         "gh",
         "api",
         "repos/OWNER/REPO/commits/abc123/check-runs",
-        "--jq",
-        '[.check_runs[] | select(.name == "test")] | if length == 0 then "pending" else .[0].conclusion // .[0].status end',
+    ] in commands
+    assert [
+        "gh",
+        "api",
+        "repos/OWNER/REPO/commits/abc123/status",
+    ] in commands
+    assert [
+        "gh",
+        "api",
+        "repos/OWNER/REPO/branches/main/protection/required_status_checks",
     ] in commands
     assert ["gh", "pr", "merge", "77", "--repo", "OWNER/REPO", "--merge"] in commands
 
@@ -1730,6 +1802,10 @@ def test_review_prompt_includes_pr_metadata_and_suggested_commands(tmp_path):
     assert "requires confirmation in non-interactive mode" in prompt
     assert "write them outside the repository checkout" in prompt
     assert "/tmp/coding-review-agent-loop/scratch/" in prompt
+    assert "GitHub PR checks:" in prompt
+    assert "- Overall state: passing" in prompt
+    assert "- Required checks: test" in prompt
+    assert "Do not say or imply that tests passed globally unless the GitHub PR checks" in prompt
     assert "ignore approved-review follow-up sections" in prompt
     assert "### Future follow-ups" not in prompt
     assert "legacy heading `### Non-blocking follow-ups`" not in prompt
@@ -1771,6 +1847,155 @@ def test_review_prompt_includes_signed_human_requirements(tmp_path):
     assert "Signed human reviewer requirements override AI reviewer preferences" in prompt
     assert "Verify every signed human reviewer requirement before approving." in prompt
     assert "<!-- HUMAN_REQUIREMENTS_RESOLVED -->" in prompt
+
+
+def test_pr_loop_routes_failing_github_checks_through_coder_followup(tmp_path, monkeypatch):
+    runner = FakeRunner(
+        codex_outputs=[
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "Still failing upstream.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        claude_outputs=["Investigated CI.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
+    )
+    config = make_config(tmp_path, max_rounds=2)
+    check_states = iter(
+        [
+            {
+                "check_runs": [
+                    {"name": "tests/test_server.py", "status": "completed", "conclusion": "success"},
+                    {"name": "tests/test_security.py", "status": "completed", "conclusion": "failure"},
+                ]
+            },
+            {"check_runs": [{"name": "test", "status": "completed", "conclusion": "success"}]},
+        ]
+    )
+
+    def advance_checks(*_args, **_kwargs):
+        runner.pr_check_runs_payload = next(check_states)
+        return original_get_pr_checks(*_args, **_kwargs)
+
+    from coding_review_agent_loop import orchestrator as orchestrator_module
+
+    original_get_pr_checks = orchestrator_module.get_pr_checks
+    monkeypatch.setattr(orchestrator_module, "get_pr_checks", advance_checks)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert any(
+        comment.startswith("GitHub PR checks are failing for PR #77.") for comment in runner.comments
+    )
+    followup_prompt = next(
+        cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"] and "GitHub PR checks review:" in cmd[-1]
+    )
+    assert "Failing checks: tests/test_security.py (failure)" in followup_prompt
+    assert "Do not claim global test success unless GitHub PR checks are green." in followup_prompt
+
+
+def test_pr_loop_blocks_final_approval_when_github_checks_pending(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=["Looks good locally.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+        pr_check_runs_payload={"check_runs": []},
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_payload={"contexts": ["test"]},
+    )
+    config = make_config(tmp_path)
+
+    with pytest.raises(AgentLoopError, match="GitHub PR checks for PR #77 are pending"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert any(
+        comment.startswith("GitHub PR checks are still pending for PR #77.")
+        for comment in runner.comments
+    )
+
+
+def test_pr_loop_allows_repos_without_github_checks_when_branch_protection_404(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+        pr_check_runs_payload={"check_runs": []},
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_returncode=1,
+        pr_branch_protection_stderr="404 Not Found",
+    )
+    config = make_config(tmp_path)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+    assert not any(comment.startswith("GitHub PR checks are") for comment in runner.comments)
+
+
+def test_pr_loop_allows_repos_without_github_checks_when_branch_protection_403(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+        pr_check_runs_payload={"check_runs": []},
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_returncode=1,
+        pr_branch_protection_stderr="403 Forbidden",
+    )
+    config = make_config(tmp_path)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+    assert not any(comment.startswith("GitHub PR checks are") for comment in runner.comments)
+
+
+def test_review_prompt_includes_failing_github_check_status(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=["Blocking.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"],
+        pr_check_runs_payload={
+            "check_runs": [
+                {"name": "tests/test_security.py", "status": "completed", "conclusion": "failure"}
+            ]
+        },
+        pr_branch_protection_payload={"contexts": ["tests/test_security.py"]},
+    )
+    config = make_config(tmp_path, max_rounds=1)
+
+    with pytest.raises(AgentLoopError, match="blocking issues after round 1"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"])
+    assert "GitHub PR checks:" in prompt
+    assert "- Overall state: failing" in prompt
+    assert "- Failing checks: tests/test_security.py (failure)" in prompt
+
+
+def test_review_prompt_mentions_branch_protection_forbidden_when_checks_exist(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+        pr_check_runs_payload={
+            "check_runs": [{"name": "test", "status": "completed", "conclusion": "success"}]
+        },
+        pr_branch_protection_returncode=1,
+        pr_branch_protection_stderr="403 Forbidden",
+    )
+    config = make_config(tmp_path)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"])
+    assert "Current GitHub token cannot inspect branch protection on the PR base branch." in prompt
+
+
+def test_get_pr_checks_returns_no_checks_in_dry_run(tmp_path):
+    runner = FakeRunner()
+    config = make_config(tmp_path, dry_run=True)
+
+    pr_checks = get_pr_checks(
+        runner,
+        config=config,
+        metadata=PullRequestMetadata(
+            number=77,
+            repo="OWNER/REPO",
+            title="Improve review prompt context",
+            head_branch="feature/review-context",
+            base_branch="main",
+            head_sha="abc123",
+            url="https://github.com/OWNER/REPO/pull/77",
+        ),
+    )
+
+    assert pr_checks.state == "no_checks"
+    assert pr_checks.branch_protection_status == "unavailable"
+    assert pr_checks.branch_protection_note == "Dry run mode does not query live GitHub PR checks."
 
 
 def test_blocking_followup_prompt_reinjects_issue_context(tmp_path):
