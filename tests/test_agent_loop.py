@@ -40,11 +40,22 @@ from coding_review_agent_loop.github import (
     get_pr_checks,
 )
 from coding_review_agent_loop.migrations import MigrationValidationResult, validate_pr_migration_topology
-from coding_review_agent_loop.prompts import format_human_requirements, format_issue_context
+from coding_review_agent_loop.orchestrator import (
+    _apply_unresolved_item_dispositions,
+    _review_freeform_summary_text,
+)
+from coding_review_agent_loop.prompts import (
+    build_review_prompt,
+    format_human_requirements,
+    format_issue_context,
+)
 from coding_review_agent_loop.protocol import (
     parse_approved_followups,
+    parse_review,
     parse_non_blocking_followups,
     parse_signed_human_requirement_body,
+    parse_unresolved_item_dispositions,
+    UnresolvedReviewItem,
 )
 
 
@@ -367,6 +378,12 @@ def read_usage_summary(log_dir: Path) -> dict:
     summary_paths = list(log_dir.glob("*-usage-summary.json"))
     assert len(summary_paths) == 1
     return json.loads(summary_paths[0].read_text(encoding="utf-8"))
+
+
+def prior_item_dispositions(*lines: str) -> str:
+    if not lines:
+        return ""
+    return "\n\n### Prior unresolved item dispositions\n" + "\n".join(f"- {line}" for line in lines)
 
 
 def make_config(tmp_path, *, create_dirs=True, **overrides):
@@ -1198,6 +1215,186 @@ def test_parse_approved_followups_ignores_prose_empty_placeholders():
     assert followups.future == ()
 
 
+def test_parse_unresolved_item_dispositions_extracts_structured_updates():
+    review = """
+    LGTM.
+
+    ### Prior unresolved item dispositions
+    - [item-1] resolved
+    - [item-2] still blocking
+    - [item-3] same-pr
+    - [item-4] future follow-up: split this into a separate PR
+
+    <!-- AGENT_STATE: approved -->
+    -- OpenAI Codex
+    """
+
+    dispositions = parse_unresolved_item_dispositions(review, reviewer="OpenAI Codex")
+
+    assert [(item.item_id, item.disposition, item.note) for item in dispositions] == [
+        ("item-1", "resolved", None),
+        ("item-2", "blocking", None),
+        ("item-3", "same-pr", None),
+        ("item-4", "future", "split this into a separate PR"),
+    ]
+
+
+def test_parse_unresolved_item_dispositions_ignores_non_bullet_prose():
+    review = """
+    LGTM.
+
+    ### Prior unresolved item dispositions
+    These are the remaining status calls.
+    - [item-1] resolved
+    Closing thought after the bullets.
+
+    <!-- AGENT_STATE: approved -->
+    -- OpenAI Codex
+    """
+
+    dispositions = parse_unresolved_item_dispositions(review, reviewer="OpenAI Codex")
+
+    assert [(item.item_id, item.disposition, item.note) for item in dispositions] == [
+        ("item-1", "resolved", None),
+    ]
+
+
+def test_parse_review_rejects_future_followups_in_blocking_reviews():
+    review = """
+    Still blocked.
+
+    ### Future follow-ups
+    - Do this later.
+
+    <!-- AGENT_STATE: blocking -->
+    -- OpenAI Codex
+    """
+
+    with pytest.raises(AgentLoopError, match="Future follow-ups"):
+        parse_review(review, reviewer="OpenAI Codex")
+
+
+def test_review_prompt_includes_prior_unresolved_items_and_disposition_instructions(tmp_path):
+    config = make_config(tmp_path, approved_followups="fix-and-summarize")
+    prompt = build_review_prompt(
+        77,
+        2,
+        config,
+        reviewer="codex",
+        pr_metadata=PullRequestMetadata(
+            number=77,
+            repo="OWNER/REPO",
+            title="Improve review prompt context",
+            head_branch="feature/review-context",
+            base_branch="main",
+            head_sha="abc123",
+            url="https://github.com/OWNER/REPO/pull/77",
+        ),
+        unresolved_items=(
+            UnresolvedReviewItem(
+                item_id="item-1",
+                reviewer="Anthropic Claude",
+                source_round=1,
+                text="Needs a regression test before merge.",
+                status="blocking",
+            ),
+            UnresolvedReviewItem(
+                item_id="item-2",
+                reviewer="OpenAI Codex",
+                source_round=1,
+                text="Rename the helper before merge.",
+                status="same-pr",
+            ),
+        ),
+    )
+
+    assert "Prior unresolved review items from earlier rounds" in prompt
+    assert "[item-1] blocking from Anthropic Claude in round 1" in prompt
+    assert "[item-2] same-pr from OpenAI Codex in round 1" in prompt
+    assert "### Prior unresolved item dispositions" in prompt
+    assert "- [item-id] resolved" in prompt
+    assert "Only use `future follow-up` when returning `approved`." in prompt
+
+
+def test_review_prompt_indents_multiline_prior_unresolved_item_text(tmp_path):
+    config = make_config(tmp_path, approved_followups="fix-and-summarize")
+    prompt = build_review_prompt(
+        77,
+        2,
+        config,
+        reviewer="codex",
+        pr_metadata=PullRequestMetadata(
+            number=77,
+            repo="OWNER/REPO",
+            title="Improve review prompt context",
+            head_branch="feature/review-context",
+            base_branch="main",
+            head_sha="abc123",
+            url="https://github.com/OWNER/REPO/pull/77",
+        ),
+        unresolved_items=(
+            UnresolvedReviewItem(
+                item_id="item-1",
+                reviewer="Anthropic Claude",
+                source_round=1,
+                text="Needs a regression test before merge.\n\nInclude the mixed-reviewer approval case.",
+                status="blocking",
+            ),
+        ),
+    )
+
+    assert "  Needs a regression test before merge." in prompt
+    assert "\n\n  Include the mixed-reviewer approval case." in prompt
+
+
+def test_review_freeform_summary_text_strips_structured_followup_sections():
+    review = """Blocking issue summary.
+
+### Prior unresolved item dispositions
+- [item-1] still blocking: needs one more assertion
+
+### Same-PR follow-ups
+- Rename helper
+
+### Future follow-ups
+- Document cleanup later
+
+<!-- AGENT_STATE: blocking -->
+-- OpenAI Codex
+"""
+
+    assert _review_freeform_summary_text(review) == "Blocking issue summary."
+
+
+def test_apply_unresolved_item_dispositions_appends_disposition_notes_to_text():
+    unresolved_items = (
+        UnresolvedReviewItem(
+            item_id="item-1",
+            reviewer="OpenAI Codex",
+            source_round=1,
+            text="Needs regression coverage before merge.",
+            status="blocking",
+        ),
+    )
+    dispositions_by_item = {
+        "item-1": [
+            parse_unresolved_item_dispositions(
+                prior_item_dispositions("[item-1] still blocking: include API error path too"),
+                reviewer="Anthropic Claude",
+            )[0]
+        ]
+    }
+
+    updated_items = _apply_unresolved_item_dispositions(unresolved_items, dispositions_by_item)
+
+    assert len(updated_items) == 1
+    assert updated_items[0].text == (
+        "Needs regression coverage before merge.\n\n"
+        "Update from Anthropic Claude: include API error path too"
+    )
+    assert updated_items[0].notes == ("Anthropic Claude: include API error path too",)
+
+
 @pytest.mark.parametrize("terminator", ["<!-- AGENT_STATE: approved -->", "-- OpenAI Codex"])
 def test_parse_non_blocking_followups_stops_at_final_markers(terminator):
     review = f"""
@@ -1236,7 +1433,9 @@ def test_issue_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
         ],
         codex_outputs=[
             "Finding: bug remains.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
-            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
     )
     config = make_config(tmp_path)
@@ -1422,7 +1621,9 @@ def test_issue_loop_can_use_codex_as_coder_and_claude_as_reviewer(tmp_path):
         ],
         claude_outputs=[
             "Finding: bug remains.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
-            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
         ],
     )
     config = make_config(tmp_path, coder="codex", reviewer="claude")
@@ -1448,7 +1649,9 @@ def test_issue_loop_runs_pre_review_tests_after_coder_changes(tmp_path):
         ],
         codex_outputs=[
             "Finding: bug remains.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
-            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
     )
     config = make_config(tmp_path, test_command=("pytest", "tests/test_agent_loop.py"))
@@ -1853,7 +2056,9 @@ def test_pr_loop_routes_migration_validation_failure_through_coder_followup(tmp_
         claude_outputs=["Fixed migration.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
         codex_outputs=[
             "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
-            "LGTM again.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "LGTM again."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
     )
     config = make_config(tmp_path, test_command=("pytest", "tests/test_agent_loop.py"), max_rounds=2)
@@ -1879,7 +2084,7 @@ def test_pr_loop_routes_migration_validation_failure_through_coder_followup(tmp_
 
     coder_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
     assert len(coder_prompts) == 1
-    assert "Alembic migration validation review:" in coder_prompts[0]
+    assert "Alembic migration validation unresolved blocking item [item-1]" in coder_prompts[0]
     assert "expected current head `402b9e8af79b`" in coder_prompts[0]
 
     commands = runner.commands
@@ -1970,7 +2175,9 @@ def test_pr_loop_routes_failing_github_checks_through_coder_followup(tmp_path, m
     runner = FakeRunner(
         codex_outputs=[
             "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
-            "Still failing upstream.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "Still failing upstream."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
         claude_outputs=["Investigated CI.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
     )
@@ -2002,7 +2209,10 @@ def test_pr_loop_routes_failing_github_checks_through_coder_followup(tmp_path, m
         comment.startswith("GitHub PR checks are failing for PR #77.") for comment in runner.comments
     )
     followup_prompt = next(
-        cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"] and "GitHub PR checks review:" in cmd[-1]
+        cmd[-1]
+        for cmd, _cwd in runner.commands
+        if cmd[:1] == ["claude"]
+        and "GitHub PR checks unresolved blocking item [item-1] from round 1:" in cmd[-1]
     )
     assert "Failing checks: tests/test_security.py (failure)" in followup_prompt
     assert "Do not claim global test success unless GitHub PR checks are green." in followup_prompt
@@ -2220,7 +2430,9 @@ def test_blocking_followup_prompt_reinjects_issue_context(tmp_path):
     runner = FakeRunner(
         codex_outputs=[
             "Needs a fix.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
-            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
         claude_outputs=["Fixed review.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
     )
@@ -2255,7 +2467,9 @@ def test_blocking_followup_prompt_includes_human_requirements_before_ai_feedback
     runner = FakeRunner(
         codex_outputs=[
             "Needs a fix.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
-            "LGTM.\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
         claude_outputs=["Fixed review.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
         pr_payload={
@@ -2285,7 +2499,7 @@ def test_blocking_followup_prompt_includes_human_requirements_before_ai_feedback
         cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"] and "Address the review below" in cmd[-1]
     )
     assert followup_prompt.index("Signed Human Reviewer Requirements") < followup_prompt.index(
-        "Codex review:"
+        "Codex unresolved blocking item [item-1] from round 1:"
     )
     assert "Please use the absolute URL." in followup_prompt
     assert "Needs a fix." in followup_prompt
@@ -2725,7 +2939,12 @@ def test_pr_loop_fix_and_summarize_sends_same_pr_followups_to_coder_then_rerevie
             "### Future follow-ups\n"
             "- Add broader integration coverage later.\n"
             "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
-            "Codex approves final pass.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "Codex approves final pass."
+            + prior_item_dispositions(
+                "[item-1] future follow-up: still future work",
+                "[item-2] resolved",
+            )
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
         claude_outputs=["Renamed helper.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
     )
@@ -2749,21 +2968,22 @@ def test_pr_loop_fix_and_summarize_sends_same_pr_followups_to_coder_then_rerevie
 
     agent_commands = [cmd[:2] for cmd, _cwd in runner.commands if cmd[:1] in (["claude"], ["codex"])]
     assert agent_commands == [["codex", "exec"], ["claude", "--print"], ["codex", "exec"]]
-    assert len(runner.comments) == 3
+    assert len(runner.comments) == 4
     followup_prompt = next(
         cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"] and "Same-PR follow-ups" in cmd[-1]
     )
     assert "Rename the helper before merge." in followup_prompt
+    assert "[item-2]" in followup_prompt
     assert "Issue context from GitHub" in followup_prompt
     assert "Title:\nSupport issue comments" in followup_prompt
     assert "Clarifying issue comment." in followup_prompt
     assert "small, localized cleanup for the\ncurrent PR" in followup_prompt
     assert "Keep the change narrowly scoped to the listed items" in followup_prompt
     assert "Do not take on\nlarger redesigns or unrelated future work" in followup_prompt
-    assert "Add broader integration coverage later." not in runner.comments[-1]
+    assert "Add broader integration coverage later." in runner.comments[-1]
 
 
-def test_pr_loop_fix_and_issue_ignores_future_followups_from_pre_fix_round(tmp_path):
+def test_pr_loop_fix_and_issue_persists_future_followups_from_pre_fix_round(tmp_path):
     runner = FakeRunner(
         codex_outputs=[
             "Codex approves with cleanup.\n\n"
@@ -2772,7 +2992,12 @@ def test_pr_loop_fix_and_issue_ignores_future_followups_from_pre_fix_round(tmp_p
             "### Future follow-ups\n"
             "- Add a separate migration dry-run command.\n"
             "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
-            "Codex approves final pass.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "Codex approves final pass."
+            + prior_item_dispositions(
+                "[item-1] future follow-up: still separate work",
+                "[item-2] resolved",
+            )
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
         claude_outputs=["Tightened message.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
     )
@@ -2780,9 +3005,10 @@ def test_pr_loop_fix_and_issue_ignores_future_followups_from_pre_fix_round(tmp_p
 
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
-    assert runner.issues == []
+    assert len(runner.issues) == 1
+    assert runner.issues[0]["title"] == "Follow up future review note: Add a separate migration dry-run command."
     commands = [cmd[:3] for cmd, _cwd in runner.commands]
-    assert commands.count(["gh", "issue", "create"]) == 0
+    assert commands.count(["gh", "issue", "create"]) == 1
 
 
 def test_pr_loop_fix_and_issue_uses_only_final_round_future_followups(tmp_path):
@@ -2797,7 +3023,11 @@ def test_pr_loop_fix_and_issue_uses_only_final_round_future_followups(tmp_path):
             "Codex approves final pass.\n\n"
             "### Future follow-ups\n"
             "- Add a separate migration dry-run command.\n"
-            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            + prior_item_dispositions(
+                "[item-1] resolved",
+                "[item-2] resolved",
+            )
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
         claude_outputs=["Tightened message.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
     )
@@ -2825,7 +3055,12 @@ def test_pr_loop_fix_and_summarize_uses_only_final_round_future_followups(tmp_pa
             "Codex approves final pass.\n\n"
             "### Future follow-ups\n"
             "- Add Codex's final follow-up later.\n"
-            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            + prior_item_dispositions(
+                "[item-1] resolved",
+                "[item-2] resolved",
+                "[item-3] resolved",
+            )
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
         claude_outputs=[
             "Claude approves.\n\n"
@@ -2835,7 +3070,12 @@ def test_pr_loop_fix_and_summarize_uses_only_final_round_future_followups(tmp_pa
             "Claude approves final pass.\n\n"
             "### Future follow-ups\n"
             "- Add Claude's final follow-up later.\n"
-            "<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+            + prior_item_dispositions(
+                "[item-1] resolved",
+                "[item-2] resolved",
+                "[item-3] resolved",
+            )
+            + "\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
         ],
         gemini_outputs=["Added assertion.\n<!-- AGENT_STATE: blocking -->\n-- Google Gemini"],
     )
@@ -2875,7 +3115,12 @@ def test_pr_loop_fix_and_issue_extracts_final_round_bullet_and_prose_future_foll
             "Codex approves final pass.\n\n"
             "### Future follow-ups\n"
             "- Refine token estimation for large review prompts.\n"
-            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            + prior_item_dispositions(
+                "[item-1] resolved",
+                "[item-2] resolved",
+                "[item-3] resolved",
+            )
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
         claude_outputs=[
             "Claude approves with cleanup.\n\n"
@@ -2888,7 +3133,12 @@ def test_pr_loop_fix_and_issue_extracts_final_round_bullet_and_prose_future_foll
             "in a future cleanup.\n\n"
             "### Same-PR follow-ups\n"
             "No same-PR follow-ups.\n"
-            "<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+            + prior_item_dispositions(
+                "[item-1] resolved",
+                "[item-2] resolved",
+                "[item-3] resolved",
+            )
+            + "\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
         ],
         gemini_outputs=["Tightened message.\n<!-- AGENT_STATE: blocking -->\n-- Google Gemini"],
         issue_urls=[
@@ -2925,11 +3175,15 @@ def test_pr_loop_reruns_all_reviewers_when_any_reviewer_blocks(tmp_path):
         claude_outputs=[
             "Needs a regression test.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
             "Addressed review.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
-            "Claude approves.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+            "Claude approves."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
         ],
         codex_outputs=[
             "Codex approves first pass.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
-            "Codex approves second pass.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "Codex approves second pass."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
     )
     config = make_config(tmp_path, coder="claude", reviewer=("claude", "codex"))
@@ -2952,6 +3206,176 @@ def test_pr_loop_reruns_all_reviewers_when_any_reviewer_blocks(tmp_path):
         == "number,title,headRefName,baseRefName,headRefOid,url,comments,reviews"
     ]
     assert len(metadata_fetches) == 2
+
+
+def test_pr_loop_rejects_cross_reviewer_approval_without_prior_item_disposition(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Needs a regression test.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+            "Claude resolves it."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Codex approves first pass.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "Codex approves second pass.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        gemini_outputs=["Implemented fix.\n<!-- AGENT_STATE: blocking -->\n-- Google Gemini"],
+    )
+    config = make_config(tmp_path, coder="gemini", reviewer=("claude", "codex"), max_rounds=2)
+
+    with pytest.raises(AgentLoopError, match="did not evaluate all prior unresolved items: item-1"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    second_codex_prompt = [
+        cmd[-1]
+        for cmd, _cwd in runner.commands
+        if cmd[:2] == ["codex", "exec"] and "round 2" in cmd[-1]
+    ][0]
+    assert "Prior unresolved review items from earlier rounds" in second_codex_prompt
+    assert "[item-1] blocking from Claude in round 1" in second_codex_prompt
+
+
+def test_pr_loop_can_downgrade_prior_blocker_to_future_followup_only_in_approved_review(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=["Addressed review.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
+        codex_outputs=[
+            "Missing docs cleanup.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "LGTM now."
+            + prior_item_dispositions("[item-1] future follow-up: cleanup can wait")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, approved_followups="summarize", max_rounds=2)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    summary = runner.comments[-1]
+    assert summary.startswith("Approved-review future follow-ups for PR #77:")
+    assert "Missing docs cleanup." in summary
+
+
+def test_pr_loop_persists_downgraded_future_followup_across_later_blocking_rounds(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Still blocked.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+            "LGTM."
+            + prior_item_dispositions("[item-1] future follow-up: cleanup can wait", "[item-2] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Missing docs cleanup.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "Implemented fix for Claude.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "Looks good."
+            + prior_item_dispositions("[item-1] future follow-up: cleanup can wait", "[item-2] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        reviewer=("codex", "claude"),
+        coder="codex",
+        approved_followups="summarize",
+        max_rounds=2,
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    summary = runner.comments[-1]
+    assert summary.startswith("Approved-review future follow-ups for PR #77:")
+    assert "Missing docs cleanup." in summary
+
+
+def test_pr_loop_carries_new_future_followups_into_later_reviewer_prompts(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Codex approves with future work.\n\n"
+            "### Future follow-ups\n"
+            "- Document cache cleanup behavior.\n"
+            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "Codex approves final pass."
+            + prior_item_dispositions(
+                "[item-1] future follow-up: still future work",
+                "[item-2] resolved",
+            )
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        claude_outputs=[
+            "Claude still blocks.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+            "Claude approves final pass."
+            + prior_item_dispositions(
+                "[item-1] future follow-up: still future work",
+                "[item-2] resolved",
+            )
+            + "\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+        gemini_outputs=["Implemented blocker.\n<!-- AGENT_STATE: blocking -->\n-- Google Gemini"],
+    )
+    config = make_config(
+        tmp_path,
+        coder="gemini",
+        reviewer=("codex", "claude"),
+        approved_followups="summarize",
+        max_rounds=2,
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    second_claude_prompt = [
+        cmd[-1]
+        for cmd, _cwd in runner.commands
+        if cmd[:1] == ["claude"] and "round 2" in cmd[-1]
+    ][0]
+    assert "Document cache cleanup behavior." in second_claude_prompt
+    assert "[item-1] future" in second_claude_prompt
+    summary = runner.comments[-1]
+    assert summary.startswith("Approved-review future follow-ups for PR #77:")
+    assert "Document cache cleanup behavior." in summary
+
+
+def test_pr_loop_carries_prior_item_notes_without_creating_duplicate_blocker_items(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Needs regression coverage.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "Still blocked."
+            + prior_item_dispositions("[item-1] still blocking: include API error path too")
+            + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "Looks good."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        claude_outputs=[
+            "Added coverage.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+            "Expanded coverage.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+    )
+    config = make_config(tmp_path, max_rounds=3)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    second_coder_prompt = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]][1]
+    assert "Latest reviewer updates:" in second_coder_prompt
+    assert "Codex: include API error path too" in second_coder_prompt
+    assert "[item-2]" not in second_coder_prompt
+
+
+def test_pr_loop_same_pr_items_remain_blocking_until_explicitly_resolved(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Codex approves with cleanup.\n\n"
+            "### Same-PR follow-ups\n"
+            "- Rename the helper before merge.\n"
+            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "Codex still wants the rename."
+            + prior_item_dispositions("[item-1] same-pr")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        claude_outputs=["Tried a partial fix.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
+    )
+    config = make_config(tmp_path, approved_followups="fix-and-summarize", max_rounds=2)
+
+    with pytest.raises(AgentLoopError, match="still reported blocking issues after round 2"):
+        run_pr_loop(runner, pr_number=77, config=config)
 
 
 def test_pr_loop_does_not_run_claude_after_final_blocking_round(tmp_path):
@@ -3386,7 +3810,9 @@ def test_reviewer_checkout_refreshes_each_round_before_review(tmp_path):
         claude_outputs=["Fixed.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
         codex_outputs=[
             "Please fix it.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
-            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
     )
     config = make_config(tmp_path, coder="claude", reviewer="codex")
@@ -3918,7 +4344,9 @@ def test_task_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
         ],
         codex_outputs=[
             "One nit.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
-            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
         pr_payload={
             "number": 91,
@@ -4148,7 +4576,9 @@ def test_codex_issue_loop_alternates_until_claude_approval(tmp_path):
         ],
         claude_outputs=[
             "Missing test.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
-            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
         ],
     )
     config = make_config(tmp_path, coder="codex", reviewer="claude")
@@ -4237,7 +4667,9 @@ def test_gemini_issue_loop_resumes_session_for_followup(tmp_path):
         ],
         codex_outputs=[
             "Needs a regression test.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
-            "Looks good.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "Looks good."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
     )
     config = make_config(
