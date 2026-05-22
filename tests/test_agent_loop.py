@@ -40,6 +40,10 @@ from coding_review_agent_loop.github import (
     get_pr_checks,
 )
 from coding_review_agent_loop.migrations import MigrationValidationResult, validate_pr_migration_topology
+from coding_review_agent_loop.orchestrator import (
+    _apply_unresolved_item_dispositions,
+    _review_freeform_summary_text,
+)
 from coding_review_agent_loop.prompts import (
     build_review_prompt,
     format_human_requirements,
@@ -1341,6 +1345,54 @@ def test_review_prompt_indents_multiline_prior_unresolved_item_text(tmp_path):
 
     assert "  Needs a regression test before merge." in prompt
     assert "\n\n  Include the mixed-reviewer approval case." in prompt
+
+
+def test_review_freeform_summary_text_strips_structured_followup_sections():
+    review = """Blocking issue summary.
+
+### Prior unresolved item dispositions
+- [item-1] still blocking: needs one more assertion
+
+### Same-PR follow-ups
+- Rename helper
+
+### Future follow-ups
+- Document cleanup later
+
+<!-- AGENT_STATE: blocking -->
+-- OpenAI Codex
+"""
+
+    assert _review_freeform_summary_text(review) == "Blocking issue summary."
+
+
+def test_apply_unresolved_item_dispositions_appends_disposition_notes_to_text():
+    unresolved_items = (
+        UnresolvedReviewItem(
+            item_id="item-1",
+            reviewer="OpenAI Codex",
+            source_round=1,
+            text="Needs regression coverage before merge.",
+            status="blocking",
+        ),
+    )
+    dispositions_by_item = {
+        "item-1": [
+            parse_unresolved_item_dispositions(
+                prior_item_dispositions("[item-1] still blocking: include API error path too"),
+                reviewer="Anthropic Claude",
+            )[0]
+        ]
+    }
+
+    updated_items = _apply_unresolved_item_dispositions(unresolved_items, dispositions_by_item)
+
+    assert len(updated_items) == 1
+    assert updated_items[0].text == (
+        "Needs regression coverage before merge.\n\n"
+        "Update from Anthropic Claude: include API error path too"
+    )
+    assert updated_items[0].notes == ("Anthropic Claude: include API error path too",)
 
 
 @pytest.mark.parametrize("terminator", ["<!-- AGENT_STATE: approved -->", "-- OpenAI Codex"])

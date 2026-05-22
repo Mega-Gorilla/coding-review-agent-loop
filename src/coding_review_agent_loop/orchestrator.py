@@ -360,20 +360,26 @@ def _apply_unresolved_item_dispositions(
         if not dispositions:
             next_unresolved.append(item)
             continue
+        text = item.text
         notes = list(item.notes)
+        outcomes = {disposition.disposition for disposition in dispositions}
+        preserve_note_in_text = bool({"blocking", "same-pr"} & outcomes)
         for disposition in dispositions:
             if disposition.note:
                 note_text = f"{disposition.reviewer}: {disposition.note}"
+                if preserve_note_in_text:
+                    update_line = f"Update from {note_text}"
+                    if update_line not in text:
+                        text = f"{text.rstrip()}\n\n{update_line}"
                 if note_text not in notes:
                     notes.append(note_text)
-        outcomes = {disposition.disposition for disposition in dispositions}
         if "blocking" in outcomes:
             next_unresolved.append(
                 UnresolvedReviewItem(
                     item_id=item.item_id,
                     reviewer=item.reviewer,
                     source_round=item.source_round,
-                    text=item.text,
+                    text=text,
                     status="blocking",
                     notes=tuple(notes),
                 )
@@ -385,7 +391,7 @@ def _apply_unresolved_item_dispositions(
                     item_id=item.item_id,
                     reviewer=item.reviewer,
                     source_round=item.source_round,
-                    text=item.text,
+                    text=text,
                     status="same-pr",
                     notes=tuple(notes),
                 )
@@ -397,7 +403,7 @@ def _apply_unresolved_item_dispositions(
                     item_id=item.item_id,
                     reviewer=item.reviewer,
                     source_round=item.source_round,
-                    text=item.text,
+                    text=text,
                     status="future",
                     notes=tuple(notes),
                 )
