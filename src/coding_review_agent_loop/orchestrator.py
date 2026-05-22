@@ -816,22 +816,6 @@ def _format_unresolved_items_for_coder(items: Sequence[UnresolvedReviewItem]) ->
     return "\n".join(lines).strip()
 
 
-def _format_plan_approval_summary(issue_number: int, approved_plan: str) -> str:
-    return "\n".join(
-        [
-            f"Planning complete for issue #{issue_number}.",
-            "",
-            "Outcome: implement",
-            "",
-            "Approved plan:",
-            "",
-            approved_plan,
-            "",
-            "-- coding-review-agent-loop",
-        ]
-    )
-
-
 def _format_plan_approval_summary_with_followups(
     issue_number: int,
     approved_plan: str,
