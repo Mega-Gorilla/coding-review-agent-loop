@@ -2048,6 +2048,25 @@ def test_pr_loop_summarizes_approved_followups_before_pending_check_exit(tmp_pat
     assert runner.comments[2].startswith("GitHub PR checks are still pending for PR #77.")
 
 
+def test_pr_loop_summary_marker_has_single_blank_line_before_footer_marker(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Looks good locally.\n\n### Future follow-ups\n- Add cleanup docs.\n"
+            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+        ],
+    )
+    config = make_config(tmp_path, approved_followups="summarize")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    summary = runner.comments[-1]
+    assert (
+        "These were mentioned in approved reviews as future work and did not block merge readiness.\n\n"
+        "<!-- AGENT_APPROVED_FOLLOWUPS: pr=77 head=abc123 mode=summarize -->\n"
+        "-- coding-review-agent-loop"
+    ) in summary
+
+
 def test_pr_loop_creates_approved_followup_issues_before_unavailable_check_exit(tmp_path):
     runner = FakeRunner(
         codex_outputs=[

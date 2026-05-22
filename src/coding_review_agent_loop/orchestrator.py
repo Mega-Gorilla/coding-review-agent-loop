@@ -344,6 +344,7 @@ def _append_approved_followups_marker(
     prefix, found, _suffix = body.rpartition(footer)
     if not found:
         return body
+    prefix = prefix.rstrip()
     return "\n".join(
         [
             prefix,
