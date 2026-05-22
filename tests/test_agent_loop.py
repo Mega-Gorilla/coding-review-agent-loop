@@ -2535,7 +2535,8 @@ def test_review_prompt_allows_same_pr_followups_for_fix_modes(tmp_path):
     assert "small, localized, low-risk cleanup" in prompt
     assert "narrow current-PR cleanup in files already\ntouched by this PR or directly adjacent code" in prompt
     assert "will be sent back to Claude and require another review" in prompt
-    assert "If you return `<!-- AGENT_STATE: blocking -->`, do not include a\nFuture follow-ups section at all" in prompt
+    assert "If you return `<!-- AGENT_STATE: blocking -->`, do not use structured\nfollow-up sections" in prompt
+    assert "include all findings in the main body of your response so\nthey are not missed during revision" in prompt
 
 
 def test_pr_loop_keeps_blocking_review_when_future_followups_are_misclassified(tmp_path):

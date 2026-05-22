@@ -643,9 +643,9 @@ heading:
 
 Same-PR follow-ups will be sent back to {coder_name} and require another review
 round before final approval. Do not put trivial style nits in either follow-up
-section. If you return `<!-- AGENT_STATE: blocking -->`, do not include a
-Future follow-ups section at all; keep only blocking findings and any Same-PR
-follow-ups that should be fixed before approval.
+section. If you return `<!-- AGENT_STATE: blocking -->`, do not use structured
+follow-up sections; include all findings in the main body of your response so
+they are not missed during revision.
 """
     else:
         followup_guidance = """If you approve but notice substantial work that is better handled separately in
