@@ -1259,9 +1259,12 @@ def test_parse_unresolved_item_dispositions_ignores_non_bullet_prose():
     ]
 
 
-def test_parse_review_rejects_future_followups_in_blocking_reviews():
+def test_parse_review_drops_future_followups_in_blocking_reviews():
     review = """
     Still blocked.
+
+    ### Same-PR follow-ups
+    - Tighten the helper in this file.
 
     ### Future follow-ups
     - Do this later.
@@ -1270,8 +1273,11 @@ def test_parse_review_rejects_future_followups_in_blocking_reviews():
     -- OpenAI Codex
     """
 
-    with pytest.raises(AgentLoopError, match="Future follow-ups"):
-        parse_review(review, reviewer="OpenAI Codex")
+    parsed = parse_review(review, reviewer="OpenAI Codex")
+
+    assert parsed.state == "blocking"
+    assert [item.text for item in parsed.followups.same_pr] == ["Tighten the helper in this file."]
+    assert parsed.followups.future == ()
 
 
 def test_review_prompt_includes_prior_unresolved_items_and_disposition_instructions(tmp_path):
@@ -2529,6 +2535,45 @@ def test_review_prompt_allows_same_pr_followups_for_fix_modes(tmp_path):
     assert "small, localized, low-risk cleanup" in prompt
     assert "narrow current-PR cleanup in files already\ntouched by this PR or directly adjacent code" in prompt
     assert "will be sent back to Claude and require another review" in prompt
+    assert "If you return `<!-- AGENT_STATE: blocking -->`, do not include a\nFuture follow-ups section at all" in prompt
+
+
+def test_pr_loop_keeps_blocking_review_when_future_followups_are_misclassified(tmp_path):
+    runner = FakeRunner(
+        gemini_outputs=[
+            "Still blocked.\n\n"
+            "### Same-PR follow-ups\n"
+            "- Tighten the reset helper.\n\n"
+            "### Future follow-ups\n"
+            "- Consider a broader cleanup later.\n\n"
+            "<!-- AGENT_STATE: blocking -->\n"
+            "-- Google Gemini",
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- Google Gemini",
+        ],
+        codex_outputs=[
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        claude_outputs=["Fixed review.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
+    )
+    config = make_config(
+        tmp_path,
+        reviewer=("gemini", "codex"),
+        approved_followups="fix-and-issue",
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert runner.comments[0].startswith("Still blocked.")
+    assert "Consider a broader cleanup later." in runner.comments[0]
+    followup_prompt = next(
+        cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"] and "Address the review below" in cmd[-1]
+    )
+    assert "Still blocked." in followup_prompt
 
 
 def test_agent_memory_is_created_and_added_to_review_prompt(tmp_path):
