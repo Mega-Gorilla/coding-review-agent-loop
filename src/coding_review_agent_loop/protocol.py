@@ -258,7 +258,10 @@ def parse_review(text: str, *, reviewer: str) -> ParsedReview:
     followups = parse_approved_followups(text, reviewer=reviewer)
     dispositions = parse_unresolved_item_dispositions(text, reviewer=reviewer)
     if state == "blocking" and followups.future:
-        raise AgentLoopError("Blocking reviews may not include Future follow-ups.")
+        # Some agents still append speculative future work to otherwise valid
+        # blocking reviews. Preserve the blocking findings and ignore that
+        # lower-priority section rather than aborting the whole round.
+        followups = ApprovedFollowups(same_pr=followups.same_pr, future=())
     if state == "blocking" and any(item.disposition == "future" for item in dispositions):
         raise AgentLoopError(
             "Blocking reviews may not downgrade prior unresolved items to Future follow-ups."
