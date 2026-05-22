@@ -1099,6 +1099,51 @@ def test_parse_approved_followups_stops_at_unrelated_bold_heading():
     ]
 
 
+def test_parse_approved_followups_extracts_bullets_and_prose_paragraphs():
+    bullet_review = """
+    Codex approves final pass.
+
+    ### Future follow-ups
+    - Refine token estimation for large review prompts.
+
+    <!-- AGENT_STATE: approved -->
+    -- OpenAI Codex
+    """
+    prose_review = """
+    Claude approves final pass.
+
+    ### Future follow-ups
+    The `_parse_gemini_output` helper is dead production code and could be removed
+    in a future cleanup.
+
+    ### Same-PR follow-ups
+    Rename the helper in this PR before merge.
+    Keep the behavior unchanged.
+
+    ### Notes
+    This note is outside the follow-up sections.
+
+    <!-- AGENT_STATE: approved -->
+    -- Anthropic Claude
+    """
+
+    bullet_followups = parse_approved_followups(bullet_review, reviewer="Codex")
+    prose_followups = parse_approved_followups(prose_review, reviewer="Claude")
+
+    assert [(item.reviewer, item.text) for item in bullet_followups.future] == [
+        ("Codex", "Refine token estimation for large review prompts."),
+    ]
+    assert [(item.reviewer, item.text) for item in prose_followups.future] == [
+        (
+            "Claude",
+            "The `_parse_gemini_output` helper is dead production code and could be removed in a future cleanup.",
+        ),
+    ]
+    assert [(item.reviewer, item.text) for item in prose_followups.same_pr] == [
+        ("Claude", "Rename the helper in this PR before merge. Keep the behavior unchanged."),
+    ]
+
+
 @pytest.mark.parametrize(
     "placeholder",
     [
@@ -1119,6 +1164,29 @@ def test_parse_approved_followups_ignores_empty_placeholders(placeholder):
 
     ### Future follow-ups
     - {placeholder}
+
+    <!-- AGENT_STATE: approved -->
+    -- Google Gemini
+    """
+
+    followups = parse_approved_followups(review, reviewer="Gemini")
+
+    assert followups.same_pr == ()
+    assert followups.future == ()
+
+
+def test_parse_approved_followups_ignores_prose_empty_placeholders():
+    review = """
+    LGTM.
+
+    ### Same-PR follow-ups
+    No same-PR follow-ups.
+
+    ### Future follow-ups
+    None
+
+    ### Notes
+    This sentence should not be captured.
 
     <!-- AGENT_STATE: approved -->
     -- Google Gemini
@@ -2499,6 +2567,27 @@ def test_pr_loop_treats_same_pr_followups_as_blocking_without_fix_mode(tmp_path,
     assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
 
 
+@pytest.mark.parametrize("mode", ["summarize", "issue"])
+def test_pr_loop_treats_same_pr_prose_followups_as_blocking_without_fix_mode(tmp_path, mode):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Codex approves with cleanup.\n\n"
+            "### Same-PR follow-ups\n"
+            "Rename the helper before merge.\n"
+            "Keep the behavior unchanged.\n"
+            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+        ],
+    )
+    config = make_config(tmp_path, approved_followups=mode, max_rounds=1)
+
+    with pytest.raises(AgentLoopError, match="still reported blocking"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert len(runner.comments) == 1
+    assert not runner.issues
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+
+
 def test_pr_loop_caps_approved_followup_issues(tmp_path):
     runner = FakeRunner(
         codex_outputs=[
@@ -2671,6 +2760,63 @@ def test_pr_loop_fix_and_summarize_uses_only_final_round_future_followups(tmp_pa
     assert "- Add Claude's final follow-up later. (Claude)" in summary
     assert "Add Codex's larger follow-up later." not in summary
     assert "Add Claude's larger follow-up later." not in summary
+
+
+def test_pr_loop_fix_and_issue_extracts_final_round_bullet_and_prose_future_followups(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Codex approves with cleanup.\n\n"
+            "### Same-PR follow-ups\n"
+            "- Tighten the validation message.\n\n"
+            "### Future follow-ups\n"
+            "- Stale Codex item fixed by the same-PR pass.\n"
+            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "Codex approves final pass.\n\n"
+            "### Future follow-ups\n"
+            "- Refine token estimation for large review prompts.\n"
+            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        claude_outputs=[
+            "Claude approves with cleanup.\n\n"
+            "### Future follow-ups\n"
+            "- Stale Claude item fixed by the same-PR pass.\n"
+            "<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+            "Claude approves final pass.\n\n"
+            "### Future follow-ups\n"
+            "The `_parse_gemini_output` helper is dead production code and could be removed\n"
+            "in a future cleanup.\n\n"
+            "### Same-PR follow-ups\n"
+            "No same-PR follow-ups.\n"
+            "<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+        gemini_outputs=["Tightened message.\n<!-- AGENT_STATE: blocking -->\n-- Google Gemini"],
+        issue_urls=[
+            "https://github.com/OWNER/REPO/issues/99",
+            "https://github.com/OWNER/REPO/issues/100",
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        coder="gemini",
+        reviewer=("codex", "claude"),
+        approved_followups="fix-and-issue",
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert runner.issues[0]["title"] == (
+        "Follow up future review note: Refine token estimation for large review prompts."
+    )
+    assert runner.issues[1]["title"].startswith(
+        "Follow up future review note: The `_parse_gemini_output` helper is dead production code"
+    )
+    assert "could be removed in a future cleanup." in runner.issues[1]["body"]
+    assert "Stale Codex item fixed by the same-PR pass." not in runner.issues[0]["body"]
+    assert "Stale Claude item fixed by the same-PR pass." not in runner.issues[1]["body"]
+    issue_summary = runner.comments[-1]
+    assert "- https://github.com/OWNER/REPO/issues/99" in issue_summary
+    assert "- https://github.com/OWNER/REPO/issues/100" in issue_summary
+    assert "Stale Codex item fixed by the same-PR pass." not in issue_summary
 
 
 def test_pr_loop_reruns_all_reviewers_when_any_reviewer_blocks(tmp_path):

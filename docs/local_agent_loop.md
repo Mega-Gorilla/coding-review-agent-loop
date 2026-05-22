@@ -444,10 +444,10 @@ be fixed before merge.
 - `fix-and-summarize`: send same-PR follow-ups to the coder for another review round, then summarize future follow-ups after final approval.
 - `fix-and-issue`: send same-PR follow-ups to the coder for another review round, then create issues for future follow-ups after final approval and comment with the created issue links.
 
-Only bullets inside the `Same-PR follow-ups`, `Future follow-ups`, and legacy
-`Non-blocking follow-ups` sections are parsed; each section ends at the next
-heading, HTML marker, or agent signature. The same parsing is used when
-creating follow-up issues. The issue cap keeps one approved review from
+Bullets and prose paragraphs inside the `Same-PR follow-ups`, `Future follow-ups`,
+and legacy `Non-blocking follow-ups` sections are parsed; each section ends at
+the next heading, HTML marker, or agent signature. The same parsing is used
+when creating follow-up issues. The issue cap keeps one approved review from
 creating a large batch of low-value issues.
 
 ## Logs
