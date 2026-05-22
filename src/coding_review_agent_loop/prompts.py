@@ -872,10 +872,13 @@ def build_followup_prompt(
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
     human_requirements: Sequence[HumanReviewRequirement] | None = None,
+    *,
+    human_requirements_context: CoderHumanRequirementsPromptContext | None = None,
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
-    human_requirements_context = render_coder_human_requirements_prompt_context(human_requirements)
+    if human_requirements_context is None:
+        human_requirements_context = render_coder_human_requirements_prompt_context(human_requirements)
     return f"""{reviewer_name} reviewed pull request #{pr_number} in {config.repo} and found blocking issues.
 
 Address the review below in this local checkout. Pull/sync the PR branch if
@@ -910,10 +913,13 @@ def build_same_pr_followup_prompt(
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
     human_requirements: Sequence[HumanReviewRequirement] | None = None,
+    *,
+    human_requirements_context: CoderHumanRequirementsPromptContext | None = None,
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
-    human_requirements_context = render_coder_human_requirements_prompt_context(human_requirements)
+    if human_requirements_context is None:
+        human_requirements_context = render_coder_human_requirements_prompt_context(human_requirements)
     return f"""{reviewer_name} approved pull request #{pr_number} in {config.repo} with same-PR follow-ups.
 
 Address the follow-up items below in this local checkout. Pull/sync the PR

@@ -1338,8 +1338,6 @@ def run_pr_loop(
         configured_reviewers = reviewers(config)
         unresolved_items: list[UnresolvedReviewItem] = []
         next_unresolved_item_number = 1
-        last_coder_output: str | None = None
-        last_coder_human_requirements_context = None
         if reviewer_session_id is not None and configured_reviewers:
             # Backward-compatible single-reviewer resume support: older callers
             # pass one reviewer session, so attach it to the first configured reviewer.
@@ -1353,20 +1351,6 @@ def run_pr_loop(
             pr_metadata = pr_context.metadata
             pr_comments = pr_context.comments
             human_requirements = pr_context.human_requirements
-            if any(item.item_id == HUMAN_REQUIREMENTS_ACK_ITEM_ID for item in unresolved_items):
-                if last_coder_output is not None and last_coder_human_requirements_context is not None:
-                    try:
-                        validate_human_requirements_acknowledgement(
-                            last_coder_output,
-                            surfaced_requirement_ids=last_coder_human_requirements_context.surfaced_requirement_ids,
-                            requires_direct_discussion_ack=(
-                                last_coder_human_requirements_context.requires_direct_discussion_ack
-                            ),
-                        )
-                    except AgentLoopError:
-                        pass
-                    else:
-                        unresolved_items = _clear_human_requirements_ack_item(unresolved_items)
             prior_unresolved_items = tuple(unresolved_items)
             prior_dispositions: dict[str, list[ReviewItemDisposition]] = {
                 item.item_id: [] for item in prior_unresolved_items
@@ -1601,6 +1585,7 @@ def run_pr_loop(
                     memory,
                     issue_context=issue_context,
                     human_requirements=human_requirements,
+                    human_requirements_context=coder_human_requirements_context,
                 )
             else:
                 combined_review = _format_unresolved_items_for_coder(unresolved_items)
@@ -1615,6 +1600,7 @@ def run_pr_loop(
                     memory,
                     issue_context=issue_context,
                     human_requirements=human_requirements,
+                    human_requirements_context=coder_human_requirements_context,
                 )
             log(config, f"Round {round_number}: {coder_name} addressing reviewer feedback")
             coder_response = _run_validated_agent(
@@ -1629,8 +1615,6 @@ def run_pr_loop(
             )
             coder_output = coder_response.text
             coder_session_id = coder_response.session_id
-            last_coder_output = coder_output
-            last_coder_human_requirements_context = coder_human_requirements_context
 
             try:
                 validate_human_requirements_acknowledgement(

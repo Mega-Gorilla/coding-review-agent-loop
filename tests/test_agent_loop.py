@@ -2001,6 +2001,34 @@ def test_coder_followup_prompts_require_human_requirements_acknowledgement_only_
     assert "### Human requirements" not in without_requirements
 
 
+@pytest.mark.parametrize("builder", [build_followup_prompt, build_same_pr_followup_prompt])
+def test_coder_followup_prompts_accept_precomputed_human_requirements_context(tmp_path, builder):
+    config = make_config(tmp_path)
+    requirements = (
+        HumanReviewRequirement(
+            source_type="PR comment",
+            author="reviewer",
+            created_at="2026-05-18T10:00:00Z",
+            url="https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+            body="Please use the absolute URL.",
+        ),
+    )
+    context = render_coder_human_requirements_prompt_context(requirements)
+
+    prompt = builder(
+        77,
+        2,
+        "Fix the bug.",
+        config,
+        human_requirements=requirements,
+        human_requirements_context=context,
+    )
+
+    assert context.block in prompt
+    assert HUMAN_REQUIREMENTS_ADDRESSED_MARKER in prompt
+    assert "`Requirement 1`" in prompt
+
+
 def test_validate_human_requirements_acknowledgement_accepts_multiple_bullet_styles():
     response = f"""Implemented the fix.
 {HUMAN_REQUIREMENTS_ADDRESSED_MARKER}
