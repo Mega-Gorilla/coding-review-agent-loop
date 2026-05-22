@@ -262,10 +262,14 @@ def _format_unresolved_review_items(unresolved_items: Sequence[UnresolvedReviewI
         "",
     ]
     for item in unresolved_items:
+        details = [indent(item.text, "  ")]
+        if item.notes:
+            details.append("  Latest reviewer updates:")
+            details.extend(f"  - {note}" for note in item.notes)
         lines.extend(
             [
                 f"- [{item.item_id}] {item.status} from {item.reviewer} in round {item.source_round}",
-                indent(item.text, "  "),
+                *details,
             ]
         )
     lines.append("")

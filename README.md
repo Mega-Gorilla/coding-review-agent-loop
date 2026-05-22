@@ -219,10 +219,11 @@ include small, localized, low-risk current-PR cleanup under:
 Same-PR follow-ups are sent back to the coder in the existing PR and require a
 new review round. They should stay narrowly scoped to files already touched by
 the PR or directly adjacent code; larger redesigns and independent work belong
-under Future follow-ups. After same-PR follow-ups trigger another round, only
-future follow-ups restated in the final approval round are summarized or turned
-into issues. The issue modes create at most three follow-up issues to avoid
-issue noise.
+under Future follow-ups. Approved future follow-ups remain in the round-to-round
+ledger so later reviewers can explicitly confirm they are still future work,
+resolved, or should be promoted back to same-PR or blocking status. The final
+summary or issue creation uses the remaining future items from that ledger. The
+issue modes create at most three follow-up issues to avoid issue noise.
 
 By default, `--approved-followups=ignore` asks reviewers not to include
 approved-review follow-up sections. Reviewers should mark the review blocking

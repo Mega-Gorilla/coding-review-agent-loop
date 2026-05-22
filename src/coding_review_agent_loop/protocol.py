@@ -84,6 +84,7 @@ class UnresolvedReviewItem:
     source_round: int
     text: str
     status: str
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
