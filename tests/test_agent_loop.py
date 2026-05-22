@@ -43,14 +43,21 @@ from coding_review_agent_loop.migrations import MigrationValidationResult, valid
 from coding_review_agent_loop.orchestrator import (
     _apply_unresolved_item_dispositions,
     _review_freeform_summary_text,
+    _validate_plan_review_response,
 )
 from coding_review_agent_loop.prompts import (
+    build_plan_review_prompt,
+    build_plan_revision_prompt,
     build_review_prompt,
     format_human_requirements,
     format_issue_context,
 )
 from coding_review_agent_loop.protocol import (
     parse_approved_followups,
+    parse_plan_item_dispositions,
+    parse_plan_review,
+    parse_plan_review_items,
+    parse_plan_state,
     parse_review,
     parse_non_blocking_followups,
     parse_signed_human_requirement_body,
@@ -384,6 +391,14 @@ def prior_item_dispositions(*lines: str) -> str:
     if not lines:
         return ""
     return "\n\n### Prior unresolved item dispositions\n" + "\n".join(f"- {line}" for line in lines)
+
+
+def prior_plan_item_dispositions(*lines: str) -> str:
+    if not lines:
+        return ""
+    return "\n\n### Prior unresolved plan item dispositions\n" + "\n".join(
+        f"- {line}" for line in lines
+    )
 
 
 def make_config(tmp_path, *, create_dirs=True, **overrides):
@@ -922,6 +937,21 @@ def test_parse_agent_state_requires_marker():
         parse_agent_state("LGTM")
 
 
+def test_parse_plan_state_uses_last_marker_as_authoritative():
+    text = """
+    Quoting earlier plan review: <!-- AGENT_PLAN_STATE: blocking -->
+
+    Final decision:
+    <!-- AGENT_PLAN_STATE: approved -->
+    """
+    assert parse_plan_state(text) == "approved"
+
+
+def test_parse_plan_state_requires_plan_marker():
+    with pytest.raises(AgentLoopError):
+        parse_plan_state("<!-- AGENT_STATE: approved -->")
+
+
 def test_parse_signed_human_requirement_body_extracts_text_before_signature():
     body = parse_signed_human_requirement_body(
         "Please use the absolute URL.\n\n-- Human Reviewer\n\nExtra text ignored."
@@ -1215,6 +1245,191 @@ def test_parse_approved_followups_ignores_prose_empty_placeholders():
     assert followups.future == ()
 
 
+def test_parse_plan_review_items_extracts_structured_sections():
+    review = """
+    Plan looks sound with one required revision.
+
+    ### Blocking plan issues
+    - Cover how the plan avoids mixing `AGENT_STATE` and `AGENT_PLAN_STATE`.
+
+    ### Same-plan follow-ups
+    - Mention the exact docs pages to update.
+
+    ### Future follow-ups
+    - Consider a later helper to unify plan and PR disposition rendering.
+
+    <!-- AGENT_PLAN_STATE: approved -->
+    -- OpenAI Codex
+    """
+
+    items = parse_plan_review_items(review, reviewer="OpenAI Codex")
+
+    assert [(item.reviewer, item.text) for item in items.blocking] == [
+        (
+            "OpenAI Codex",
+            "Cover how the plan avoids mixing `AGENT_STATE` and `AGENT_PLAN_STATE`.",
+        )
+    ]
+    assert [(item.reviewer, item.text) for item in items.same_plan] == [
+        ("OpenAI Codex", "Mention the exact docs pages to update.")
+    ]
+    assert [(item.reviewer, item.text) for item in items.future] == [
+        (
+            "OpenAI Codex",
+            "Consider a later helper to unify plan and PR disposition rendering.",
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "placeholder",
+    [
+        "None",
+        "No blocking plan issues.",
+        "No same-plan follow-ups",
+        "No future follow-ups.",
+    ],
+)
+def test_parse_plan_review_items_ignores_empty_placeholders(placeholder):
+    review = f"""
+    Looks good.
+
+    ### Blocking plan issues
+    - {placeholder}
+
+    ### Same-plan follow-ups
+    {placeholder}
+
+    ### Future follow-ups
+    - {placeholder}
+
+    <!-- AGENT_PLAN_STATE: approved -->
+    -- Google Gemini
+    """
+
+    items = parse_plan_review_items(review, reviewer="Gemini")
+
+    assert items.blocking == ()
+    assert items.same_plan == ()
+    assert items.future == ()
+
+
+def test_parse_plan_item_dispositions_extracts_same_plan_status():
+    review = """
+    Approved after the latest revision.
+
+    ### Prior unresolved plan item dispositions
+    - [item-1] resolved
+    - [item-2] still blocking
+    - [item-3] same-plan
+    - [item-4] future follow-up: okay to track separately now
+
+    <!-- AGENT_PLAN_STATE: approved -->
+    -- OpenAI Codex
+    """
+
+    dispositions = parse_plan_item_dispositions(review, reviewer="OpenAI Codex")
+
+    assert [(item.item_id, item.disposition, item.note) for item in dispositions] == [
+        ("item-1", "resolved", None),
+        ("item-2", "blocking", None),
+        ("item-3", "same-plan", None),
+        ("item-4", "future", "okay to track separately now"),
+    ]
+
+
+def test_parse_plan_review_rejects_future_followups_in_blocking_reviews():
+    review = """
+    Still blocked.
+
+    ### Future follow-ups
+    - Do this later.
+
+    <!-- AGENT_PLAN_STATE: blocking -->
+    -- OpenAI Codex
+    """
+
+    with pytest.raises(AgentLoopError, match="Blocking plan reviews may not include Future follow-ups"):
+        parse_plan_review(review, reviewer="OpenAI Codex")
+
+
+def test_parse_plan_review_rejects_future_disposition_in_blocking_reviews():
+    review = """
+    Still blocked.
+    """
+    review += prior_plan_item_dispositions("[item-1] future follow-up: maybe later")
+    review += "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"
+
+    with pytest.raises(AgentLoopError, match="Blocking plan reviews may not downgrade"):
+        parse_plan_review(review, reviewer="OpenAI Codex")
+
+
+def test_parse_plan_review_uses_plan_marker_while_pr_review_remains_pr_only():
+    plan_review = """
+    ### Same-plan follow-ups
+    - Add one more orchestration test.
+
+    <!-- AGENT_PLAN_STATE: approved -->
+    -- OpenAI Codex
+    """
+
+    parsed = parse_plan_review(plan_review, reviewer="OpenAI Codex")
+
+    assert parsed.state == "approved"
+    assert [item.text for item in parsed.items.same_plan] == ["Add one more orchestration test."]
+    with pytest.raises(AgentLoopError, match="AGENT_STATE"):
+        parse_review(plan_review, reviewer="OpenAI Codex")
+
+
+def test_validate_plan_review_response_rejects_duplicate_item_ids():
+    review = """
+    Still refining the plan.
+    """
+    review += prior_plan_item_dispositions(
+        "[item-1] same-plan: keep the extra regression coverage",
+        "[item-1] resolved",
+    )
+    review += "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex"
+
+    with pytest.raises(AgentLoopError, match="more than once: item-1"):
+        _validate_plan_review_response(
+            review,
+            reviewer="OpenAI Codex",
+            unresolved_items=(
+                UnresolvedReviewItem(
+                    item_id="item-1",
+                    reviewer="Anthropic Claude",
+                    source_round=1,
+                    text="Keep the extra regression coverage.",
+                    status="same-plan",
+                ),
+            ),
+        )
+
+
+def test_validate_plan_review_response_rejects_unknown_item_ids():
+    review = """
+    Looks good now.
+    """
+    review += prior_plan_item_dispositions("[item-9] resolved")
+    review += "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex"
+
+    with pytest.raises(AgentLoopError, match="unknown prior unresolved plan item IDs: item-9"):
+        _validate_plan_review_response(
+            review,
+            reviewer="OpenAI Codex",
+            unresolved_items=(
+                UnresolvedReviewItem(
+                    item_id="item-1",
+                    reviewer="Anthropic Claude",
+                    source_round=1,
+                    text="Keep the extra regression coverage.",
+                    status="same-plan",
+                ),
+            ),
+        )
+
+
 def test_parse_unresolved_item_dispositions_extracts_structured_updates():
     review = """
     LGTM.
@@ -1347,6 +1562,67 @@ def test_review_prompt_indents_multiline_prior_unresolved_item_text(tmp_path):
     assert "\n\n  Include the mixed-reviewer approval case." in prompt
 
 
+def test_plan_review_prompt_includes_structured_sections_and_prior_items(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    prompt = build_plan_review_prompt(
+        56,
+        2,
+        "Revise protocol parsing and add tests.",
+        config,
+        reviewer="codex",
+        unresolved_items=(
+            UnresolvedReviewItem(
+                item_id="item-1",
+                reviewer="Anthropic Claude",
+                source_round=1,
+                text="Define exact plan-review headings.",
+                status="blocking",
+            ),
+            UnresolvedReviewItem(
+                item_id="item-2",
+                reviewer="Google Gemini",
+                source_round=1,
+                text="Add an orchestration carry-forward test.",
+                status="same-plan",
+            ),
+        ),
+    )
+
+    assert "### Blocking plan issues" in prompt
+    assert "### Same-plan follow-ups" in prompt
+    assert "### Future follow-ups" in prompt
+    assert "### Prior unresolved plan item dispositions" in prompt
+    assert "[item-1] blocking from Anthropic Claude in round 1" in prompt
+    assert "[item-2] same-plan from Google Gemini in round 1" in prompt
+    assert "Only use `future follow-up` when returning `approved`." in prompt
+
+
+def test_plan_revision_prompt_includes_unresolved_ledger_and_required_dispositions(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    prompt = build_plan_revision_prompt(
+        56,
+        2,
+        "Previous plan text.",
+        "OpenAI Codex plan review:\n\nNeeds a carry-forward ledger.",
+        config,
+        unresolved_items=(
+            UnresolvedReviewItem(
+                item_id="item-3",
+                reviewer="OpenAI Codex",
+                source_round=1,
+                text="Track unresolved plan items across rounds.",
+                status="blocking",
+            ),
+        ),
+    )
+
+    assert "Prior unresolved plan items from earlier rounds" in prompt
+    assert "[item-3] blocking from OpenAI Codex in round 1" in prompt
+    assert "### Prior plan review item dispositions" in prompt
+    assert "- [item-id] same-plan:" in prompt
+    assert "Use `same-plan`, never `same-pr`" in prompt
+
+
 def test_review_freeform_summary_text_strips_structured_followup_sections():
     review = """Blocking issue summary.
 
@@ -1385,9 +1661,12 @@ def test_apply_unresolved_item_dispositions_appends_disposition_notes_to_text():
         ]
     }
 
-    updated_items = _apply_unresolved_item_dispositions(unresolved_items, dispositions_by_item)
+    updated_items, future_items = _apply_unresolved_item_dispositions(
+        unresolved_items, dispositions_by_item
+    )
 
     assert len(updated_items) == 1
+    assert future_items == []
     assert updated_items[0].text == (
         "Needs regression coverage before merge.\n\n"
         "Update from Anthropic Claude: include API error path too"
@@ -4291,6 +4570,82 @@ def test_issue_loop_plan_first_revises_until_all_reviewers_approve(tmp_path):
     assert "Missing test strategy" in claude_calls[1][-1]
     assert len(runner.comments) == 5
     assert runner.comments[2].startswith("Revised plan")
+
+
+def test_issue_loop_plan_first_requires_reviewers_to_disposition_prior_items(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Initial plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Revised plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Second revised plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "### Blocking plan issues\n- Add parser validation tests.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
+            "Still needs the test.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, max_rounds=2)
+
+    with pytest.raises(AgentLoopError, match="did not evaluate all prior unresolved plan items"):
+        run_issue_loop(runner, issue_number=56, config=config, plan_first=True)
+
+
+def test_issue_loop_plan_first_carries_same_plan_item_across_reviewers_and_rounds(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Initial plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Revised plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Second revised plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "### Same-plan follow-ups\n- Add the carry-forward orchestration test.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
+            "Looks mostly good."
+            + prior_plan_item_dispositions("[item-1] same-plan: still need the mixed-reviewer case")
+            + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+            "Plan looks sound."
+            + prior_plan_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        gemini_outputs=[
+            "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- Google Gemini",
+            "Plan looks sound now."
+            + prior_plan_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- Google Gemini",
+            "Final pass."
+            + prior_plan_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- Google Gemini",
+        ],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), max_rounds=3)
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert any("item-1" in call[-1] for call in claude_calls[1:])
+    assert "Approved plan:" in runner.comments[-1]
+
+
+def test_issue_loop_plan_first_approved_future_followups_are_summarized_without_reopening(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Initial plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Revised plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "### Same-plan follow-ups\n- Tighten the prompt wording.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
+            "Looks good."
+            + prior_plan_item_dispositions("[item-1] future follow-up: document parser helper reuse separately")
+            + "\n### Future follow-ups\n- Add a later cleanup to dedupe shared prompt rendering.\n"
+            + "<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path)
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    assert "Approved plan future follow-ups:" in runner.comments[-1]
+    assert "document parser helper reuse separately" in runner.comments[-1]
+    assert "Add a later cleanup to dedupe shared prompt rendering." in runner.comments[-1]
 
 
 def test_issue_loop_plan_first_can_implement_after_approval(tmp_path):

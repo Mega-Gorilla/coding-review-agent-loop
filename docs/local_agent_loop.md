@@ -151,7 +151,20 @@ agent-loop issue 56 --repo OWNER/REPO --plan-first
 With `--plan-first`, the coder writes an implementation plan without editing
 code, pushing a branch, or opening a PR. Reviewers critique that plan on the
 issue using `AGENT_PLAN_STATE` markers until every reviewer approves in the
-same planning round. By default the loop posts an approved consensus summary to
+same planning round. Plan reviews use explicit sections:
+
+```md
+### Blocking plan issues
+### Same-plan follow-ups
+### Future follow-ups
+```
+
+If earlier blocking or same-plan items are still open, reviewers must also add
+`### Prior unresolved plan item dispositions` and disposition every carried
+item exactly once. Use `same-plan` for required current-plan refinements,
+reserve `future follow-up` for approved plan reviews only, and expect approved
+future follow-ups to be summarized with the final approved plan instead of
+reopening planning. By default the loop posts an approved consensus summary to
 the issue and stops. Add `--implement-after-approval` to continue into the
 normal implementation and PR review loop using the approved plan:
 

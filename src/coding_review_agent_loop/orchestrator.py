@@ -51,7 +51,9 @@ from .prompts import (
 from .protocol import (
     FUTURE_FOLLOWUP_HEADING_RE,
     LEGACY_FOLLOWUP_HEADING_RE,
+    ParsedPlanReview,
     PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE,
+    PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE,
     SAME_PR_FOLLOWUP_HEADING_RE,
     ParsedReview,
     ReviewItemDisposition,
@@ -59,6 +61,7 @@ from .protocol import (
     human_requirements_resolved,
     is_clarification_request,
     parse_agent_state,
+    parse_plan_review,
     parse_plan_state,
     parse_pr_number,
 )
@@ -353,8 +356,12 @@ def _validate_review_response(
 def _apply_unresolved_item_dispositions(
     unresolved_items: Sequence[UnresolvedReviewItem],
     dispositions_by_item: dict[str, list[ReviewItemDisposition]],
-) -> list[UnresolvedReviewItem]:
+    *,
+    same_status: str = "same-pr",
+    retain_future: bool = True,
+) -> tuple[list[UnresolvedReviewItem], list[UnresolvedReviewItem]]:
     next_unresolved: list[UnresolvedReviewItem] = []
+    future_items: list[UnresolvedReviewItem] = []
     for item in unresolved_items:
         dispositions = dispositions_by_item.get(item.item_id, [])
         if not dispositions:
@@ -363,7 +370,9 @@ def _apply_unresolved_item_dispositions(
         text = item.text
         notes = list(item.notes)
         outcomes = {disposition.disposition for disposition in dispositions}
-        preserve_note_in_text = bool({"blocking", "same-pr"} & outcomes)
+        preserve_note_in_text = bool({"blocking", same_status} & outcomes) or (
+            "future" in outcomes and not retain_future
+        )
         for disposition in dispositions:
             if disposition.note:
                 note_text = f"{disposition.reviewer}: {disposition.note}"
@@ -385,30 +394,65 @@ def _apply_unresolved_item_dispositions(
                 )
             )
             continue
-        if "same-pr" in outcomes:
+        if same_status in outcomes:
             next_unresolved.append(
                 UnresolvedReviewItem(
                     item_id=item.item_id,
                     reviewer=item.reviewer,
                     source_round=item.source_round,
                     text=text,
-                    status="same-pr",
+                    status=same_status,
                     notes=tuple(notes),
                 )
             )
             continue
         if "future" in outcomes:
-            next_unresolved.append(
-                UnresolvedReviewItem(
-                    item_id=item.item_id,
-                    reviewer=item.reviewer,
-                    source_round=item.source_round,
-                    text=text,
-                    status="future",
-                    notes=tuple(notes),
-                )
+            future_item = UnresolvedReviewItem(
+                item_id=item.item_id,
+                reviewer=item.reviewer,
+                source_round=item.source_round,
+                text=text,
+                status="future",
+                notes=tuple(notes),
             )
-    return next_unresolved
+            if retain_future:
+                next_unresolved.append(future_item)
+            else:
+                future_items.append(future_item)
+    return next_unresolved, future_items
+
+
+def _validate_plan_review_response(
+    text: str,
+    *,
+    reviewer: str,
+    unresolved_items: Sequence[UnresolvedReviewItem],
+) -> ParsedPlanReview:
+    parsed = parse_plan_review(text, reviewer=reviewer)
+    if not unresolved_items:
+        return parsed
+
+    unresolved_by_id = {item.item_id: item for item in unresolved_items}
+    disposition_ids = [item.item_id for item in parsed.dispositions]
+    duplicates = sorted({item_id for item_id in disposition_ids if disposition_ids.count(item_id) > 1})
+    if duplicates:
+        raise AgentLoopError(
+            "Plan review listed prior unresolved plan items more than once: "
+            + ", ".join(duplicates)
+        )
+    unknown = sorted(set(disposition_ids) - set(unresolved_by_id))
+    if unknown:
+        raise AgentLoopError(
+            "Plan review referenced unknown prior unresolved plan item IDs: "
+            + ", ".join(unknown)
+        )
+    missing = sorted(set(unresolved_by_id) - set(disposition_ids))
+    if missing:
+        raise AgentLoopError(
+            "Plan review did not evaluate all prior unresolved plan items: "
+            + ", ".join(missing)
+        )
+    return parsed
 
 
 def _review_freeform_summary_text(text: str) -> str:
@@ -419,6 +463,7 @@ def _review_freeform_summary_text(text: str) -> str:
         FUTURE_FOLLOWUP_HEADING_RE,
         LEGACY_FOLLOWUP_HEADING_RE,
         PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE,
+        PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE,
     )
     for line in text.splitlines():
         stripped = line.strip()
@@ -787,6 +832,27 @@ def _format_plan_approval_summary(issue_number: int, approved_plan: str) -> str:
     )
 
 
+def _format_plan_approval_summary_with_followups(
+    issue_number: int,
+    approved_plan: str,
+    future_followups: Sequence[ApprovedFollowup],
+) -> str:
+    lines = [
+        f"Planning complete for issue #{issue_number}.",
+        "",
+        "Outcome: implement",
+        "",
+        "Approved plan:",
+        "",
+        approved_plan,
+    ]
+    if future_followups:
+        lines.extend(["", "Approved plan future follow-ups:", ""])
+        lines.extend(f"- {followup.text} ({followup.reviewer})" for followup in future_followups)
+    lines.extend(["", "-- coding-review-agent-loop"])
+    return "\n".join(lines)
+
+
 def _format_pr_checks_comment(pr_number: int, state: str, details: list[str]) -> str:
     headline = {
         "failing": f"GitHub PR checks are failing for PR #{pr_number}.",
@@ -860,6 +926,9 @@ def _run_plan_first_loop(
     configured_reviewers = reviewers(config)
     coder_session_id: str | None = None
     reviewer_session_ids: dict[AgentName, str | None] = {}
+    unresolved_items: list[UnresolvedReviewItem] = []
+    approved_future_followups: list[ApprovedFollowup] = []
+    next_unresolved_item_number = 1
 
     log(config, f"Planning issue #{issue_number}: invoking {coder_name}")
     plan_response = _run_validated_agent(
@@ -882,7 +951,14 @@ def _run_plan_first_loop(
     current_plan = plan_output
 
     for round_number in range(1, config.max_rounds + 1):
+        prior_unresolved_items = tuple(unresolved_items)
+        prior_dispositions: dict[str, list[ReviewItemDisposition]] = {
+            item.item_id: [] for item in prior_unresolved_items
+        }
+        round_new_unresolved_items: list[UnresolvedReviewItem] = []
+        round_approved_future_followups: list[ApprovedFollowup] = []
         blocking_reviews: list[tuple[str, str]] = []
+        all_approved = True
         for reviewer in configured_reviewers:
             reviewer_name = agent_display_name(reviewer)
             log(config, f"Planning round {round_number}: {reviewer_name} reviewing issue #{issue_number}")
@@ -898,26 +974,78 @@ def _run_plan_first_loop(
                     reviewer=reviewer,
                     memory=memory,
                     issue_context=issue_context,
+                    unresolved_items=prior_unresolved_items,
                 ),
                 session_id=reviewer_session_ids.get(reviewer),
                 marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
-                validate=parse_plan_state,
+                validate=lambda text, reviewer_name=reviewer_name, items=prior_unresolved_items: _validate_plan_review_response(
+                    text,
+                    reviewer=reviewer_name,
+                    unresolved_items=items,
+                ),
                 usage_context=usage_context,
             )
             review_output = review_response.text
             reviewer_session_ids[reviewer] = review_response.session_id
-            review_state = str(review_response.marker_value)
+            parsed_review = review_response.marker_value
+            assert isinstance(parsed_review, ParsedPlanReview)
+            review_state = parsed_review.state
             post_issue_comment(runner, config=config, issue_number=issue_number, body=review_output)
             log(config, f"Planning round {round_number}: {reviewer_name} state is {review_state}")
+            for disposition in parsed_review.dispositions:
+                prior_dispositions[disposition.item_id].append(disposition)
             if review_state == "blocking":
+                all_approved = False
                 blocking_reviews.append((reviewer_name, review_output))
+            for item in parsed_review.items.blocking:
+                round_new_unresolved_items.append(
+                    _next_unresolved_item(
+                        item_number=next_unresolved_item_number,
+                        reviewer=item.reviewer,
+                        source_round=round_number,
+                        text=item.text,
+                        status="blocking",
+                    )
+                )
+                next_unresolved_item_number += 1
+            for item in parsed_review.items.same_plan:
+                round_new_unresolved_items.append(
+                    _next_unresolved_item(
+                        item_number=next_unresolved_item_number,
+                        reviewer=item.reviewer,
+                        source_round=round_number,
+                        text=item.text,
+                        status="same-plan",
+                    )
+                )
+                next_unresolved_item_number += 1
+            for item in parsed_review.items.future:
+                round_approved_future_followups.append(item)
 
-        if not blocking_reviews:
+        unresolved_items, future_from_prior_items = _apply_unresolved_item_dispositions(
+            prior_unresolved_items,
+            prior_dispositions,
+            same_status="same-plan",
+            retain_future=False,
+        )
+        unresolved_items = [*unresolved_items, *round_new_unresolved_items]
+        must_fix_items = [item for item in unresolved_items if item.status in {"blocking", "same-plan"}]
+        approved_future_followups.extend(
+            ApprovedFollowup(reviewer=item.reviewer, text=item.text) for item in future_from_prior_items
+        )
+        if all_approved:
+            approved_future_followups.extend(round_approved_future_followups)
+
+        if all_approved and not must_fix_items:
             post_issue_comment(
                 runner,
                 config=config,
                 issue_number=issue_number,
-                body=_format_plan_approval_summary(issue_number, current_plan),
+                body=_format_plan_approval_summary_with_followups(
+                    issue_number,
+                    current_plan,
+                    approved_future_followups,
+                ),
             )
             if not implement_after_approval:
                 print(
@@ -966,9 +1094,7 @@ def _run_plan_first_loop(
                 f"round {round_number}; human review required."
             )
 
-        combined_review = "\n\n".join(
-            f"{name} plan review:\n\n{review}" for name, review in blocking_reviews
-        )
+        combined_review = "\n\n".join(f"{name} plan review:\n\n{review}" for name, review in blocking_reviews)
         log(config, f"Planning round {round_number}: {coder_name} revising the plan")
         plan_response = _run_validated_agent(
             runner,
@@ -982,6 +1108,7 @@ def _run_plan_first_loop(
                 config,
                 memory,
                 issue_context=issue_context,
+                unresolved_items=must_fix_items,
             ),
             session_id=coder_session_id,
             marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
@@ -1310,7 +1437,7 @@ def run_pr_loop(
                             )
                             next_unresolved_item_number += 1
 
-            unresolved_items = _apply_unresolved_item_dispositions(
+            unresolved_items, _future_items = _apply_unresolved_item_dispositions(
                 prior_unresolved_items,
                 prior_dispositions,
             )
