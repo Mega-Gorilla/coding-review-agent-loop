@@ -36,6 +36,7 @@ from coding_review_agent_loop.github import (
     HumanReviewRequirement,
     IssueComment,
     IssueContext,
+    PullRequestReviewContext,
     PullRequestMetadata,
     get_pr_checks,
 )
@@ -2653,6 +2654,83 @@ def test_pr_loop_clears_human_requirements_acknowledgement_blocker_before_next_r
     assert len(review_prompts) == 3
     assert HUMAN_REQUIREMENTS_ACK_ITEM_ID in review_prompts[1]
     assert HUMAN_REQUIREMENTS_ACK_ITEM_ID not in review_prompts[2]
+
+
+def test_pr_loop_revalidates_latest_coder_output_against_refreshed_human_requirements(
+    tmp_path, monkeypatch
+):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Implemented fix without the extra acknowledgement.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Blocking issue.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        pr_payload={
+            "number": 77,
+            "state": "OPEN",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "title": "Improve review prompt context",
+            "headRefName": "feature/review-context",
+            "baseRefName": "main",
+            "headRefOid": "abc123",
+            "comments": [
+                {
+                    "author": {"login": "maintainer"},
+                    "createdAt": "2026-05-18T10:00:00Z",
+                    "url": "https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                    "body": "Please use the absolute URL.\n\n-- Human Reviewer",
+                }
+            ],
+            "reviews": [],
+        },
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex", max_rounds=2)
+    metadata = PullRequestMetadata(
+        number=77,
+        repo="OWNER/REPO",
+        title="Improve review prompt context",
+        head_branch="feature/review-context",
+        base_branch="main",
+        head_sha="abc123",
+        url="https://github.com/OWNER/REPO/pull/77",
+    )
+    contexts = iter(
+        [
+            PullRequestReviewContext(
+                metadata=metadata,
+                comments=(),
+                human_requirements=(
+                    HumanReviewRequirement(
+                        source_type="PR comment",
+                        author="maintainer",
+                        created_at="2026-05-18T10:00:00Z",
+                        url="https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                        body="Please use the absolute URL.",
+                    ),
+                ),
+            ),
+            PullRequestReviewContext(
+                metadata=metadata,
+                comments=(),
+                human_requirements=(),
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        "coding_review_agent_loop.orchestrator.get_pr_review_context",
+        lambda *args, **kwargs: next(contexts),
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    review_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]
+    assert len(review_prompts) == 2
+    assert HUMAN_REQUIREMENTS_ACK_ITEM_ID not in review_prompts[1]
 
 
 def test_pr_loop_routes_migration_validation_failure_through_coder_followup(tmp_path, monkeypatch):

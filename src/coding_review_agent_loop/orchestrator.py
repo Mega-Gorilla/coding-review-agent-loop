@@ -384,6 +384,32 @@ def _clear_human_requirements_ack_item(
     return [item for item in unresolved_items if item.item_id != HUMAN_REQUIREMENTS_ACK_ITEM_ID]
 
 
+def _reconcile_human_requirements_ack_item(
+    unresolved_items: Sequence[UnresolvedReviewItem],
+    *,
+    coder_output: str | None,
+    human_requirements,
+    source_round: int,
+) -> list[UnresolvedReviewItem]:
+    if coder_output is None:
+        return list(unresolved_items)
+
+    prompt_context = render_coder_human_requirements_prompt_context(human_requirements)
+    try:
+        validate_human_requirements_acknowledgement(
+            coder_output,
+            surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
+            requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
+        )
+    except AgentLoopError as exc:
+        return _upsert_human_requirements_ack_item(
+            unresolved_items,
+            source_round=source_round,
+            text=str(exc),
+        )
+    return _clear_human_requirements_ack_item(unresolved_items)
+
+
 def _apply_unresolved_item_dispositions(
     unresolved_items: Sequence[UnresolvedReviewItem],
     dispositions_by_item: dict[str, list[ReviewItemDisposition]],
@@ -1337,6 +1363,7 @@ def run_pr_loop(
         reviewer_session_ids: dict[AgentName, str | None] = {}
         configured_reviewers = reviewers(config)
         unresolved_items: list[UnresolvedReviewItem] = []
+        latest_coder_output: str | None = None
         next_unresolved_item_number = 1
         if reviewer_session_id is not None and configured_reviewers:
             # Backward-compatible single-reviewer resume support: older callers
@@ -1351,6 +1378,12 @@ def run_pr_loop(
             pr_metadata = pr_context.metadata
             pr_comments = pr_context.comments
             human_requirements = pr_context.human_requirements
+            unresolved_items = _reconcile_human_requirements_ack_item(
+                unresolved_items,
+                coder_output=latest_coder_output,
+                human_requirements=human_requirements,
+                source_round=round_number,
+            )
             prior_unresolved_items = tuple(unresolved_items)
             prior_dispositions: dict[str, list[ReviewItemDisposition]] = {
                 item.item_id: [] for item in prior_unresolved_items
@@ -1615,23 +1648,14 @@ def run_pr_loop(
             )
             coder_output = coder_response.text
             coder_session_id = coder_response.session_id
+            latest_coder_output = coder_output
 
-            try:
-                validate_human_requirements_acknowledgement(
-                    coder_output,
-                    surfaced_requirement_ids=coder_human_requirements_context.surfaced_requirement_ids,
-                    requires_direct_discussion_ack=(
-                        coder_human_requirements_context.requires_direct_discussion_ack
-                    ),
-                )
-            except AgentLoopError as exc:
-                unresolved_items = _upsert_human_requirements_ack_item(
-                    unresolved_items,
-                    source_round=round_number,
-                    text=str(exc),
-                )
-            else:
-                unresolved_items = _clear_human_requirements_ack_item(unresolved_items)
+            unresolved_items = _reconcile_human_requirements_ack_item(
+                unresolved_items,
+                coder_output=coder_output,
+                human_requirements=human_requirements,
+                source_round=round_number,
+            )
 
             post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
             log(config, f"Round {round_number}: {coder_name} pushed updates for re-review")
