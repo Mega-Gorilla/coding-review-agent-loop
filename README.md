@@ -252,10 +252,10 @@ agent-loop pr 456 --repo OWNER/REPO --approved-followups issue
 agent-loop pr 456 --repo OWNER/REPO --approved-followups fix-and-summarize
 ```
 
-Only bullets inside the `Same-PR follow-ups`, `Future follow-ups`, and legacy
-`Non-blocking follow-ups` sections are parsed. Each section ends at the next
-heading, HTML marker, or agent signature, so final protocol markers are not
-mistaken for follow-up text.
+Bullets and prose paragraphs inside the `Same-PR follow-ups`, `Future follow-ups`,
+and legacy `Non-blocking follow-ups` sections are parsed. Each section ends at
+the next heading, HTML marker, or agent signature, so final protocol markers
+are not mistaken for follow-up text.
 
 For trusted local automation that must run without approval prompts:
 

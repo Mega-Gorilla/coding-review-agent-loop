@@ -101,18 +101,21 @@ def human_requirements_resolved(text: str) -> bool:
 
 
 def parse_approved_followups(text: str, *, reviewer: str) -> ApprovedFollowups:
-    """Extract same-PR and future follow-up bullets from an approved review."""
+    """Extract same-PR and future follow-ups from an approved review."""
     same_pr: list[ApprovedFollowup] = []
     future: list[ApprovedFollowup] = []
     active: list[ApprovedFollowup] | None = None
     current: list[str] = []
+    current_is_prose = False
 
     def flush_current() -> None:
+        nonlocal current_is_prose
         if active is not None and current:
             item = " ".join(part.strip() for part in current if part.strip()).strip()
             if item and not EMPTY_FOLLOWUP_RE.match(item):
                 active.append(ApprovedFollowup(reviewer=reviewer, text=item))
             current.clear()
+        current_is_prose = False
 
     for line in text.splitlines():
         if SAME_PR_FOLLOWUP_HEADING_RE.match(line):
@@ -133,13 +136,22 @@ def parse_approved_followups(text: str, *, reviewer: str) -> ApprovedFollowups:
             flush_current()
             active = None
             continue
+        if not line.strip():
+            if current_is_prose:
+                flush_current()
+            continue
         bullet = BULLET_RE.match(line)
         if bullet:
             flush_current()
             current.append(bullet.group("text"))
+            current_is_prose = False
             continue
         if current and line.strip():
             current.append(line)
+            continue
+        if line.strip():
+            current.append(line)
+            current_is_prose = True
 
     flush_current()
     return ApprovedFollowups(same_pr=tuple(same_pr), future=tuple(future))
