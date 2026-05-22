@@ -1338,7 +1338,7 @@ def test_parse_plan_item_dispositions_extracts_same_plan_status():
     ]
 
 
-def test_parse_plan_review_rejects_future_followups_in_blocking_reviews():
+def test_parse_plan_review_drops_future_followups_in_blocking_reviews():
     review = """
     Still blocked.
 
@@ -1349,8 +1349,12 @@ def test_parse_plan_review_rejects_future_followups_in_blocking_reviews():
     -- OpenAI Codex
     """
 
-    with pytest.raises(AgentLoopError, match="Blocking plan reviews may not include Future follow-ups"):
-        parse_plan_review(review, reviewer="OpenAI Codex")
+    parsed = parse_plan_review(review, reviewer="OpenAI Codex")
+
+    assert parsed.state == "blocking"
+    assert parsed.items.future == ()
+    assert parsed.items.blocking == ()
+    assert parsed.items.same_plan == ()
 
 
 def test_parse_plan_review_rejects_future_disposition_in_blocking_reviews():
@@ -1601,6 +1605,8 @@ def test_plan_review_prompt_includes_structured_sections_and_prior_items(tmp_pat
     assert "[item-1] blocking from Anthropic Claude in round 1" in prompt
     assert "[item-2] same-plan from Google Gemini in round 1" in prompt
     assert "Only use `future follow-up` when returning `approved`." in prompt
+    assert "do not use structured Future\nfollow-ups" in prompt
+    assert "keep all required current-round issues in the main blocking\ncontent" in prompt
 
 
 def test_plan_revision_prompt_includes_unresolved_ledger_and_required_dispositions(tmp_path):
@@ -4732,6 +4738,38 @@ def test_issue_loop_plan_first_approved_future_followups_are_summarized_without_
     assert "Approved plan future follow-ups:" in runner.comments[-1]
     assert "document parser helper reuse separately" in runner.comments[-1]
     assert "Add a later cleanup to dedupe shared prompt rendering." in runner.comments[-1]
+
+
+def test_issue_loop_plan_first_keeps_blocking_review_when_future_followups_are_misclassified(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Initial plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Revised plan with focused tests.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Still blocked.\n\n"
+            "### Blocking plan issues\n"
+            "- Add parser coverage for blocking reviews with stray future follow-ups.\n\n"
+            "### Same-plan follow-ups\n"
+            "- Tighten the plan-review prompt wording.\n\n"
+            "### Future follow-ups\n"
+            "- Consider a later prompt dedupe cleanup.\n\n"
+            "<!-- AGENT_PLAN_STATE: blocking -->\n"
+            "-- OpenAI Codex",
+            "Plan looks sound."
+            + prior_plan_item_dispositions("[item-1] resolved", "[item-2] resolved")
+            + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path)
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert "Add parser coverage for blocking reviews with stray future follow-ups." in claude_calls[1][-1]
+    assert "Tighten the plan-review prompt wording." in claude_calls[1][-1]
+    assert runner.comments[1].startswith("Still blocked.")
+    assert "### Future follow-ups" in runner.comments[1]
 
 
 def test_issue_loop_plan_first_can_implement_after_approval(tmp_path):

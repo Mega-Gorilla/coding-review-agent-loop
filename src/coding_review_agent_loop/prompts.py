@@ -456,7 +456,10 @@ strategy, and ambiguity. Use this exact structured format in your response body:
 - Ideas worth tracking separately that are not required for the current implementation plan.
 
 Blocking plan issues and Same-plan follow-ups both prevent approval. Future
-follow-ups are allowed only in approved plan reviews.
+follow-ups are allowed only in approved plan reviews. If you return
+`<!-- AGENT_PLAN_STATE: blocking -->`, do not use structured Future
+follow-ups; keep all required current-round issues in the main blocking
+content so they are not missed during plan revision.
 {unresolved_items_guidance}
 Use blocking only when the current plan still has blocking plan issues or
 same-plan follow-ups. All configured reviewers ({reviewer_group}) must approve
