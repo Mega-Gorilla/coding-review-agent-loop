@@ -3285,7 +3285,10 @@ def test_pr_loop_fix_and_issue_persists_future_followups_from_pre_fix_round(tmp_
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
     assert len(runner.issues) == 1
-    assert runner.issues[0]["title"] == "Follow up future review note: Add a separate migration dry-run command."
+    assert runner.issues[0]["title"] == (
+        "Follow up future review note: Add a separate migration dry-run command. "
+        "Update from Codex: still separate work"
+    )
     commands = [cmd[:3] for cmd, _cwd in runner.commands]
     assert commands.count(["gh", "issue", "create"]) == 1
 
@@ -3563,6 +3566,43 @@ def test_pr_loop_persists_downgraded_future_followup_across_later_blocking_round
     summary = runner.comments[-1]
     assert summary.startswith("Approved-review future follow-ups for PR #77:")
     assert "Missing docs cleanup." in summary
+
+
+def test_pr_loop_finalized_future_followup_summary_preserves_disposition_notes(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Still blocked.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+            "Claude approves final pass."
+            + prior_item_dispositions(
+                "[item-1] future follow-up: cleanup can wait until after rollout",
+                "[item-2] resolved",
+            )
+            + "\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Missing docs cleanup.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "Implemented blocker.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "Codex approves final pass."
+            + prior_item_dispositions(
+                "[item-1] future follow-up: cleanup can wait until after rollout",
+                "[item-2] resolved",
+            )
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        reviewer=("codex", "claude"),
+        coder="codex",
+        approved_followups="summarize",
+        max_rounds=2,
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    summary = runner.comments[-1]
+    assert "Missing docs cleanup." in summary
+    assert "Update from Codex: cleanup can wait until after rollout" in summary
 
 
 def test_pr_loop_carries_new_future_followups_into_later_reviewer_prompts(tmp_path):

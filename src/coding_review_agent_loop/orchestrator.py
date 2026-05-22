@@ -422,6 +422,15 @@ def _apply_unresolved_item_dispositions(
     return next_unresolved, future_items
 
 
+def _approved_followup_from_unresolved_item(item: UnresolvedReviewItem) -> ApprovedFollowup:
+    text = item.text
+    for note in item.notes:
+        update_line = f"Update from {note}"
+        if update_line not in text:
+            text = f"{text.rstrip()}\n\n{update_line}"
+    return ApprovedFollowup(reviewer=item.reviewer, text=text)
+
+
 def _validate_plan_review_response(
     text: str,
     *,
@@ -1015,7 +1024,7 @@ def _run_plan_first_loop(
         unresolved_items = [*unresolved_items, *round_new_unresolved_items]
         must_fix_items = [item for item in unresolved_items if item.status in {"blocking", "same-plan"}]
         approved_future_followups.extend(
-            ApprovedFollowup(reviewer=item.reviewer, text=item.text) for item in future_from_prior_items
+            _approved_followup_from_unresolved_item(item) for item in future_from_prior_items
         )
         if all_approved:
             approved_future_followups.extend(round_approved_future_followups)
@@ -1427,7 +1436,7 @@ def run_pr_loop(
             )
             unresolved_items = [*unresolved_items, *round_new_unresolved_items]
             future_followups = [
-                ApprovedFollowup(reviewer=item.reviewer, text=item.text)
+                _approved_followup_from_unresolved_item(item)
                 for item in unresolved_items
                 if item.status == "future"
             ]
