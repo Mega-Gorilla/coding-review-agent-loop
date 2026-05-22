@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from textwrap import indent
 from typing import Sequence
 
 from .agents.base import AgentName
@@ -264,7 +265,7 @@ def _format_unresolved_review_items(unresolved_items: Sequence[UnresolvedReviewI
         lines.extend(
             [
                 f"- [{item.item_id}] {item.status} from {item.reviewer} in round {item.source_round}",
-                f"  {item.text}",
+                indent(item.text, "  "),
             ]
         )
     lines.append("")

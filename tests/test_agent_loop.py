@@ -1292,6 +1292,37 @@ def test_review_prompt_includes_prior_unresolved_items_and_disposition_instructi
     assert "Only use `future follow-up` when returning `approved`." in prompt
 
 
+def test_review_prompt_indents_multiline_prior_unresolved_item_text(tmp_path):
+    config = make_config(tmp_path, approved_followups="fix-and-summarize")
+    prompt = build_review_prompt(
+        77,
+        2,
+        config,
+        reviewer="codex",
+        pr_metadata=PullRequestMetadata(
+            number=77,
+            repo="OWNER/REPO",
+            title="Improve review prompt context",
+            head_branch="feature/review-context",
+            base_branch="main",
+            head_sha="abc123",
+            url="https://github.com/OWNER/REPO/pull/77",
+        ),
+        unresolved_items=(
+            UnresolvedReviewItem(
+                item_id="item-1",
+                reviewer="Anthropic Claude",
+                source_round=1,
+                text="Needs a regression test before merge.\n\nInclude the mixed-reviewer approval case.",
+                status="blocking",
+            ),
+        ),
+    )
+
+    assert "  Needs a regression test before merge." in prompt
+    assert "\n\n  Include the mixed-reviewer approval case." in prompt
+
+
 @pytest.mark.parametrize("terminator", ["<!-- AGENT_STATE: approved -->", "-- OpenAI Codex"])
 def test_parse_non_blocking_followups_stops_at_final_markers(terminator):
     review = f"""
