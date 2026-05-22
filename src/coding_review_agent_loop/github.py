@@ -59,6 +59,7 @@ class HumanReviewRequirement:
 @dataclass(frozen=True)
 class PullRequestReviewContext:
     metadata: PullRequestMetadata
+    comments: tuple[IssueComment, ...]
     human_requirements: tuple[HumanReviewRequirement, ...]
 
 
@@ -166,6 +167,7 @@ def get_pr_review_context(
                 head_sha=None,
                 url=None,
             ),
+            comments=(),
             human_requirements=(),
         )
 
@@ -183,10 +185,29 @@ def get_pr_review_context(
         cwd=active_workdir(config),
     )
     data = json.loads(result.stdout or "{}")
+    comments = _parse_issue_comments(data.get("comments"))
     return PullRequestReviewContext(
         metadata=_parse_pr_metadata(data, config=config, pr_number=pr_number),
+        comments=comments,
         human_requirements=_parse_pr_human_requirements(data),
     )
+
+
+def _parse_issue_comments(raw_comments: object) -> tuple[IssueComment, ...]:
+    comments: list[IssueComment] = []
+    if not isinstance(raw_comments, list):
+        return ()
+    for raw_comment in raw_comments:
+        if not isinstance(raw_comment, dict):
+            continue
+        comments.append(
+            IssueComment(
+                author=_author_login(raw_comment.get("author")),
+                created_at=raw_comment.get("createdAt") or raw_comment.get("created_at"),
+                body=_optional_str(raw_comment.get("body")),
+            )
+        )
+    return tuple(sorted(comments, key=_comment_sort_key))
 
 
 def _normalize_check_run_status(raw_run: object) -> str:

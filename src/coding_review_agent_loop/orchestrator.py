@@ -61,6 +61,10 @@ from .usage import RunUsageContext, UsageMetadata, estimate_usage
 from .workdirs import active_workdir
 
 MAX_APPROVED_FOLLOWUP_ISSUES = 3
+APPROVED_FOLLOWUP_MARKER_RE = re.compile(
+    r"<!--\s*AGENT_APPROVED_FOLLOWUPS:\s*pr=(?P<pr>\d+)\s+head=(?P<head>\S+)\s+mode=(?P<mode>[a-z-]+)\s*-->",
+    re.I,
+)
 
 TRANSIENT_AGENT_OUTPUT_RE = re.compile(
     r"Invalid stream|empty response|malformed tool call|"
@@ -324,6 +328,55 @@ def _format_approved_followup_summary(pr_number: int, followups: list[ApprovedFo
     return "\n".join(lines)
 
 
+def _approved_followups_marker(pr_number: int, head_sha: str | None, mode: str) -> str:
+    head = head_sha or "unknown"
+    return f"<!-- AGENT_APPROVED_FOLLOWUPS: pr={pr_number} head={head} mode={mode} -->"
+
+
+def _append_approved_followups_marker(
+    body: str,
+    *,
+    pr_number: int,
+    head_sha: str | None,
+    mode: str,
+) -> str:
+    footer = "\n-- coding-review-agent-loop"
+    prefix, found, _suffix = body.rpartition(footer)
+    if not found:
+        return body
+    prefix = prefix.rstrip()
+    return "\n".join(
+        [
+            prefix,
+            "",
+            _approved_followups_marker(pr_number, head_sha, mode),
+            "-- coding-review-agent-loop",
+        ]
+    )
+
+
+def _has_approved_followups_marker(
+    comments: Sequence[object],
+    *,
+    pr_number: int,
+    head_sha: str | None,
+    mode: str,
+) -> bool:
+    target_head = head_sha or "unknown"
+    for comment in comments:
+        body = getattr(comment, "body", None)
+        if not isinstance(body, str):
+            continue
+        for match in APPROVED_FOLLOWUP_MARKER_RE.finditer(body):
+            if (
+                int(match.group("pr")) == pr_number
+                and match.group("head") == target_head
+                and match.group("mode").lower() == mode.lower()
+            ):
+                return True
+    return False
+
+
 def _followup_issue_title(followup: ApprovedFollowup) -> str:
     text = " ".join(followup.text.split())
     title = f"Follow up future review note: {text}"
@@ -455,6 +508,73 @@ def _format_created_followup_issue_summary(
         )
     lines.extend(["", "-- coding-review-agent-loop"])
     return "\n".join(lines)
+
+
+def _publish_approved_followups(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    pr_number: int,
+    head_sha: str | None,
+    pr_comments: Sequence[object],
+    followups: list[ApprovedFollowup],
+) -> bool:
+    if not followups or config.approved_followups == "ignore":
+        return False
+
+    if config.approved_followups in ("summarize", "fix-and-summarize"):
+        mode = "summarize"
+        if _has_approved_followups_marker(
+            pr_comments,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            mode=mode,
+        ):
+            log(
+                config,
+                f"Approved-review future follow-ups already recorded for PR #{pr_number} at {head_sha or 'unknown'} ({mode})",
+            )
+            return False
+        body = _format_approved_followup_summary(pr_number, followups)
+        body = _append_approved_followups_marker(
+            body,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            mode=mode,
+        )
+        post_pr_comment(runner, config=config, pr_number=pr_number, body=body)
+        return True
+
+    if config.approved_followups in ("issue", "fix-and-issue"):
+        mode = "issue"
+        if _has_approved_followups_marker(
+            pr_comments,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            mode=mode,
+        ):
+            log(
+                config,
+                f"Approved-review future follow-ups already recorded for PR #{pr_number} at {head_sha or 'unknown'} ({mode})",
+            )
+            return False
+        issue_urls, skipped_count = _create_approved_followup_issues(
+            runner,
+            config=config,
+            pr_number=pr_number,
+            followups=followups,
+        )
+        if issue_urls:
+            body = _format_created_followup_issue_summary(pr_number, issue_urls, skipped_count)
+            body = _append_approved_followups_marker(
+                body,
+                pr_number=pr_number,
+                head_sha=head_sha,
+                mode=mode,
+            )
+            post_pr_comment(runner, config=config, pr_number=pr_number, body=body)
+            return True
+    return False
 
 
 def _format_same_pr_followups(followups: Sequence[ApprovedFollowup]) -> str:
@@ -894,6 +1014,7 @@ def run_pr_loop(
                 pre_review_test_pending = False
             pr_context = get_pr_review_context(runner, config=config, pr_number=pr_number)
             pr_metadata = pr_context.metadata
+            pr_comments = pr_context.comments
             human_requirements = pr_context.human_requirements
             pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
             for reviewer in configured_reviewers:
@@ -980,6 +1101,15 @@ def run_pr_loop(
                         ("Alembic migration validation", migration_validation.message or "")
                     )
                 if not blocking_reviews:
+                    if pr_checks.state in {"pending", "unavailable"}:
+                        _publish_approved_followups(
+                            runner,
+                            config=config,
+                            pr_number=pr_number,
+                            head_sha=pr_metadata.head_sha,
+                            pr_comments=pr_comments,
+                            followups=round_future_followups,
+                        )
                     if pr_checks.state in {"failing", "pending", "unavailable"}:
                         details = _pr_check_details(pr_checks)
                         post_pr_comment(
@@ -1005,25 +1135,14 @@ def run_pr_loop(
                                 "wait for CI or investigate GitHub API access before treating the PR as approved."
                             )
                 if not blocking_reviews:
-                    approved_followups = round_future_followups
-                    if (
-                        config.approved_followups in ("summarize", "fix-and-summarize")
-                        and approved_followups
-                    ):
-                        body = _format_approved_followup_summary(pr_number, approved_followups)
-                        post_pr_comment(runner, config=config, pr_number=pr_number, body=body)
-                    elif config.approved_followups in ("issue", "fix-and-issue") and approved_followups:
-                        issue_urls, skipped_count = _create_approved_followup_issues(
-                            runner,
-                            config=config,
-                            pr_number=pr_number,
-                            followups=approved_followups,
-                        )
-                        if issue_urls:
-                            body = _format_created_followup_issue_summary(
-                                pr_number, issue_urls, skipped_count
-                            )
-                            post_pr_comment(runner, config=config, pr_number=pr_number, body=body)
+                    _publish_approved_followups(
+                        runner,
+                        config=config,
+                        pr_number=pr_number,
+                        head_sha=pr_metadata.head_sha,
+                        pr_comments=pr_comments,
+                        followups=round_future_followups,
+                    )
                     run_optional_tests(runner, config)
                     if config.auto_merge:
                         wait_for_ci(runner, config, pr_number)

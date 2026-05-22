@@ -2026,6 +2026,107 @@ def test_pr_loop_blocks_final_approval_when_github_checks_pending(tmp_path):
     )
 
 
+def test_pr_loop_summarizes_approved_followups_before_pending_check_exit(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Looks good locally.\n\n### Future follow-ups\n- Add cleanup docs.\n"
+            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+        ],
+        pr_check_runs_payload={"check_runs": []},
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_payload={"contexts": ["test"]},
+    )
+    config = make_config(tmp_path, approved_followups="summarize")
+
+    with pytest.raises(AgentLoopError, match="GitHub PR checks for PR #77 are pending"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert len(runner.comments) == 3
+    assert runner.comments[1].startswith("Approved-review future follow-ups for PR #77:")
+    assert "- Add cleanup docs. (Codex)" in runner.comments[1]
+    assert "<!-- AGENT_APPROVED_FOLLOWUPS: pr=77 head=abc123 mode=summarize -->" in runner.comments[1]
+    assert runner.comments[2].startswith("GitHub PR checks are still pending for PR #77.")
+
+
+def test_pr_loop_summary_marker_has_single_blank_line_before_footer_marker(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Looks good locally.\n\n### Future follow-ups\n- Add cleanup docs.\n"
+            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+        ],
+    )
+    config = make_config(tmp_path, approved_followups="summarize")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    summary = runner.comments[-1]
+    assert (
+        "These were mentioned in approved reviews as future work and did not block merge readiness.\n\n"
+        "<!-- AGENT_APPROVED_FOLLOWUPS: pr=77 head=abc123 mode=summarize -->\n"
+        "-- coding-review-agent-loop"
+    ) in summary
+
+
+def test_pr_loop_creates_approved_followup_issues_before_unavailable_check_exit(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Looks good locally.\n\n### Future follow-ups\n- Add cleanup docs.\n"
+            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+        ],
+        pr_check_runs_payload={"check_runs": []},
+        pr_branch_protection_returncode=1,
+        pr_branch_protection_stderr="500 Internal Server Error",
+        pr_check_runs_returncode=1,
+        pr_check_runs_stderr="500 Internal Server Error",
+        pr_status_returncode=1,
+        pr_status_stderr="500 Internal Server Error",
+    )
+    config = make_config(tmp_path, approved_followups="issue")
+
+    with pytest.raises(AgentLoopError, match="GitHub PR checks for PR #77 are unavailable"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert len(runner.issues) == 1
+    assert runner.issues[0]["title"] == "Follow up future review note: Add cleanup docs."
+    assert len(runner.comments) == 3
+    assert runner.comments[1].startswith("Created approved-review future follow-up issues for PR #77:")
+    assert "<!-- AGENT_APPROVED_FOLLOWUPS: pr=77 head=abc123 mode=issue -->" in runner.comments[1]
+    assert runner.comments[2].startswith("GitHub PR check status is unavailable for PR #77.")
+
+
+def test_pr_loop_skips_duplicate_approved_followup_issue_creation_when_marker_exists(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Codex approves.\n\n### Future follow-ups\n- Add cleanup docs.\n"
+            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+        ],
+        pr_payload={
+            "comments": [
+                {
+                    "author": {"login": "coding-review-agent-loop"},
+                    "createdAt": "2026-05-22T10:00:00Z",
+                    "body": (
+                        "Created approved-review future follow-up issues for PR #77:\n\n"
+                        "- https://github.com/OWNER/REPO/issues/99\n\n"
+                        "These were mentioned in approved reviews as future work and did not block merge readiness.\n\n"
+                        "<!-- AGENT_APPROVED_FOLLOWUPS: pr=77 head=abc123 mode=issue -->\n"
+                        "-- coding-review-agent-loop"
+                    ),
+                }
+            ]
+        },
+    )
+    config = make_config(tmp_path, approved_followups="issue")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert runner.issues == []
+    assert runner.comments == [
+        "Codex approves.\n\n### Future follow-ups\n- Add cleanup docs.\n"
+        "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+    ]
+
+
 def test_pr_loop_allows_repos_without_github_checks_when_branch_protection_404(tmp_path):
     runner = FakeRunner(
         codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
