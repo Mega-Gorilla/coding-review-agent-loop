@@ -334,6 +334,13 @@ def _issue_context_block(issue_context: IssueContext | None) -> str:
     )
 
 
+def _issue_pr_reference_guidance(issue_number: int) -> str:
+    return (
+        f"In the pull request body, include `Fixes #{issue_number}` or another direct "
+        f"reference to issue #{issue_number} so GitHub links the PR back to the issue.\n"
+    )
+
+
 def build_issue_prompt(
     issue_number: int,
     config: AgentLoopConfig,
@@ -348,6 +355,7 @@ Use this local checkout as your workspace. Create a branch, implement the fix,
 run relevant tests, commit, push, and open a pull request against {config.base}.
 {_scratch_file_guidance()}
 {_coder_test_reporting_guidance()}
+{_issue_pr_reference_guidance(issue_number)}
 {_issue_context_block(issue_context)}
 {_memory_block(memory)}
 
@@ -547,6 +555,7 @@ approved plan, run relevant tests, commit, push, and open a pull request against
 {config.base}.
 {_scratch_file_guidance()}
 {_coder_test_reporting_guidance()}
+{_issue_pr_reference_guidance(issue_number)}
 {_issue_context_block(issue_context)}
 {_memory_block(memory)}
 

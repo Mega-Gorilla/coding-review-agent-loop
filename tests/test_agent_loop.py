@@ -116,6 +116,7 @@ class FakeRunner(Runner):
             "state": "OPEN",
             "url": "https://github.com/OWNER/REPO/pull/77",
             "title": "Improve review prompt context",
+            "body": "Fixes #56",
             "headRefName": "feature/review-context",
             "baseRefName": "main",
             "headRefOid": "abc123",
@@ -1816,6 +1817,7 @@ def test_issue_loop_includes_issue_comments_in_coder_and_review_prompts(tmp_path
         )
         assert "Earlier comment refines the request." in prompt
         assert "Later comment should come second." in prompt
+    assert "include `Fixes #56` or another direct reference to issue #56" in claude_prompt
 
 
 def test_format_issue_context_truncates_oversized_newest_comment():
@@ -4799,6 +4801,7 @@ def test_issue_loop_plan_first_can_implement_after_approval(tmp_path):
     claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
     assert len(claude_calls) == 2
     assert "Approved implementation plan" in claude_calls[1][-1]
+    assert "include `Fixes #56` or another direct reference to issue #56" in claude_calls[1][-1]
     first_claude_index = command_index(runner.commands, ["claude", "--print"])
     fetch_index = command_index(runner.commands, ["git", "fetch", "origin"])
     switch_index = command_index(runner.commands, ["git", "switch", "main"])
@@ -4807,6 +4810,52 @@ def test_issue_loop_plan_first_can_implement_after_approval(tmp_path):
     assert len(runner.comments) == 5
     assert runner.comments[3].startswith("Implemented approved plan.")
     assert runner.comments[4].startswith("LGTM.")
+
+
+def test_issue_loop_rejects_pr_without_issue_reference_in_body(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Fixed issue.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        pr_payload={
+            "number": 77,
+            "state": "OPEN",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "body": "Summary only.",
+        },
+    )
+    config = make_config(tmp_path)
+
+    with pytest.raises(AgentLoopError, match="does not reference issue #56"):
+        run_issue_loop(runner, issue_number=56, config=config)
+
+
+def test_issue_loop_plan_first_implementation_rejects_pr_without_issue_reference_in_body(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Plan:\n- Make the change.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Implemented approved plan.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        pr_payload={
+            "number": 77,
+            "state": "OPEN",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "body": "Summary only.",
+        },
+    )
+    config = make_config(tmp_path, reviewer=("codex",))
+
+    with pytest.raises(AgentLoopError, match="does not reference issue #56"):
+        run_issue_loop(
+            runner,
+            issue_number=56,
+            config=config,
+            plan_first=True,
+            implement_after_approval=True,
+        )
 
 
 def test_is_clarification_request_detects_marker():
