@@ -49,13 +49,16 @@ from .prompts import (
     format_agent_list,
 )
 from .protocol import (
+    ParsedReview,
+    ReviewItemDisposition,
+    UnresolvedReviewItem,
     human_requirements_resolved,
     is_clarification_request,
     parse_agent_state,
     parse_plan_state,
     parse_pr_number,
 )
-from .protocol import ApprovedFollowup, parse_approved_followups
+from .protocol import ApprovedFollowup, parse_review
 from .runner import Runner
 from .usage import RunUsageContext, UsageMetadata, estimate_usage
 from .workdirs import active_workdir
@@ -292,6 +295,107 @@ class GroupedApprovedFollowup:
             if item.reviewer not in reviewers:
                 reviewers.append(item.reviewer)
         return tuple(reviewers)
+
+
+def _review_summary_text(review: str) -> str:
+    lines: list[str] = []
+    for line in review.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            lines.append("")
+            continue
+        if stripped.startswith("<!--") and stripped.endswith("-->"):
+            continue
+        if stripped.startswith("-- "):
+            continue
+        lines.append(line.rstrip())
+    return "\n".join(lines).strip()
+
+
+def _next_unresolved_item(
+    *,
+    item_number: int,
+    reviewer: str,
+    source_round: int,
+    text: str,
+    status: str,
+) -> UnresolvedReviewItem:
+    return UnresolvedReviewItem(
+        item_id=f"item-{item_number}",
+        reviewer=reviewer,
+        source_round=source_round,
+        text=text,
+        status=status,
+    )
+
+
+def _validate_review_response(
+    text: str,
+    *,
+    reviewer: str,
+    unresolved_items: Sequence[UnresolvedReviewItem],
+) -> ParsedReview:
+    parsed = parse_review(text, reviewer=reviewer)
+    if not unresolved_items:
+        return parsed
+
+    unresolved_by_id = {item.item_id: item for item in unresolved_items}
+    disposition_ids = [item.item_id for item in parsed.dispositions]
+    duplicates = sorted({item_id for item_id in disposition_ids if disposition_ids.count(item_id) > 1})
+    if duplicates:
+        raise AgentLoopError(
+            "Review listed prior unresolved items more than once: " + ", ".join(duplicates)
+        )
+    unknown = sorted(set(disposition_ids) - set(unresolved_by_id))
+    if unknown:
+        raise AgentLoopError(
+            "Review referenced unknown prior unresolved item IDs: " + ", ".join(unknown)
+        )
+    missing = sorted(set(unresolved_by_id) - set(disposition_ids))
+    if missing:
+        raise AgentLoopError(
+            "Review did not evaluate all prior unresolved items: " + ", ".join(missing)
+        )
+    return parsed
+
+
+def _apply_unresolved_item_dispositions(
+    unresolved_items: Sequence[UnresolvedReviewItem],
+    dispositions_by_item: dict[str, list[ReviewItemDisposition]],
+) -> tuple[list[UnresolvedReviewItem], list[ApprovedFollowup]]:
+    next_unresolved: list[UnresolvedReviewItem] = []
+    downgraded_future: list[ApprovedFollowup] = []
+    for item in unresolved_items:
+        dispositions = dispositions_by_item.get(item.item_id, [])
+        if not dispositions:
+            next_unresolved.append(item)
+            continue
+        outcomes = {disposition.disposition for disposition in dispositions}
+        if "blocking" in outcomes:
+            next_unresolved.append(
+                UnresolvedReviewItem(
+                    item_id=item.item_id,
+                    reviewer=item.reviewer,
+                    source_round=item.source_round,
+                    text=item.text,
+                    status="blocking",
+                )
+            )
+            continue
+        if "same-pr" in outcomes:
+            next_unresolved.append(
+                UnresolvedReviewItem(
+                    item_id=item.item_id,
+                    reviewer=item.reviewer,
+                    source_round=item.source_round,
+                    text=item.text,
+                    status="same-pr",
+                )
+            )
+            continue
+        if "future" in outcomes:
+            downgraded_future.append(ApprovedFollowup(reviewer=item.reviewer, text=item.text))
+    return next_unresolved, downgraded_future
 
 
 def run_optional_tests(runner: Runner, config: AgentLoopConfig) -> None:
@@ -582,6 +686,17 @@ def _format_same_pr_followups(followups: Sequence[ApprovedFollowup]) -> str:
     for followup in followups:
         lines.append(f"{followup.reviewer} same-PR follow-up:")
         lines.append(f"- {followup.text}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
+def _format_unresolved_items_for_coder(items: Sequence[UnresolvedReviewItem]) -> str:
+    lines: list[str] = []
+    for item in items:
+        lines.append(
+            f"{item.reviewer} unresolved {item.status} item [{item.item_id}] from round {item.source_round}:"
+        )
+        lines.append(f"- {item.text}")
         lines.append("")
     return "\n".join(lines).strip()
 
@@ -999,14 +1114,19 @@ def run_pr_loop(
         memory = prepare_agent_memory(runner, config)
         reviewer_session_ids: dict[AgentName, str | None] = {}
         configured_reviewers = reviewers(config)
+        unresolved_items: list[UnresolvedReviewItem] = []
+        next_unresolved_item_number = 1
         if reviewer_session_id is not None and configured_reviewers:
             # Backward-compatible single-reviewer resume support: older callers
             # pass one reviewer session, so attach it to the first configured reviewer.
             reviewer_session_ids[configured_reviewers[0]] = reviewer_session_id
         for round_number in range(1, config.max_rounds + 1):
             coder_name = agent_display_name(config.coder)
-            blocking_reviews: list[tuple[str, str]] = []
-            same_pr_followups: list[ApprovedFollowup] = []
+            prior_unresolved_items = tuple(unresolved_items)
+            prior_dispositions: dict[str, list[ReviewItemDisposition]] = {
+                item.item_id: [] for item in prior_unresolved_items
+            }
+            round_new_unresolved_items: list[UnresolvedReviewItem] = []
             round_future_followups: list[ApprovedFollowup] = []
             approved_review_outputs: list[tuple[str, str]] = []
             if pre_review_test_pending:
@@ -1035,46 +1155,84 @@ def run_pr_loop(
                         memory=memory,
                         issue_context=issue_context,
                         human_requirements=human_requirements,
+                        unresolved_items=prior_unresolved_items,
                     ),
                     session_id=reviewer_session_ids.get(reviewer),
                     marker_description="<!-- AGENT_STATE: approved|blocking -->",
-                    validate=parse_agent_state,
+                    validate=lambda text, reviewer_name=reviewer_name, items=prior_unresolved_items: _validate_review_response(
+                        text,
+                        reviewer=reviewer_name,
+                        unresolved_items=items,
+                    ),
                     usage_context=usage_context,
                 )
                 review_output = review_response.text
                 reviewer_session_ids[reviewer] = review_response.session_id
-                review_state = str(review_response.marker_value)
+                parsed_review = review_response.marker_value
+                assert isinstance(parsed_review, ParsedReview)
+                review_state = parsed_review.state
 
                 post_pr_comment(runner, config=config, pr_number=pr_number, body=review_output)
                 log(config, f"Round {round_number}: {reviewer_name} state is {review_state}")
+                for disposition in parsed_review.dispositions:
+                    prior_dispositions[disposition.item_id].append(disposition)
                 if review_state == "blocking":
-                    blocking_reviews.append((reviewer_name, review_output))
+                    round_new_unresolved_items.append(
+                        _next_unresolved_item(
+                            item_number=next_unresolved_item_number,
+                            reviewer=reviewer_name,
+                            source_round=round_number,
+                            text=_review_summary_text(review_output) or "Blocking review requires follow-up.",
+                            status="blocking",
+                        )
+                    )
+                    next_unresolved_item_number += 1
                     continue
 
                 approved_review_outputs.append((reviewer_name, review_output))
                 if config.approved_followups != "ignore":
-                    followups = parse_approved_followups(review_output, reviewer=reviewer_name)
-                    round_future_followups.extend(followups.future)
-                    if followups.same_pr:
+                    round_future_followups.extend(parsed_review.followups.future)
+                    if parsed_review.followups.same_pr:
                         if config.approved_followups.startswith("fix-and-"):
-                            same_pr_followups.extend(followups.same_pr)
+                            for followup in parsed_review.followups.same_pr:
+                                round_new_unresolved_items.append(
+                                    _next_unresolved_item(
+                                        item_number=next_unresolved_item_number,
+                                        reviewer=followup.reviewer,
+                                        source_round=round_number,
+                                        text=followup.text,
+                                        status="same-pr",
+                                    )
+                                )
+                                next_unresolved_item_number += 1
                         else:
-                            blocking_reviews.append(
-                                (
-                                    reviewer_name,
-                                    "\n".join(
+                            round_new_unresolved_items.append(
+                                _next_unresolved_item(
+                                    item_number=next_unresolved_item_number,
+                                    reviewer=reviewer_name,
+                                    source_round=round_number,
+                                    text="\n".join(
                                         [
                                             "Approved review included Same-PR follow-ups, "
                                             f"but --approved-followups={config.approved_followups} "
                                             "does not enable a same-PR fix path.",
                                             "",
-                                            _format_same_pr_followups(followups.same_pr),
+                                            _format_same_pr_followups(parsed_review.followups.same_pr),
                                         ]
                                     ),
+                                    status="blocking",
                                 )
                             )
+                            next_unresolved_item_number += 1
 
-            if not blocking_reviews and not same_pr_followups:
+            carried_unresolved_items, downgraded_future_followups = _apply_unresolved_item_dispositions(
+                prior_unresolved_items,
+                prior_dispositions,
+            )
+            unresolved_items = [*carried_unresolved_items, *round_new_unresolved_items]
+            round_future_followups.extend(downgraded_future_followups)
+
+            if not unresolved_items:
                 if human_requirements:
                     missing_acknowledgements = [
                         reviewer_name
@@ -1097,10 +1255,17 @@ def run_pr_loop(
                 )
                 if not migration_validation.ok:
                     log(config, f"Round {round_number}: Alembic migration validation blocked approval")
-                    blocking_reviews.append(
-                        ("Alembic migration validation", migration_validation.message or "")
+                    unresolved_items.append(
+                        _next_unresolved_item(
+                            item_number=next_unresolved_item_number,
+                            reviewer="Alembic migration validation",
+                            source_round=round_number,
+                            text=migration_validation.message or "Migration validation failed.",
+                            status="blocking",
+                        )
                     )
-                if not blocking_reviews:
+                    next_unresolved_item_number += 1
+                if not unresolved_items:
                     if pr_checks.state in {"pending", "unavailable"}:
                         _publish_approved_followups(
                             runner,
@@ -1123,18 +1288,22 @@ def run_pr_loop(
                                 config,
                                 f"Round {round_number}: GitHub PR checks blocked approval ({pr_checks.state})",
                             )
-                            blocking_reviews.append(
-                                (
-                                    "GitHub PR checks",
-                                    _pr_check_blocking_review(pr_number, pr_checks.state, details),
+                            unresolved_items.append(
+                                _next_unresolved_item(
+                                    item_number=next_unresolved_item_number,
+                                    reviewer="GitHub PR checks",
+                                    source_round=round_number,
+                                    text=_pr_check_blocking_review(pr_number, pr_checks.state, details),
+                                    status="blocking",
                                 )
                             )
+                            next_unresolved_item_number += 1
                         else:
                             raise AgentLoopError(
                                 f"GitHub PR checks for PR #{pr_number} are {pr_checks.state}; "
                                 "wait for CI or investigate GitHub API access before treating the PR as approved."
                             )
-                if not blocking_reviews:
+                if not unresolved_items:
                     _publish_approved_followups(
                         runner,
                         config=config,
@@ -1155,7 +1324,13 @@ def run_pr_loop(
                     "human review required."
                 )
 
-            if same_pr_followups and not blocking_reviews:
+            same_pr_followups = [
+                ApprovedFollowup(reviewer=item.reviewer, text=item.text)
+                for item in unresolved_items
+                if item.status == "same-pr"
+            ]
+            blocking_items = [item for item in unresolved_items if item.status == "blocking"]
+            if same_pr_followups and not blocking_items:
                 combined_review = _format_same_pr_followups(same_pr_followups)
                 followup_prompt = build_same_pr_followup_prompt(
                     pr_number,
@@ -1167,18 +1342,7 @@ def run_pr_loop(
                     human_requirements=human_requirements,
                 )
             else:
-                # Discard future-work suggestions from non-final rounds so reviewers
-                # can restate still-relevant items after the PR has been updated.
-                if same_pr_followups:
-                    blocking_reviews.append(
-                        (
-                            "Approved same-PR follow-ups",
-                            _format_same_pr_followups(same_pr_followups),
-                        )
-                    )
-                combined_review = "\n\n".join(
-                    f"{name} review:\n\n{review}" for name, review in blocking_reviews
-                )
+                combined_review = _format_unresolved_items_for_coder(unresolved_items)
                 followup_prompt = build_followup_prompt(
                     pr_number,
                     round_number,

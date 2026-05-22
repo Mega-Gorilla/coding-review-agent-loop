@@ -32,12 +32,27 @@ def _followup_heading_re(title: str) -> re.Pattern[str]:
 SAME_PR_FOLLOWUP_HEADING_RE = _followup_heading_re(r"same[- ]pr follow[- ]ups")
 FUTURE_FOLLOWUP_HEADING_RE = _followup_heading_re(r"future follow[- ]ups")
 LEGACY_FOLLOWUP_HEADING_RE = _followup_heading_re(r"non[- ]blocking follow[- ]ups")
+PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE = _followup_heading_re(
+    r"prior unresolved item dispositions"
+)
 ANY_HEADING_RE = re.compile(r"^\s*#{1,6}\s+\S")
 HTML_COMMENT_RE = re.compile(r"^\s*<!--.*-->\s*$")
 SIGNATURE_RE = re.compile(r"^\s*--\s+\S")
 BULLET_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)(?P<text>.+?)\s*$")
 EMPTY_FOLLOWUP_RE = re.compile(
     r"^(?:none|n/a|no follow[- ]?ups?|no same[- ]pr follow[- ]?ups?|no future follow[- ]?ups?)\.?$",
+    re.I,
+)
+DISPOSITION_RE = re.compile(
+    r"^\s*\[?(?P<item_id>[A-Za-z0-9][A-Za-z0-9._-]*)\]?\s*"
+    r"(?:->|:)?\s*"
+    r"(?P<status>"
+    r"resolved|"
+    r"(?:still\s+)?blocking|"
+    r"(?:still\s+)?same[- ]pr|"
+    r"(?:downgraded\s+to\s+)?future follow[- ]up"
+    r")"
+    r"(?:\s*:\s*(?P<note>.+))?\s*$",
     re.I,
 )
 
@@ -52,6 +67,30 @@ class ApprovedFollowup:
 class ApprovedFollowups:
     same_pr: tuple[ApprovedFollowup, ...]
     future: tuple[ApprovedFollowup, ...]
+
+
+@dataclass(frozen=True)
+class ReviewItemDisposition:
+    item_id: str
+    reviewer: str
+    disposition: str
+    note: str | None = None
+
+
+@dataclass(frozen=True)
+class UnresolvedReviewItem:
+    item_id: str
+    reviewer: str
+    source_round: int
+    text: str
+    status: str
+
+
+@dataclass(frozen=True)
+class ParsedReview:
+    state: str
+    followups: ApprovedFollowups
+    dispositions: tuple[ReviewItemDisposition, ...]
 
 
 def parse_agent_state(text: str) -> str:
@@ -155,6 +194,78 @@ def parse_approved_followups(text: str, *, reviewer: str) -> ApprovedFollowups:
 
     flush_current()
     return ApprovedFollowups(same_pr=tuple(same_pr), future=tuple(future))
+
+
+def _normalize_disposition(status: str) -> str:
+    normalized = " ".join(status.lower().split()).replace("same pr", "same-pr")
+    if normalized == "resolved":
+        return "resolved"
+    if normalized.endswith("blocking"):
+        return "blocking"
+    if normalized.endswith("same-pr"):
+        return "same-pr"
+    if normalized.endswith("future follow-up"):
+        return "future"
+    raise AgentLoopError(f"Unsupported unresolved item disposition: {status}")
+
+
+def parse_unresolved_item_dispositions(text: str, *, reviewer: str) -> tuple[ReviewItemDisposition, ...]:
+    """Extract structured prior-item dispositions from a review."""
+    dispositions: list[ReviewItemDisposition] = []
+    active = False
+
+    for line in text.splitlines():
+        if PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE.match(line):
+            active = True
+            continue
+        if not active:
+            continue
+        if ANY_HEADING_RE.match(line) or HTML_COMMENT_RE.match(line) or SIGNATURE_RE.match(line):
+            active = False
+            continue
+        if not line.strip():
+            continue
+        bullet = BULLET_RE.match(line)
+        if not bullet:
+            raise AgentLoopError(
+                "Prior unresolved item dispositions must use one bullet per item, for example "
+                "`- [item-1] resolved`."
+            )
+        entry = bullet.group("text")
+        if EMPTY_FOLLOWUP_RE.match(entry):
+            continue
+        match = DISPOSITION_RE.match(entry)
+        if not match:
+            raise AgentLoopError(
+                "Invalid prior unresolved item disposition. Use bullets like "
+                "`- [item-1] resolved`, `- [item-2] still blocking`, "
+                "`- [item-3] same-pr`, or `- [item-4] future follow-up: reason`."
+            )
+        note = match.group("note")
+        dispositions.append(
+            ReviewItemDisposition(
+                item_id=match.group("item_id"),
+                reviewer=reviewer,
+                disposition=_normalize_disposition(match.group("status")),
+                note=note.strip() if note else None,
+            )
+        )
+
+    return tuple(dispositions)
+
+
+def parse_review(text: str, *, reviewer: str) -> ParsedReview:
+    """Parse a review, including state, follow-ups, and prior-item dispositions."""
+    state = parse_agent_state(text)
+    followups = parse_approved_followups(text, reviewer=reviewer)
+    dispositions = parse_unresolved_item_dispositions(text, reviewer=reviewer)
+    if state == "blocking" and followups.future:
+        raise AgentLoopError("Blocking reviews may not include Future follow-ups.")
+    if state == "blocking" and any(item.disposition == "future" for item in dispositions):
+        raise AgentLoopError(
+            "Blocking reviews may not downgrade prior unresolved items to Future follow-ups."
+        )
+    return ParsedReview(state=state, followups=followups, dispositions=dispositions)
 
 
 def parse_non_blocking_followups(text: str, *, reviewer: str) -> list[ApprovedFollowup]:

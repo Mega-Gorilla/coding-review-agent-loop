@@ -9,6 +9,7 @@ from .agents.registry import agent_display_name, agent_signature
 from .config import AgentLoopConfig, reviewers
 from .github import HumanReviewRequirement, IssueContext, PullRequestChecks, PullRequestMetadata
 from .memory import AgentMemoryContext, format_agent_memory_context
+from .protocol import UnresolvedReviewItem
 
 
 def format_agent_list(agents: Sequence[AgentName]) -> str:
@@ -248,6 +249,26 @@ review must include exactly:
 
 If any signed human reviewer requirement is unresolved, return blocking.
 """
+
+
+def _format_unresolved_review_items(unresolved_items: Sequence[UnresolvedReviewItem] | None) -> str:
+    if not unresolved_items:
+        return ""
+    lines = [
+        "Prior unresolved review items from earlier rounds",
+        "",
+        "Explicitly evaluate every item below before approving. Use the item IDs exactly as written.",
+        "",
+    ]
+    for item in unresolved_items:
+        lines.extend(
+            [
+                f"- [{item.item_id}] {item.status} from {item.reviewer} in round {item.source_round}",
+                f"  {item.text}",
+            ]
+        )
+    lines.append("")
+    return "\n".join(lines)
 
 
 def format_pr_checks(checks: PullRequestChecks) -> str:
@@ -556,6 +577,7 @@ def build_review_prompt(
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
     human_requirements: Sequence[HumanReviewRequirement] | None = None,
+    unresolved_items: Sequence[UnresolvedReviewItem] | None = None,
 ) -> str:
     coder_name = agent_display_name(config.coder)
     reviewer_signature = agent_signature(reviewer)
@@ -576,6 +598,22 @@ def build_review_prompt(
     url_line = f"- URL: {metadata.url}\n" if metadata.url else ""
     checks_block = f"{format_pr_checks(pr_checks)}\n" if pr_checks is not None else ""
     human_requirements_guidance = _human_requirements_review_guidance(human_requirements)
+    unresolved_items_block = _format_unresolved_review_items(unresolved_items)
+    if unresolved_items:
+        unresolved_items_guidance = """Because prior unresolved items exist, include this exact section in your review:
+
+### Prior unresolved item dispositions
+
+Use one bullet per listed item and cover every item exactly once. Allowed forms:
+- [item-id] resolved
+- [item-id] still blocking
+- [item-id] same-pr
+- [item-id] future follow-up: brief reason
+
+Only use `future follow-up` when returning `approved`. If an item should still be fixed before merge, keep it as `still blocking` or `same-pr` instead of downgrading it.
+"""
+    else:
+        unresolved_items_guidance = ""
     if config.approved_followups == "ignore":
         followup_guidance = """Do not include Same-PR follow-ups, Future follow-ups, or legacy
 Non-blocking follow-ups sections in approved reviews; this run is configured to
@@ -632,7 +670,7 @@ present in the PR diff.
 {_scratch_file_guidance()}
 {checks_block}{_issue_context_block(issue_context)}
 {_human_requirements_block(human_requirements)}
-{_memory_block(memory)}
+{unresolved_items_block}{_memory_block(memory)}
 
 Suggested commands:
 - {config.gh_cmd} pr view {metadata.number} --repo {metadata.repo} --json title,body,headRefName,baseRefName,headRefOid,comments,reviews
@@ -653,6 +691,7 @@ When the PR changes files under `alembic/versions/`, verify migration topology:
 new revisions should descend from the current head unless the PR intentionally
 adds a merge migration.
 {human_requirements_guidance}
+{unresolved_items_guidance}
 {followup_guidance}
 Use blocking only for issues that should prevent merge.
 All configured reviewers ({reviewer_group}) must approve in the same round for
