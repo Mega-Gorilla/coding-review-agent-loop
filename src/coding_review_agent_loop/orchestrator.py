@@ -690,6 +690,17 @@ def _format_same_pr_followups(followups: Sequence[ApprovedFollowup]) -> str:
     return "\n".join(lines).strip()
 
 
+def _format_same_pr_unresolved_items(items: Sequence[UnresolvedReviewItem]) -> str:
+    lines: list[str] = []
+    for item in items:
+        lines.append(
+            f"{item.reviewer} same-PR follow-up [{item.item_id}] from round {item.source_round}:"
+        )
+        lines.append(f"- {item.text}")
+        lines.append("")
+    return "\n".join(lines).strip()
+
+
 def _format_unresolved_items_for_coder(items: Sequence[UnresolvedReviewItem]) -> str:
     lines: list[str] = []
     for item in items:
@@ -1115,6 +1126,7 @@ def run_pr_loop(
         reviewer_session_ids: dict[AgentName, str | None] = {}
         configured_reviewers = reviewers(config)
         unresolved_items: list[UnresolvedReviewItem] = []
+        carried_future_followups: list[ApprovedFollowup] = []
         next_unresolved_item_number = 1
         if reviewer_session_id is not None and configured_reviewers:
             # Backward-compatible single-reviewer resume support: older callers
@@ -1230,7 +1242,8 @@ def run_pr_loop(
                 prior_dispositions,
             )
             unresolved_items = [*carried_unresolved_items, *round_new_unresolved_items]
-            round_future_followups.extend(downgraded_future_followups)
+            carried_future_followups.extend(downgraded_future_followups)
+            all_future_followups = [*carried_future_followups, *round_future_followups]
 
             if not unresolved_items:
                 if human_requirements:
@@ -1273,7 +1286,7 @@ def run_pr_loop(
                             pr_number=pr_number,
                             head_sha=pr_metadata.head_sha,
                             pr_comments=pr_comments,
-                            followups=round_future_followups,
+                            followups=all_future_followups,
                         )
                     if pr_checks.state in {"failing", "pending", "unavailable"}:
                         details = _pr_check_details(pr_checks)
@@ -1310,7 +1323,7 @@ def run_pr_loop(
                         pr_number=pr_number,
                         head_sha=pr_metadata.head_sha,
                         pr_comments=pr_comments,
-                        followups=round_future_followups,
+                        followups=all_future_followups,
                     )
                     run_optional_tests(runner, config)
                     if config.auto_merge:
@@ -1324,14 +1337,10 @@ def run_pr_loop(
                     "human review required."
                 )
 
-            same_pr_followups = [
-                ApprovedFollowup(reviewer=item.reviewer, text=item.text)
-                for item in unresolved_items
-                if item.status == "same-pr"
-            ]
+            same_pr_items = [item for item in unresolved_items if item.status == "same-pr"]
             blocking_items = [item for item in unresolved_items if item.status == "blocking"]
-            if same_pr_followups and not blocking_items:
-                combined_review = _format_same_pr_followups(same_pr_followups)
+            if same_pr_items and not blocking_items:
+                combined_review = _format_same_pr_unresolved_items(same_pr_items)
                 followup_prompt = build_same_pr_followup_prompt(
                     pr_number,
                     round_number,

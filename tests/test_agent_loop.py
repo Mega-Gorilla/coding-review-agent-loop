@@ -1235,6 +1235,26 @@ def test_parse_unresolved_item_dispositions_extracts_structured_updates():
     ]
 
 
+def test_parse_unresolved_item_dispositions_ignores_non_bullet_prose():
+    review = """
+    LGTM.
+
+    ### Prior unresolved item dispositions
+    These are the remaining status calls.
+    - [item-1] resolved
+    Closing thought after the bullets.
+
+    <!-- AGENT_STATE: approved -->
+    -- OpenAI Codex
+    """
+
+    dispositions = parse_unresolved_item_dispositions(review, reviewer="OpenAI Codex")
+
+    assert [(item.item_id, item.disposition, item.note) for item in dispositions] == [
+        ("item-1", "resolved", None),
+    ]
+
+
 def test_parse_review_rejects_future_followups_in_blocking_reviews():
     review = """
     Still blocked.
@@ -2898,6 +2918,7 @@ def test_pr_loop_fix_and_summarize_sends_same_pr_followups_to_coder_then_rerevie
         cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"] and "Same-PR follow-ups" in cmd[-1]
     )
     assert "Rename the helper before merge." in followup_prompt
+    assert "[item-1]" in followup_prompt
     assert "Issue context from GitHub" in followup_prompt
     assert "Title:\nSupport issue comments" in followup_prompt
     assert "Clarifying issue comment." in followup_prompt
@@ -3148,6 +3169,37 @@ def test_pr_loop_can_downgrade_prior_blocker_to_future_followup_only_in_approved
         ],
     )
     config = make_config(tmp_path, approved_followups="summarize", max_rounds=2)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    summary = runner.comments[-1]
+    assert summary.startswith("Approved-review future follow-ups for PR #77:")
+    assert "Missing docs cleanup." in summary
+
+
+def test_pr_loop_persists_downgraded_future_followup_across_later_blocking_rounds(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Still blocked.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+            "LGTM."
+            + prior_item_dispositions("[item-1] future follow-up: cleanup can wait", "[item-2] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Missing docs cleanup.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "Implemented fix for Claude.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "Looks good."
+            + prior_item_dispositions("[item-1] future follow-up: cleanup can wait", "[item-2] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        reviewer=("codex", "claude"),
+        coder="codex",
+        approved_followups="summarize",
+        max_rounds=2,
+    )
 
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 

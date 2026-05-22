@@ -227,10 +227,7 @@ def parse_unresolved_item_dispositions(text: str, *, reviewer: str) -> tuple[Rev
             continue
         bullet = BULLET_RE.match(line)
         if not bullet:
-            raise AgentLoopError(
-                "Prior unresolved item dispositions must use one bullet per item, for example "
-                "`- [item-1] resolved`."
-            )
+            continue
         entry = bullet.group("text")
         if EMPTY_FOLLOWUP_RE.match(entry):
             continue
