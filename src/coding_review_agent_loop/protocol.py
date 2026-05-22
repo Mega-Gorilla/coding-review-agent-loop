@@ -391,7 +391,10 @@ def parse_plan_review(text: str, *, reviewer: str) -> ParsedPlanReview:
     items = parse_plan_review_items(text, reviewer=reviewer)
     dispositions = parse_plan_item_dispositions(text, reviewer=reviewer)
     if state == "blocking" and items.future:
-        raise AgentLoopError("Blocking plan reviews may not include Future follow-ups.")
+        # Some agents still append speculative future work to otherwise valid
+        # blocking plan reviews. Preserve the blocking findings and ignore that
+        # lower-priority section rather than aborting the whole planning round.
+        items = PlanReviewItems(blocking=items.blocking, same_plan=items.same_plan, future=())
     if state == "blocking" and any(item.disposition == "future" for item in dispositions):
         raise AgentLoopError(
             "Blocking plan reviews may not downgrade prior unresolved plan items to Future follow-ups."
