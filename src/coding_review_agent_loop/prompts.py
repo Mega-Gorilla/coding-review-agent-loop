@@ -276,6 +276,30 @@ def _format_unresolved_review_items(unresolved_items: Sequence[UnresolvedReviewI
     return "\n".join(lines)
 
 
+def _format_unresolved_plan_items(unresolved_items: Sequence[UnresolvedReviewItem] | None) -> str:
+    if not unresolved_items:
+        return ""
+    lines = [
+        "Prior unresolved plan items from earlier rounds",
+        "",
+        "Explicitly evaluate every item below before approving. Use the item IDs exactly as written.",
+        "",
+    ]
+    for item in unresolved_items:
+        details = [indent(item.text, "  ")]
+        if item.notes:
+            details.append("  Latest reviewer updates:")
+            details.extend(f"  - {note}" for note in item.notes)
+        lines.extend(
+            [
+                f"- [{item.item_id}] {item.status} from {item.reviewer} in round {item.source_round}",
+                *details,
+            ]
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
 def format_pr_checks(checks: PullRequestChecks) -> str:
     lines = [
         "GitHub PR checks:",
@@ -386,26 +410,57 @@ def build_plan_review_prompt(
     reviewer: AgentName,
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
+    unresolved_items: Sequence[UnresolvedReviewItem] = (),
 ) -> str:
     coder_name = agent_display_name(config.coder)
     reviewer_signature = agent_signature(reviewer)
     reviewer_group = format_agent_list(reviewers(config))
+    unresolved_items_block = _format_unresolved_plan_items(unresolved_items)
+    if unresolved_items:
+        unresolved_items_guidance = """Because prior unresolved plan items exist, include this exact section in your review:
+
+### Prior unresolved plan item dispositions
+
+Use one bullet per listed item and cover every item exactly once. Allowed forms:
+- [item-id] resolved
+- [item-id] still blocking
+- [item-id] same-plan
+- [item-id] future follow-up: brief reason
+
+Only use `future follow-up` when returning `approved`. If a current-plan item still needs to be fixed before implementation starts, keep it as `still blocking` or `same-plan` instead of downgrading it.
+"""
+    else:
+        unresolved_items_guidance = ""
     return f"""Review the implementation plan for GitHub issue #{issue_number} in {config.repo} (planning round {round_number}).
 
 Use this local checkout only to inspect context. Do not edit files, create a
 branch, commit, push, or open a pull request during this planning review.
 {_scratch_file_guidance()}
 {_issue_context_block(issue_context)}
-{_memory_block(memory)}
+{unresolved_items_block}{_memory_block(memory)}
 
 Plan from {coder_name}:
 
 {plan}
 
 Review the plan for correctness, architecture fit, missing edge cases, test
-strategy, and ambiguity. Use blocking only for issues that should be resolved
-before implementation starts. All configured reviewers ({reviewer_group}) must
-approve in the same planning round before implementation can proceed.
+strategy, and ambiguity. Use this exact structured format in your response body:
+
+### Blocking plan issues
+- Required corrections that must be resolved before the plan can be approved.
+
+### Same-plan follow-ups
+- Required current-plan refinements that should be folded into the next plan revision before approval.
+
+### Future follow-ups
+- Ideas worth tracking separately that are not required for the current implementation plan.
+
+Blocking plan issues and Same-plan follow-ups both prevent approval. Future
+follow-ups are allowed only in approved plan reviews.
+{unresolved_items_guidance}
+Use blocking only when the current plan still has blocking plan issues or
+same-plan follow-ups. All configured reviewers ({reviewer_group}) must approve
+in the same planning round before implementation can proceed.
 
 End your final response with exactly one planning marker:
 
@@ -428,16 +483,18 @@ def build_plan_revision_prompt(
     config: AgentLoopConfig,
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
+    unresolved_items: Sequence[UnresolvedReviewItem] = (),
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
+    unresolved_items_block = _format_unresolved_plan_items(unresolved_items)
     return f"""{reviewer_name} reviewed the implementation plan for GitHub issue #{issue_number} in {config.repo} and found blocking issues.
 
 Revise the plan in this local checkout without editing code. Do not create a
 branch, commit, push, or open a pull request during this planning stage.
 {_scratch_file_guidance()}
 {_issue_context_block(issue_context)}
-{_memory_block(memory)}
+{unresolved_items_block}{_memory_block(memory)}
 
 Previous plan:
 
@@ -446,6 +503,20 @@ Previous plan:
 {reviewer_name} plan review:
 
 {review}
+
+Revise the plan item by item instead of replying only with free-form prose. If
+prior unresolved plan items are listed above, include this exact section in
+your response and address each item ID exactly once:
+
+### Prior plan review item dispositions
+- [item-id] resolved: brief explanation of how the revised plan addresses it
+- [item-id] still blocking: brief explanation if you cannot resolve it yet
+- [item-id] same-plan: brief explanation of the remaining current-plan refinement
+- [item-id] future: brief explanation only if a reviewer explicitly asked to move it to future work
+
+Then provide the revised implementation plan with concrete file areas, edge
+cases, and tests. Use `same-plan`, never `same-pr`, when describing plan-only
+current-round refinements.
 
 This is planning round {round_number}. End your final response with exactly one
 planning marker:
