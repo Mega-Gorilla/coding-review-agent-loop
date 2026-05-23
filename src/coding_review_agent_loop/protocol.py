@@ -532,6 +532,16 @@ def parse_review(text: str, *, reviewer: str) -> ParsedReview:
         raise AgentLoopError(
             "Blocking reviews may not downgrade prior unresolved items to Future follow-ups."
         )
+    if state == "approved":
+        active_dispositions = [
+            item.disposition for item in dispositions if item.disposition in {"blocking", "same-pr"}
+        ]
+        if followups.same_pr or active_dispositions:
+            raise AgentLoopError(
+                "Approved reviews must be fully complete for this round. Do not use "
+                "`approved` when Same-PR follow-ups remain or when any prior unresolved "
+                "item stays `still blocking` or `same-pr`."
+            )
     return ParsedReview(state=state, followups=followups, dispositions=dispositions)
 
 
@@ -549,6 +559,16 @@ def parse_plan_review(text: str, *, reviewer: str) -> ParsedPlanReview:
         raise AgentLoopError(
             "Blocking plan reviews may not downgrade prior unresolved plan items to Future follow-ups."
         )
+    if state == "approved":
+        active_dispositions = [
+            item.disposition for item in dispositions if item.disposition in {"blocking", "same-plan"}
+        ]
+        if items.blocking or items.same_plan or active_dispositions:
+            raise AgentLoopError(
+                "Approved plan reviews must be fully complete for this planning round. "
+                "Do not use `approved` when blocking plan issues, Same-plan follow-ups, "
+                "or carried-forward plan items remain active."
+            )
     return ParsedPlanReview(state=state, items=items, dispositions=dispositions)
 
 

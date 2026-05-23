@@ -537,11 +537,14 @@ strategy, and ambiguity. Use this exact structured format in your response body:
 ### Future follow-ups
 - Ideas worth tracking separately that are not required for the current implementation plan.
 
-Blocking plan issues and Same-plan follow-ups both prevent approval. Future
-follow-ups are allowed only in approved plan reviews. If you return
-`<!-- AGENT_PLAN_STATE: blocking -->`, do not use structured Future
-follow-ups; keep all required current-round issues in the main blocking
-content so they are not missed during plan revision.
+Blocking plan issues and Same-plan follow-ups both prevent approval. Same-plan
+follow-ups may appear only in blocking plan reviews. Future follow-ups are
+allowed only in approved plan reviews. Approved means there are no blocking
+plan issues, no Same-plan follow-ups, and no carried-forward plan items left
+active for this planning round. If you return `<!-- AGENT_PLAN_STATE:
+blocking -->`, do not use structured Future follow-ups; keep all required
+current-round issues in the main blocking content so they are not missed
+during plan revision.
 {unresolved_items_guidance}
 Use blocking only when the current plan still has blocking plan issues or
 same-plan follow-ups. All configured reviewers ({reviewer_group}) must approve
@@ -555,7 +558,9 @@ or:
 
 <!-- AGENT_PLAN_STATE: blocking -->
 
-Use approved only if there are no blocking plan issues. Always sign your response:
+Use approved only if there are no blocking plan issues, no Same-plan
+follow-ups, and no carried-forward plan items left active for this planning
+round. Always sign your response:
 -- {reviewer_signature}
 """
 
@@ -784,26 +789,32 @@ ignore approved-review follow-up sections. Mark the review blocking instead
 when cleanup should be fixed before merge.
 """
     elif config.approved_followups.startswith("fix-and-"):
-        followup_guidance = f"""If you approve but notice small, localized, low-risk cleanup worth fixing
-before merge, list those items under this exact heading:
+        followup_guidance = f"""For small, localized, low-risk cleanup that must still be fixed in this PR
+before merge, return `<!-- AGENT_STATE: blocking -->` and list those items
+under this exact heading:
 
 ### Same-PR follow-ups
 
 Use Same-PR follow-ups only for narrow current-PR cleanup in files already
 touched by this PR or directly adjacent code. Do not use this section for
 larger redesigns, broad refactors, or independent future work.
+Same-PR follow-ups may appear only in blocking reviews. If any Same-PR
+follow-up remains, including a carried-forward prior item that stays
+`still blocking` or `same-pr`, the review is not approved yet.
 
-If you approve but notice substantial work that is better handled separately in
-a future issue or PR, list at most three highest-value items under this exact
-heading:
+If the PR is otherwise fully complete for this round but you notice substantial
+work that is better handled separately in a future issue or PR, list at most
+three highest-value items under this exact heading:
 
 ### Future follow-ups
 
+Approved means there are no blocking issues, no Same-PR follow-ups, and no
+carried-forward prior unresolved items left active for this round.
 Same-PR follow-ups will be sent back to {coder_name} and require another review
 round before final approval. Do not put trivial style nits in either follow-up
 section. If you return `<!-- AGENT_STATE: blocking -->`, do not use structured
-follow-up sections; include all findings in the main body of your response so
-they are not missed during revision.
+Future follow-ups; keep all required current-round work in the blocking review
+so it is not missed during revision.
 """
     else:
         followup_guidance = """If you approve but notice substantial work that is better handled separately in
@@ -870,7 +881,9 @@ or:
 
 <!-- AGENT_STATE: blocking -->
 
-Use approved only if there are no blocking issues. Always sign your response:
+Use approved only if there are no blocking issues, no Same-PR follow-ups, and
+no carried-forward unresolved items left active for this round. Always sign
+your response:
 -- {reviewer_signature}
 """
 
@@ -931,14 +944,15 @@ def build_same_pr_followup_prompt(
     coder_signature = agent_signature(config.coder)
     if human_requirements_context is None:
         human_requirements_context = render_coder_human_requirements_prompt_context(human_requirements)
-    return f"""{reviewer_name} approved pull request #{pr_number} in {config.repo} with same-PR follow-ups.
+    return f"""{reviewer_name} requested same-PR follow-ups on pull request #{pr_number} in {config.repo}.
 
 Address the follow-up items below in this local checkout. Pull/sync the PR
 branch if needed, implement fixes, run relevant tests, commit, and push to the
 same PR. Do not create a new PR.
 These same-PR follow-ups are intended to be small, localized cleanup for the
 current PR. Keep the change narrowly scoped to the listed items. Do not take on
-larger redesigns or unrelated future work; call that out instead.
+larger redesigns or unrelated future work; call that out instead. The PR
+remains blocked pending another review round after this cleanup.
 {_scratch_file_guidance()}
 {_coder_test_reporting_guidance()}
 {_issue_context_block(issue_context)}

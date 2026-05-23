@@ -220,8 +220,11 @@ mode, approved reviews may include future work under:
 Reviewers should use that section only for substantial work that is better
 handled in a separate issue or PR. The legacy heading
 `### Non-blocking follow-ups` is still parsed as future work for compatibility.
+Approval means the review is fully complete for that round: no new blocking
+work, and no carried-forward unresolved items left active in the reviewer’s
+disposition section.
 
-When `--approved-followups` uses a `fix-and-*` mode, approved reviews may also
+When `--approved-followups` uses a `fix-and-*` mode, blocking reviews may also
 include small, localized, low-risk current-PR cleanup under:
 
 ```md
@@ -230,13 +233,19 @@ include small, localized, low-risk current-PR cleanup under:
 ```
 
 Same-PR follow-ups are sent back to the coder in the existing PR and require a
-new review round. They should stay narrowly scoped to files already touched by
-the PR or directly adjacent code; larger redesigns and independent work belong
-under Future follow-ups. Approved future follow-ups remain in the round-to-round
+new review round. They may not appear in an approved review. They should stay
+narrowly scoped to files already touched by the PR or directly adjacent code;
+larger redesigns and independent work belong under Future follow-ups. Approved
+future follow-ups remain in the round-to-round
 ledger so later reviewers can explicitly confirm they are still future work,
 resolved, or should be promoted back to same-PR or blocking status. The final
 summary or issue creation uses the remaining future items from that ledger. The
 issue modes create at most three follow-up issues to avoid issue noise.
+
+Plan reviews follow the same rule: approved plan reviews may include Future
+follow-ups only. Blocking plan issues, Same-plan follow-ups, or carried-forward
+plan items left `still blocking` or `same-plan` keep the planning round
+unapproved.
 
 By default, `--approved-followups=ignore` asks reviewers not to include
 approved-review follow-up sections. Reviewers should mark the review blocking
