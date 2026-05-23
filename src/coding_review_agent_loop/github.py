@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -85,6 +86,7 @@ class PullRequestChecks:
 
 PR_METADATA_FIELDS = "number,title,headRefName,baseRefName,headRefOid,url"
 PR_REVIEW_CONTEXT_FIELDS = f"{PR_METADATA_FIELDS},comments,reviews"
+ISSUE_REFERENCE_RE_TEMPLATE = r"(?:#%d\b|/issues/%d\b)"
 
 
 def detect_repo(runner: Runner, cwd: Path, gh_cmd: str) -> str:
@@ -119,6 +121,41 @@ def validate_open_pr(runner: Runner, *, config: AgentLoopConfig, pr_number: int)
         raise AgentLoopError(
             f"PR #{pr_number} is {data.get('state', 'not open')}; provide an open PR number."
         )
+
+
+def validate_pr_references_issue(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    pr_number: int,
+    issue_number: int,
+) -> None:
+    if config.dry_run:
+        return
+    result = runner.run(
+        [
+            config.gh_cmd,
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            config.repo,
+            "--json",
+            "body,url",
+        ],
+        cwd=active_workdir(config),
+    )
+    data = json.loads(result.stdout or "{}")
+    body = _optional_str(data.get("body")) or ""
+    reference_re = re.compile(ISSUE_REFERENCE_RE_TEMPLATE % (issue_number, issue_number), re.I)
+    if reference_re.search(body):
+        return
+    raise AgentLoopError(
+        f"PR #{pr_number} does not reference issue #{issue_number} in its body. "
+        f"Edit the PR description on GitHub to include `Fixes #{issue_number}` or another direct "
+        f"issue reference, then rerun the orchestrator as `agent-loop pr {pr_number}` to continue "
+        "the review."
+    )
 
 
 def _parse_pr_metadata(

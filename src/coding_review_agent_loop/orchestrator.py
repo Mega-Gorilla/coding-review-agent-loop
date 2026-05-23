@@ -30,6 +30,7 @@ from .github import (
     post_pr_comment,
     validate_open_issue,
     validate_open_pr,
+    validate_pr_references_issue,
     wait_for_ci,
 )
 from .logging import log, new_run_id, run_usage_summary_path
@@ -1127,6 +1128,12 @@ def _run_plan_first_loop(
             pr_number = int(coder_response.marker_value)
             log(config, f"{coder_name} reported PR #{pr_number}; validating it is open")
             validate_open_pr(runner, config=config, pr_number=pr_number)
+            validate_pr_references_issue(
+                runner,
+                config=config,
+                pr_number=pr_number,
+                issue_number=issue_number,
+            )
             post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
             return run_pr_loop(
                 runner,
@@ -1219,6 +1226,12 @@ def run_issue_loop(
         pr_number = int(coder_response.marker_value)
         log(config, f"{agent_display_name(config.coder)} reported PR #{pr_number}; validating it is open")
         validate_open_pr(runner, config=config, pr_number=pr_number)
+        validate_pr_references_issue(
+            runner,
+            config=config,
+            pr_number=pr_number,
+            issue_number=issue_number,
+        )
 
         post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
         return run_pr_loop(
