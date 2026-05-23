@@ -856,6 +856,29 @@ def _format_same_pr_followups(followups: Sequence[ApprovedFollowup]) -> str:
     return "\n".join(lines).strip()
 
 
+def _describe_pr_review_outcome(parsed_review: ParsedReview, *, has_blocking_summary: bool) -> str:
+    if parsed_review.state == "approved":
+        return "approved"
+    has_same_pr = bool(parsed_review.followups.same_pr)
+    if has_blocking_summary and has_same_pr:
+        return "blocking with blocking findings and same-PR follow-ups"
+    if has_same_pr:
+        return "blocking with same-PR follow-ups"
+    return "blocking with blocking findings"
+
+
+def _describe_plan_review_outcome(parsed_review: ParsedPlanReview) -> str:
+    if parsed_review.state == "approved":
+        return "approved"
+    has_blocking = bool(parsed_review.items.blocking)
+    has_same_plan = bool(parsed_review.items.same_plan)
+    if has_blocking and has_same_plan:
+        return "blocking with blocking plan issues and same-plan follow-ups"
+    if has_same_plan:
+        return "blocking with same-plan follow-ups"
+    return "blocking with blocking plan issues"
+
+
 def _format_same_pr_unresolved_items(items: Sequence[UnresolvedReviewItem]) -> str:
     lines: list[str] = []
     for item in items:
@@ -1043,7 +1066,11 @@ def _run_plan_first_loop(
             assert isinstance(parsed_review, ParsedPlanReview)
             review_state = parsed_review.state
             post_issue_comment(runner, config=config, issue_number=issue_number, body=review_output)
-            log(config, f"Planning round {round_number}: {reviewer_name} state is {review_state}")
+            log(
+                config,
+                "Planning round "
+                f"{round_number}: {reviewer_name} outcome is {_describe_plan_review_outcome(parsed_review)}",
+            )
             for disposition in parsed_review.dispositions:
                 prior_dispositions[disposition.item_id].append(disposition)
             if review_state == "blocking":
@@ -1440,16 +1467,21 @@ def run_pr_loop(
                 review_state = parsed_review.state
 
                 post_pr_comment(runner, config=config, pr_number=pr_number, body=review_output)
-                log(config, f"Round {round_number}: {reviewer_name} state is {review_state}")
                 for disposition in parsed_review.dispositions:
                     prior_dispositions[disposition.item_id].append(disposition)
+                blocking_summary = _review_freeform_summary_text(review_output)
+                has_blocking_summary = _should_record_new_blocking_item(
+                    blocking_summary,
+                    had_prior_items=bool(prior_unresolved_items),
+                    had_dispositions=bool(parsed_review.dispositions),
+                )
+                log(
+                    config,
+                    f"Round {round_number}: {reviewer_name} outcome is "
+                    f"{_describe_pr_review_outcome(parsed_review, has_blocking_summary=has_blocking_summary)}",
+                )
                 if review_state == "blocking":
-                    blocking_summary = _review_freeform_summary_text(review_output)
-                    if _should_record_new_blocking_item(
-                        blocking_summary,
-                        had_prior_items=bool(prior_unresolved_items),
-                        had_dispositions=bool(parsed_review.dispositions),
-                    ):
+                    if has_blocking_summary:
                         round_new_unresolved_items.append(
                             _next_unresolved_item(
                                 item_number=next_unresolved_item_number,
@@ -1457,21 +1489,6 @@ def run_pr_loop(
                                 source_round=round_number,
                                 text=blocking_summary,
                                 status="blocking",
-                            )
-                        )
-                        next_unresolved_item_number += 1
-                    continue
-
-                approved_review_outputs.append((reviewer_name, review_output))
-                if config.approved_followups != "ignore":
-                    for followup in parsed_review.followups.future:
-                        round_new_unresolved_items.append(
-                            _next_unresolved_item(
-                                item_number=next_unresolved_item_number,
-                                reviewer=followup.reviewer,
-                                source_round=round_number,
-                                text=followup.text,
-                                status="future",
                             )
                         )
                         next_unresolved_item_number += 1
@@ -1496,7 +1513,7 @@ def run_pr_loop(
                                     source_round=round_number,
                                     text="\n".join(
                                         [
-                                            "Approved review included Same-PR follow-ups, "
+                                            "Blocking review included Same-PR follow-ups, "
                                             f"but --approved-followups={config.approved_followups} "
                                             "does not enable a same-PR fix path.",
                                             "",
@@ -1507,6 +1524,21 @@ def run_pr_loop(
                                 )
                             )
                             next_unresolved_item_number += 1
+                    continue
+
+                approved_review_outputs.append((reviewer_name, review_output))
+                if config.approved_followups != "ignore":
+                    for followup in parsed_review.followups.future:
+                        round_new_unresolved_items.append(
+                            _next_unresolved_item(
+                                item_number=next_unresolved_item_number,
+                                reviewer=followup.reviewer,
+                                source_round=round_number,
+                                text=followup.text,
+                                status="future",
+                            )
+                        )
+                        next_unresolved_item_number += 1
 
             unresolved_items, _future_items = _apply_unresolved_item_dispositions(
                 prior_unresolved_items,
