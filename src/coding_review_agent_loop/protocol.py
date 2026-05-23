@@ -386,6 +386,7 @@ def _disposition_re(*same_statuses: str) -> re.Pattern[str]:
 def _normalize_disposition(status: str, *, same_status: str) -> str:
     normalized = " ".join(status.lower().split())
     normalized = normalized.replace("same pr", "same-pr").replace("same plan", "same-plan")
+    normalized = normalized.replace("follow up", "follow-up")
     if normalized == "resolved":
         return "resolved"
     if normalized.endswith("blocking"):
@@ -397,6 +398,30 @@ def _normalize_disposition(status: str, *, same_status: str) -> str:
     raise AgentLoopError(f"Unsupported unresolved item disposition: {status}")
 
 
+def _active_disposition_has_empty_note(
+    disposition: str,
+    note: str | None,
+    *,
+    same_status: str,
+    is_plan_review: bool,
+) -> bool:
+    if disposition == "resolved" or not note:
+        return False
+
+    same_status_pattern = re.escape(same_status).replace(r"\-", "[- ]")
+    blocking_phrases = [r"no blocking issues?"]
+    if is_plan_review:
+        blocking_phrases.append(r"no blocking plan issues?")
+
+    empty_note_res = {
+        "blocking": _empty_placeholder_re(*blocking_phrases),
+        same_status: _empty_placeholder_re(rf"no {same_status_pattern} follow[- ]?ups?"),
+        "future": _empty_placeholder_re(r"no future follow[- ]?ups?", r"no follow[- ]?ups?"),
+    }
+    empty_note_re = empty_note_res.get(disposition)
+    return bool(empty_note_re and empty_note_re.match(note))
+
+
 def _parse_unresolved_item_dispositions(
     text: str,
     *,
@@ -406,6 +431,7 @@ def _parse_unresolved_item_dispositions(
     disposition_re: re.Pattern[str],
     same_status: str,
     error_message: str,
+    is_plan_review: bool,
 ) -> tuple[ReviewItemDisposition, ...]:
     dispositions: list[ReviewItemDisposition] = []
     active = False
@@ -431,12 +457,21 @@ def _parse_unresolved_item_dispositions(
         if not match:
             raise AgentLoopError(error_message)
         note = match.group("note")
+        normalized_note = note.strip() if note else None
+        disposition = _normalize_disposition(match.group("status"), same_status=same_status)
+        if _active_disposition_has_empty_note(
+            disposition,
+            normalized_note,
+            same_status=same_status,
+            is_plan_review=is_plan_review,
+        ):
+            raise AgentLoopError(error_message)
         dispositions.append(
             ReviewItemDisposition(
                 item_id=match.group("item_id"),
                 reviewer=reviewer,
-                disposition=_normalize_disposition(match.group("status"), same_status=same_status),
-                note=note.strip() if note else None,
+                disposition=disposition,
+                note=normalized_note,
             )
         )
 
@@ -455,8 +490,11 @@ def parse_unresolved_item_dispositions(text: str, *, reviewer: str) -> tuple[Rev
         error_message=(
             "Invalid prior unresolved item disposition. Use bullets like "
             "`- [item-1] resolved`, `- [item-2] still blocking`, "
-            "`- [item-3] same-pr`, or `- [item-4] future follow-up: reason`."
+            "`- [item-3] same-pr`, or `- [item-4] future follow-up: reason`. "
+            "Active unresolved dispositions must describe remaining work; use "
+            "`resolved` when nothing remains."
         ),
+        is_plan_review=False,
     )
 
 
@@ -472,8 +510,11 @@ def parse_plan_item_dispositions(text: str, *, reviewer: str) -> tuple[ReviewIte
         error_message=(
             "Invalid prior unresolved plan item disposition. Use bullets like "
             "`- [item-1] resolved`, `- [item-2] still blocking`, "
-            "`- [item-3] same-plan`, or `- [item-4] future follow-up: reason`."
+            "`- [item-3] same-plan`, or `- [item-4] future follow-up: reason`. "
+            "Active unresolved dispositions must describe remaining work; use "
+            "`resolved` when nothing remains."
         ),
+        is_plan_review=True,
     )
 
 

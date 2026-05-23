@@ -509,6 +509,7 @@ Use one bullet per listed item and cover every item exactly once. Allowed forms:
 - [item-id] future follow-up: brief reason
 
 Only use `future follow-up` when returning `approved`. If a current-plan item still needs to be fixed before implementation starts, keep it as `still blocking` or `same-plan` instead of downgrading it.
+Contradictory forms like `same-plan: none`, `still blocking: none`, and `future follow-up: none` are invalid; use `resolved` if the item is no longer active.
 """
     else:
         unresolved_items_guidance = ""
@@ -772,6 +773,7 @@ Use one bullet per listed item and cover every item exactly once. Allowed forms:
 - [item-id] future follow-up: brief reason
 
 Only use `future follow-up` when returning `approved`. If an item should still be fixed before merge, keep it as `still blocking` or `same-pr` instead of downgrading it.
+Contradictory forms like `same-pr: none`, `still blocking: none`, and `future follow-up: none` are invalid; use `resolved` if the item is no longer active.
 """
     else:
         unresolved_items_guidance = ""
