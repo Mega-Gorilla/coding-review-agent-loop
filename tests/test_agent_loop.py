@@ -4273,12 +4273,20 @@ def test_pr_loop_same_pr_items_remain_blocking_until_explicitly_resolved(tmp_pat
         run_pr_loop(runner, pr_number=77, config=config)
 
 
-def test_pr_loop_rejects_contradictory_same_pr_disposition_before_extra_coder_round(tmp_path):
+@pytest.mark.parametrize(
+    "line",
+    [
+        "[item-1] same-pr: none",
+        "[item-1] still blocking: none",
+        "[item-1] future follow-up: none",
+    ],
+)
+def test_pr_loop_rejects_contradictory_disposition_before_extra_coder_round(tmp_path, line):
     runner = FakeRunner(
         codex_outputs=[
             "Needs regression coverage.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
             "Looks good overall."
-            + prior_item_dispositions("[item-1] same-pr: none")
+            + prior_item_dispositions(line)
             + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
         claude_outputs=["Added coverage.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
@@ -5260,8 +5268,16 @@ def test_issue_loop_plan_first_carries_same_plan_item_across_reviewers_and_round
     assert "Approved plan:" in runner.comments[-1]
 
 
-def test_issue_loop_plan_first_rejects_contradictory_same_plan_disposition_before_extra_revision(
-    tmp_path,
+@pytest.mark.parametrize(
+    "line",
+    [
+        "[item-1] same-plan: none",
+        "[item-1] still blocking: none",
+        "[item-1] future follow-up: none",
+    ],
+)
+def test_issue_loop_plan_first_rejects_contradictory_disposition_before_extra_revision(
+    tmp_path, line
 ):
     runner = FakeRunner(
         claude_outputs=[
@@ -5271,7 +5287,7 @@ def test_issue_loop_plan_first_rejects_contradictory_same_plan_disposition_befor
         codex_outputs=[
             "### Same-plan follow-ups\n- Add the carry-forward orchestration test.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
             "Plan looks sound now."
-            + prior_plan_item_dispositions("[item-1] same-plan: none")
+            + prior_plan_item_dispositions(line)
             + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
         ],
     )
