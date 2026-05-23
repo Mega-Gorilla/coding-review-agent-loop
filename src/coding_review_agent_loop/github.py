@@ -152,8 +152,9 @@ def validate_pr_references_issue(
         return
     raise AgentLoopError(
         f"PR #{pr_number} does not reference issue #{issue_number} in its body. "
-        f"Update the PR description to include `Fixes #{issue_number}` or another direct "
-        "issue reference, then rerun the loop."
+        f"Edit the PR description on GitHub to include `Fixes #{issue_number}` or another direct "
+        f"issue reference, then rerun the orchestrator with `--pr {pr_number}` to continue "
+        "the review."
     )
 
 

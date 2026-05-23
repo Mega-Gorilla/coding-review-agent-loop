@@ -4826,8 +4826,11 @@ def test_issue_loop_rejects_pr_without_issue_reference_in_body(tmp_path):
     )
     config = make_config(tmp_path)
 
-    with pytest.raises(AgentLoopError, match="does not reference issue #56"):
+    with pytest.raises(AgentLoopError, match="does not reference issue #56") as excinfo:
         run_issue_loop(runner, issue_number=56, config=config)
+
+    assert "Edit the PR description on GitHub" in str(excinfo.value)
+    assert "rerun the orchestrator with `--pr 77` to continue the review" in str(excinfo.value)
 
 
 def test_issue_loop_plan_first_implementation_rejects_pr_without_issue_reference_in_body(tmp_path):
@@ -4848,7 +4851,7 @@ def test_issue_loop_plan_first_implementation_rejects_pr_without_issue_reference
     )
     config = make_config(tmp_path, reviewer=("codex",))
 
-    with pytest.raises(AgentLoopError, match="does not reference issue #56"):
+    with pytest.raises(AgentLoopError, match="does not reference issue #56") as excinfo:
         run_issue_loop(
             runner,
             issue_number=56,
@@ -4856,6 +4859,9 @@ def test_issue_loop_plan_first_implementation_rejects_pr_without_issue_reference
             plan_first=True,
             implement_after_approval=True,
         )
+
+    assert "Edit the PR description on GitHub" in str(excinfo.value)
+    assert "rerun the orchestrator with `--pr 77` to continue the review" in str(excinfo.value)
 
 
 def test_is_clarification_request_detects_marker():
