@@ -103,6 +103,7 @@ class UnresolvedReviewItem:
     source_round: int
     text: str
     status: str
+    source_status: str | None = None
     notes: tuple[str, ...] = ()
 
 
@@ -369,15 +370,20 @@ def parse_plan_review_items(text: str, *, reviewer: str) -> PlanReviewItems:
 
 def _disposition_re(*same_statuses: str) -> re.Pattern[str]:
     same_pattern = "|".join(same_statuses)
-    return re.compile(
-        r"^\s*\[?(?P<item_id>[A-Za-z0-9][A-Za-z0-9._-]*)\]?\s*"
-        r"(?:->|:)?\s*"
-        r"(?P<status>"
+    status_pattern = (
         r"resolved|"
         r"(?:still\s+)?blocking|"
         rf"(?:still\s+)?(?:{same_pattern})|"
         r"(?:downgraded\s+to\s+)?future follow[- ]up"
+    )
+    return re.compile(
+        r"^\s*\[?(?P<item_id>[A-Za-z0-9][A-Za-z0-9._-]*)\]?\s*"
+        r"(?:"
+        r"(?:(?P<label>.+?)\s*->\s*)"
+        r"|"
+        r"(?:(?:->|:)?\s*)"
         r")"
+        rf"(?P<status>{status_pattern})"
         r"(?:\s*:\s*(?P<note>.+))?\s*$",
         re.I,
     )
