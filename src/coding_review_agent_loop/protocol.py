@@ -386,6 +386,7 @@ def _disposition_re(*same_statuses: str) -> re.Pattern[str]:
 def _normalize_disposition(status: str, *, same_status: str) -> str:
     normalized = " ".join(status.lower().split())
     normalized = normalized.replace("same pr", "same-pr").replace("same plan", "same-plan")
+    normalized = normalized.replace("follow up", "follow-up")
     if normalized == "resolved":
         return "resolved"
     if normalized.endswith("blocking"):
