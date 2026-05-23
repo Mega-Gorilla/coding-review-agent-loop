@@ -42,8 +42,11 @@ from coding_review_agent_loop.github import (
 )
 from coding_review_agent_loop.migrations import MigrationValidationResult, validate_pr_migration_topology
 from coding_review_agent_loop.orchestrator import (
+    ITEM_SUMMARY_LIMIT,
     HUMAN_REQUIREMENTS_ACK_ITEM_ID,
     _apply_unresolved_item_dispositions,
+    _format_unresolved_item_label,
+    _render_public_review_comment,
     _review_freeform_summary_text,
     _validate_plan_review_response,
 )
@@ -1348,6 +1351,26 @@ def test_parse_plan_item_dispositions_extracts_same_plan_status():
     ]
 
 
+def test_parse_plan_item_dispositions_accepts_enriched_labels_with_trailing_arrow():
+    review = """
+    Approved after the latest revision.
+
+    ### Prior unresolved plan item dispositions
+    - [item-1] Same-plan follow-up from Google Gemini, round 1: keep the exact wording distinct -> same-plan: still need the mixed-reviewer case
+    - [item-2] Blocking issue from OpenAI Codex, round 1: preserve public labels -> resolved
+
+    <!-- AGENT_PLAN_STATE: blocking -->
+    -- Anthropic Claude
+    """
+
+    dispositions = parse_plan_item_dispositions(review, reviewer="Anthropic Claude")
+
+    assert [(item.item_id, item.disposition, item.note) for item in dispositions] == [
+        ("item-1", "same-plan", "still need the mixed-reviewer case"),
+        ("item-2", "resolved", None),
+    ]
+
+
 @pytest.mark.parametrize(
     "line",
     [
@@ -1550,6 +1573,26 @@ def test_parse_unresolved_item_dispositions_extracts_structured_updates():
         ("item-2", "blocking", None),
         ("item-3", "same-pr", None),
         ("item-4", "future", "split this into a separate PR"),
+    ]
+
+
+def test_parse_unresolved_item_dispositions_accepts_enriched_labels_with_trailing_arrow():
+    review = """
+    LGTM.
+
+    ### Prior unresolved item dispositions
+    - [item-1] Same-PR follow-up from Google Gemini, round 1: require source issue reference in PR body -> same-pr: keep the body reference
+    - [item-2] Blocking issue from OpenAI Codex, round 1: rename the helper -> resolved
+
+    <!-- AGENT_STATE: blocking -->
+    -- Anthropic Claude
+    """
+
+    dispositions = parse_unresolved_item_dispositions(review, reviewer="Anthropic Claude")
+
+    assert [(item.item_id, item.disposition, item.note) for item in dispositions] == [
+        ("item-1", "same-pr", "keep the body reference"),
+        ("item-2", "resolved", None),
     ]
 
 
@@ -1834,6 +1877,109 @@ def test_review_freeform_summary_text_strips_structured_followup_sections():
 """
 
     assert _review_freeform_summary_text(review) == "Blocking issue summary."
+
+
+def test_format_unresolved_item_label_normalizes_multiline_text_and_preserves_origin_status():
+    item = UnresolvedReviewItem(
+        item_id="item-7",
+        reviewer="Google Gemini",
+        source_round=1,
+        text="  - require source issue reference in PR body  \n\nUpdate from Anthropic Claude: keep the wording compact",
+        status="resolved",
+        source_status="same-pr",
+    )
+
+    assert _format_unresolved_item_label(item) == (
+        "Same-PR follow-up from Google Gemini, round 1: require source issue reference in PR body"
+    )
+
+
+def test_format_unresolved_item_label_truncates_at_fixed_limit():
+    summary = "a" * (ITEM_SUMMARY_LIMIT + 20)
+    item = UnresolvedReviewItem(
+        item_id="item-8",
+        reviewer="OpenAI Codex",
+        source_round=2,
+        text=summary,
+        status="blocking",
+    )
+
+    label = _format_unresolved_item_label(item)
+
+    assert label.startswith("Blocking issue from OpenAI Codex, round 2: ")
+    assert label.endswith("...")
+    rendered_summary = label.split(": ", 1)[1]
+    assert len(rendered_summary) == ITEM_SUMMARY_LIMIT
+
+
+def test_format_unresolved_item_label_special_cases_human_requirements_ack_item():
+    item = UnresolvedReviewItem(
+        item_id=HUMAN_REQUIREMENTS_ACK_ITEM_ID,
+        reviewer="Orchestrator",
+        source_round=3,
+        text="Coder response missing required `### Human requirements` section.",
+        status="blocking",
+    )
+
+    assert _format_unresolved_item_label(item) == (
+        "Human-requirements acknowledgement item, round 3: "
+        "Coder response missing required `### Human requirements` section."
+    )
+
+
+def test_render_public_review_comment_replaces_dispositions_and_appends_new_items():
+    body = """Still blocked.
+
+### Same-PR follow-ups
+- Keep the source issue reference in the PR body.
+
+### Prior unresolved item dispositions
+- [item-1] same-pr
+
+<!-- AGENT_STATE: blocking -->
+-- OpenAI Codex
+"""
+    prior_items = (
+        UnresolvedReviewItem(
+            item_id="item-1",
+            reviewer="Google Gemini",
+            source_round=1,
+            text="Require source issue reference in PR body.\n\nUpdate from Anthropic Claude: keep the note compact",
+            status="same-pr",
+        ),
+    )
+    dispositions = parse_unresolved_item_dispositions(
+        prior_item_dispositions("[item-1] Same-PR follow-up from Google Gemini, round 1: ignored by parser -> same-pr: keep the body reference"),
+        reviewer="OpenAI Codex",
+    )
+    new_items = (
+        UnresolvedReviewItem(
+            item_id="item-2",
+            reviewer="OpenAI Codex",
+            source_round=2,
+            text="Keep the source issue reference in the PR body.",
+            status="same-pr",
+        ),
+    )
+
+    rendered = _render_public_review_comment(
+        body,
+        review_kind="pr",
+        prior_items=prior_items,
+        dispositions=dispositions,
+        new_items=new_items,
+    )
+
+    assert "### Same-PR follow-ups\n- Keep the source issue reference in the PR body." in rendered
+    assert (
+        "### Prior unresolved item dispositions\n"
+        "- [item-1] Same-PR follow-up from Google Gemini, round 1: Require source issue reference in PR body. -> same-pr: keep the body reference"
+    ) in rendered
+    assert (
+        "### New tracked unresolved items\n"
+        "- [item-2] Same-PR follow-up from OpenAI Codex, round 2: Keep the source issue reference in the PR body."
+    ) in rendered
+    assert rendered.rstrip().endswith("-- OpenAI Codex")
 
 
 def test_apply_unresolved_item_dispositions_appends_disposition_notes_to_text():
@@ -3185,7 +3331,9 @@ def test_pr_loop_skips_duplicate_approved_followup_issue_creation_when_marker_ex
 
     assert runner.issues == []
     assert runner.comments == [
-        "Codex approves.\n\n### Future follow-ups\n- Add cleanup docs.\n"
+        "Codex approves.\n\n### Future follow-ups\n- Add cleanup docs.\n\n"
+        "### New tracked unresolved items\n"
+        "- [item-1] Future follow-up from OpenAI Codex, round 1: Add cleanup docs.\n\n"
         "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
     ]
 
@@ -4331,6 +4479,41 @@ def test_pr_loop_carries_prior_item_notes_without_creating_duplicate_blocker_ite
     assert "[item-2]" not in second_coder_prompt
 
 
+def test_pr_loop_posts_human_readable_item_labels_in_new_and_prior_sections(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Implemented the requested PR body change.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "### Same-PR follow-ups\n"
+            "- Require source issue reference in PR body.\n"
+            "<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "Looks good."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex", approved_followups="fix-and-summarize", max_rounds=2)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert runner.comments[0] == (
+        "### Same-PR follow-ups\n"
+        "- Require source issue reference in PR body.\n\n"
+        "### New tracked unresolved items\n"
+        "- [item-1] Same-PR follow-up from OpenAI Codex, round 1: Require source issue reference in PR body.\n\n"
+        "<!-- AGENT_STATE: blocking -->\n"
+        "-- OpenAI Codex"
+    )
+    assert runner.comments[2] == (
+        "Looks good.\n\n"
+        "### Prior unresolved item dispositions\n"
+        "- [item-1] Same-PR follow-up from OpenAI Codex, round 1: Require source issue reference in PR body. -> resolved\n"
+        "<!-- AGENT_STATE: approved -->\n"
+        "-- OpenAI Codex"
+    )
+
+
 def test_pr_loop_same_pr_items_remain_blocking_until_explicitly_resolved(tmp_path):
     runner = FakeRunner(
         codex_outputs=[
@@ -5342,6 +5525,51 @@ def test_issue_loop_plan_first_carries_same_plan_item_across_reviewers_and_round
     claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
     assert any("item-1" in call[-1] for call in claude_calls[1:])
     assert "Approved plan:" in runner.comments[-1]
+
+
+def test_issue_loop_plan_first_posts_human_readable_item_labels_in_new_and_prior_sections(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Initial plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Revised plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "### Blocking plan issues\n"
+            "- Keep plan-review wording distinct from PR wording.\n"
+            "### Same-plan follow-ups\n"
+            "- Add one carry-forward plan test.\n"
+            "<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
+            "Plan looks sound."
+            + prior_plan_item_dispositions(
+                "[item-1] resolved",
+                "[item-2] resolved",
+            )
+            + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, reviewer="codex", max_rounds=2)
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    assert runner.comments[1] == (
+        "### Blocking plan issues\n"
+        "- Keep plan-review wording distinct from PR wording.\n"
+        "### Same-plan follow-ups\n"
+        "- Add one carry-forward plan test.\n\n"
+        "### New tracked unresolved items\n"
+        "- [item-1] Blocking issue from OpenAI Codex, round 1: Keep plan-review wording distinct from PR wording.\n"
+        "- [item-2] Same-plan follow-up from OpenAI Codex, round 1: Add one carry-forward plan test.\n\n"
+        "<!-- AGENT_PLAN_STATE: blocking -->\n"
+        "-- OpenAI Codex"
+    )
+    assert runner.comments[3] == (
+        "Plan looks sound.\n\n"
+        "### Prior unresolved plan item dispositions\n"
+        "- [item-1] Blocking issue from OpenAI Codex, round 1: Keep plan-review wording distinct from PR wording. -> resolved\n"
+        "- [item-2] Same-plan follow-up from OpenAI Codex, round 1: Add one carry-forward plan test. -> resolved\n"
+        "<!-- AGENT_PLAN_STATE: approved -->\n"
+        "-- OpenAI Codex"
+    )
 
 
 @pytest.mark.parametrize(
