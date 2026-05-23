@@ -8,6 +8,9 @@ from dataclasses import dataclass
 
 from .errors import AgentLoopError
 
+HUMAN_REQUIREMENTS_ADDRESSED_MARKER = "<!-- HUMAN_REQUIREMENTS_ADDRESSED -->"
+HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK = "checked the PR discussion directly before responding"
+
 STATE_RE = re.compile(r"<!--\s*AGENT_STATE:\s*(approved|blocking)\s*-->", re.I)
 PLAN_STATE_RE = re.compile(r"<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*-->", re.I)
 PR_RE = re.compile(r"<!--\s*AGENT_PR:\s*(\d+)\s*-->", re.I)
@@ -16,6 +19,14 @@ CLARIFY_RE = re.compile(r"<!--\s*AGENT_CLARIFY\s*-->", re.I)
 HUMAN_REVIEWER_SIGNATURE_RE = re.compile(r"^\s*--\s*Human Reviewer\s*$", re.I | re.M)
 HUMAN_REQUIREMENTS_RESOLVED_RE = re.compile(
     r"<!--\s*HUMAN_REQUIREMENTS_RESOLVED\s*-->",
+    re.I,
+)
+HUMAN_REQUIREMENTS_ADDRESSED_RE = re.compile(
+    re.escape(HUMAN_REQUIREMENTS_ADDRESSED_MARKER),
+    re.I,
+)
+HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK_RE = re.compile(
+    re.escape(HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK),
     re.I,
 )
 
@@ -38,6 +49,7 @@ PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE = _followup_heading_re(
 )
 BLOCKING_PLAN_ISSUES_HEADING_RE = _followup_heading_re(r"blocking plan issues")
 SAME_PLAN_FOLLOWUP_HEADING_RE = _followup_heading_re(r"same[- ]plan follow[- ]ups")
+HUMAN_REQUIREMENTS_HEADING_RE = _followup_heading_re(r"human requirements")
 PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE = _followup_heading_re(
     r"prior unresolved plan item dispositions"
 )
@@ -115,6 +127,14 @@ class ParsedPlanReview:
     dispositions: tuple[ReviewItemDisposition, ...]
 
 
+@dataclass(frozen=True)
+class ParsedHumanRequirementsAcknowledgement:
+    marker_present: bool
+    section_present: bool
+    addressed_ids: tuple[str, ...]
+    section_text: str
+
+
 def parse_agent_state(text: str) -> str:
     matches = STATE_RE.findall(text)
     if not matches:
@@ -159,6 +179,95 @@ def parse_signed_human_requirement_body(text: str | None) -> str | None:
 
 def human_requirements_resolved(text: str) -> bool:
     return bool(HUMAN_REQUIREMENTS_RESOLVED_RE.search(text))
+
+
+def _normalize_requirement_label(text: str) -> str:
+    match = re.fullmatch(r"\s*Requirement\s+(\d+)\s*", text, re.I)
+    if not match:
+        raise AgentLoopError(f"Invalid human requirement label: {text}")
+    return f"Requirement {match.group(1)}"
+
+
+def parse_human_requirements_acknowledgement(text: str) -> ParsedHumanRequirementsAcknowledgement:
+    marker_present = bool(HUMAN_REQUIREMENTS_ADDRESSED_RE.search(text))
+    section_present = False
+    section_lines: list[str] = []
+    addressed_ids: list[str] = []
+    active = False
+
+    for line in text.splitlines():
+        if HUMAN_REQUIREMENTS_HEADING_RE.match(line):
+            section_present = True
+            active = True
+            continue
+        if not active:
+            continue
+        if ANY_HEADING_RE.match(line) or HTML_COMMENT_RE.match(line) or SIGNATURE_RE.match(line):
+            active = False
+            continue
+        section_lines.append(line)
+        bullet = BULLET_RE.match(line)
+        if not bullet:
+            continue
+        for match in re.finditer(r"\bRequirement\s+\d+\b", bullet.group("text"), re.I):
+            addressed_ids.append(_normalize_requirement_label(match.group(0)))
+
+    return ParsedHumanRequirementsAcknowledgement(
+        marker_present=marker_present,
+        section_present=section_present,
+        addressed_ids=tuple(addressed_ids),
+        section_text="\n".join(section_lines).strip(),
+    )
+
+
+def validate_human_requirements_acknowledgement(
+    text: str,
+    *,
+    surfaced_requirement_ids: Sequence[str],
+    requires_direct_discussion_ack: bool,
+) -> None:
+    if not surfaced_requirement_ids and not requires_direct_discussion_ack:
+        return
+
+    parsed = parse_human_requirements_acknowledgement(text)
+    if not parsed.marker_present:
+        raise AgentLoopError(
+            "Coder response missing required signed human requirements marker "
+            f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}."
+        )
+    if not parsed.section_present:
+        raise AgentLoopError("Coder response missing required `### Human requirements` section.")
+
+    addressed_ids = list(parsed.addressed_ids)
+    duplicates = sorted({item_id for item_id in addressed_ids if addressed_ids.count(item_id) > 1})
+    if duplicates:
+        raise AgentLoopError(
+            "Coder response listed signed human requirement IDs more than once: "
+            + ", ".join(duplicates)
+        )
+
+    expected_ids = tuple(_normalize_requirement_label(item_id) for item_id in surfaced_requirement_ids)
+    unknown = sorted(set(addressed_ids) - set(expected_ids))
+    if unknown:
+        raise AgentLoopError(
+            "Coder response referenced unknown signed human requirement IDs: "
+            + ", ".join(unknown)
+        )
+
+    if expected_ids:
+        missing = sorted(set(expected_ids) - set(addressed_ids))
+        if missing:
+            raise AgentLoopError(
+                "Coder response did not address all surfaced signed human requirement IDs: "
+                + ", ".join(missing)
+            )
+        return
+
+    if not HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK_RE.search(parsed.section_text):
+        raise AgentLoopError(
+            "Coder response must acknowledge that the prompt omitted the detailed signed human requirements "
+            f"and that it {HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK}."
+        )
 
 
 def _collect_section_items(

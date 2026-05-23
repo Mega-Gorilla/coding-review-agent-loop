@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+from dataclasses import dataclass
 from textwrap import indent
 from typing import Sequence
 
@@ -10,7 +12,18 @@ from .agents.registry import agent_display_name, agent_signature
 from .config import AgentLoopConfig, reviewers
 from .github import HumanReviewRequirement, IssueContext, PullRequestChecks, PullRequestMetadata
 from .memory import AgentMemoryContext, format_agent_memory_context
-from .protocol import UnresolvedReviewItem
+from .protocol import (
+    HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
+    HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK,
+    UnresolvedReviewItem,
+)
+
+
+@dataclass(frozen=True)
+class CoderHumanRequirementsPromptContext:
+    block: str
+    surfaced_requirement_ids: tuple[str, ...]
+    requires_direct_discussion_ack: bool
 
 
 def format_agent_list(agents: Sequence[AgentName]) -> str:
@@ -233,6 +246,66 @@ def _human_requirements_block(
     if not human_requirements:
         return ""
     return f"{format_human_requirements(human_requirements)}\n"
+
+
+def render_coder_human_requirements_prompt_context(
+    human_requirements: Sequence[HumanReviewRequirement] | None,
+    *,
+    max_chars: int = 12_000,
+) -> CoderHumanRequirementsPromptContext:
+    if not human_requirements:
+        block = ""
+    else:
+        block = f"{format_human_requirements(human_requirements, max_chars=max_chars)}\n"
+    if not block:
+        return CoderHumanRequirementsPromptContext(
+            block="",
+            surfaced_requirement_ids=(),
+            requires_direct_discussion_ack=False,
+        )
+    surfaced_requirement_ids = tuple(
+        f"Requirement {match.group(1)}"
+        for match in re.finditer(r"(?m)^Requirement (\d+):$", block)
+    )
+    requires_direct_discussion_ack = (
+        not surfaced_requirement_ids
+        and "signed human requirement(s) were omitted to keep this prompt bounded" in block
+    )
+    return CoderHumanRequirementsPromptContext(
+        block=block,
+        surfaced_requirement_ids=surfaced_requirement_ids,
+        requires_direct_discussion_ack=requires_direct_discussion_ack,
+    )
+
+
+def _coder_human_requirements_guidance(
+    context: CoderHumanRequirementsPromptContext,
+) -> str:
+    if not context.block:
+        return ""
+    lines = [
+        "The signed human reviewer requirements above are mandatory next-revision requirements, not passive context.",
+        "Later signed human comments supersede earlier ones; the latest human instruction wins.",
+        "If any signed human requirement cannot be satisfied safely or is impossible, say that explicitly instead of skipping it.",
+        "",
+        "When signed human reviewer requirements are present, your response must include exactly:",
+        HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
+        "",
+        "Then add a `### Human requirements` section.",
+    ]
+    if context.surfaced_requirement_ids:
+        surfaced = ", ".join(f"`{item}`" for item in context.surfaced_requirement_ids)
+        lines.append(
+            "Include one bullet for each surfaced signed human requirement ID shown in this prompt: "
+            f"{surfaced}. Each bullet must explain how you addressed that item or why it could not be satisfied safely."
+        )
+    elif context.requires_direct_discussion_ack:
+        lines.append(
+            "The detailed requirement entries were omitted from this prompt to stay bounded. "
+            "In the `### Human requirements` section, state that the prompt omitted the detailed items and that you "
+            f"`{HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK}` before responding."
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _human_requirements_review_guidance(
@@ -799,9 +872,13 @@ def build_followup_prompt(
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
     human_requirements: Sequence[HumanReviewRequirement] | None = None,
+    *,
+    human_requirements_context: CoderHumanRequirementsPromptContext | None = None,
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
+    if human_requirements_context is None:
+        human_requirements_context = render_coder_human_requirements_prompt_context(human_requirements)
     return f"""{reviewer_name} reviewed pull request #{pr_number} in {config.repo} and found blocking issues.
 
 Address the review below in this local checkout. Pull/sync the PR branch if
@@ -810,7 +887,7 @@ Do not create a new PR.
 {_scratch_file_guidance()}
 {_coder_test_reporting_guidance()}
 {_issue_context_block(issue_context)}
-{_human_requirements_block(human_requirements)}
+{human_requirements_context.block}{_coder_human_requirements_guidance(human_requirements_context)}
 {_memory_block(memory)}
 
 {reviewer_name} review:
@@ -836,9 +913,13 @@ def build_same_pr_followup_prompt(
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
     human_requirements: Sequence[HumanReviewRequirement] | None = None,
+    *,
+    human_requirements_context: CoderHumanRequirementsPromptContext | None = None,
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
+    if human_requirements_context is None:
+        human_requirements_context = render_coder_human_requirements_prompt_context(human_requirements)
     return f"""{reviewer_name} approved pull request #{pr_number} in {config.repo} with same-PR follow-ups.
 
 Address the follow-up items below in this local checkout. Pull/sync the PR
@@ -850,7 +931,7 @@ larger redesigns or unrelated future work; call that out instead.
 {_scratch_file_guidance()}
 {_coder_test_reporting_guidance()}
 {_issue_context_block(issue_context)}
-{_human_requirements_block(human_requirements)}
+{human_requirements_context.block}{_coder_human_requirements_guidance(human_requirements_context)}
 {_memory_block(memory)}
 
 Same-PR follow-ups:

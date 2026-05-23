@@ -47,9 +47,11 @@ from .prompts import (
     build_task_clarification_prompt,
     build_task_prompt,
     format_agent_list,
+    render_coder_human_requirements_prompt_context,
 )
 from .protocol import (
     FUTURE_FOLLOWUP_HEADING_RE,
+    HUMAN_REQUIREMENTS_HEADING_RE,
     LEGACY_FOLLOWUP_HEADING_RE,
     ParsedPlanReview,
     PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE,
@@ -64,6 +66,7 @@ from .protocol import (
     parse_plan_review,
     parse_plan_state,
     parse_pr_number,
+    validate_human_requirements_acknowledgement,
 )
 from .protocol import ApprovedFollowup, parse_review
 from .runner import Runner
@@ -71,6 +74,7 @@ from .usage import RunUsageContext, UsageMetadata, estimate_usage
 from .workdirs import active_workdir
 
 MAX_APPROVED_FOLLOWUP_ISSUES = 3
+HUMAN_REQUIREMENTS_ACK_ITEM_ID = "item-human-requirements-acknowledgement"
 APPROVED_FOLLOWUP_MARKER_RE = re.compile(
     r"<!--\s*AGENT_APPROVED_FOLLOWUPS:\s*pr=(?P<pr>\d+)\s+head=(?P<head>\S+)\s+mode=(?P<mode>[a-z-]+)\s*-->",
     re.I,
@@ -353,6 +357,59 @@ def _validate_review_response(
     return parsed
 
 
+def _upsert_human_requirements_ack_item(
+    unresolved_items: Sequence[UnresolvedReviewItem],
+    *,
+    source_round: int,
+    text: str,
+) -> list[UnresolvedReviewItem]:
+    retained = [
+        item for item in unresolved_items if item.item_id != HUMAN_REQUIREMENTS_ACK_ITEM_ID
+    ]
+    retained.append(
+        UnresolvedReviewItem(
+            item_id=HUMAN_REQUIREMENTS_ACK_ITEM_ID,
+            reviewer="Orchestrator",
+            source_round=source_round,
+            text=text,
+            status="blocking",
+        )
+    )
+    return retained
+
+
+def _clear_human_requirements_ack_item(
+    unresolved_items: Sequence[UnresolvedReviewItem],
+) -> list[UnresolvedReviewItem]:
+    return [item for item in unresolved_items if item.item_id != HUMAN_REQUIREMENTS_ACK_ITEM_ID]
+
+
+def _reconcile_human_requirements_ack_item(
+    unresolved_items: Sequence[UnresolvedReviewItem],
+    *,
+    coder_output: str | None,
+    human_requirements,
+    source_round: int,
+) -> list[UnresolvedReviewItem]:
+    if coder_output is None:
+        return list(unresolved_items)
+
+    prompt_context = render_coder_human_requirements_prompt_context(human_requirements)
+    try:
+        validate_human_requirements_acknowledgement(
+            coder_output,
+            surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
+            requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
+        )
+    except AgentLoopError as exc:
+        return _upsert_human_requirements_ack_item(
+            unresolved_items,
+            source_round=source_round,
+            text=str(exc),
+        )
+    return _clear_human_requirements_ack_item(unresolved_items)
+
+
 def _apply_unresolved_item_dispositions(
     unresolved_items: Sequence[UnresolvedReviewItem],
     dispositions_by_item: dict[str, list[ReviewItemDisposition]],
@@ -471,6 +528,7 @@ def _review_freeform_summary_text(text: str) -> str:
         SAME_PR_FOLLOWUP_HEADING_RE,
         FUTURE_FOLLOWUP_HEADING_RE,
         LEGACY_FOLLOWUP_HEADING_RE,
+        HUMAN_REQUIREMENTS_HEADING_RE,
         PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE,
         PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE,
     )
@@ -1305,6 +1363,7 @@ def run_pr_loop(
         reviewer_session_ids: dict[AgentName, str | None] = {}
         configured_reviewers = reviewers(config)
         unresolved_items: list[UnresolvedReviewItem] = []
+        latest_coder_output: str | None = None
         next_unresolved_item_number = 1
         if reviewer_session_id is not None and configured_reviewers:
             # Backward-compatible single-reviewer resume support: older callers
@@ -1312,12 +1371,6 @@ def run_pr_loop(
             reviewer_session_ids[configured_reviewers[0]] = reviewer_session_id
         for round_number in range(1, config.max_rounds + 1):
             coder_name = agent_display_name(config.coder)
-            prior_unresolved_items = tuple(unresolved_items)
-            prior_dispositions: dict[str, list[ReviewItemDisposition]] = {
-                item.item_id: [] for item in prior_unresolved_items
-            }
-            round_new_unresolved_items: list[UnresolvedReviewItem] = []
-            approved_review_outputs: list[tuple[str, str]] = []
             if pre_review_test_pending:
                 run_pre_review_tests(runner, config)
                 pre_review_test_pending = False
@@ -1325,6 +1378,18 @@ def run_pr_loop(
             pr_metadata = pr_context.metadata
             pr_comments = pr_context.comments
             human_requirements = pr_context.human_requirements
+            unresolved_items = _reconcile_human_requirements_ack_item(
+                unresolved_items,
+                coder_output=latest_coder_output,
+                human_requirements=human_requirements,
+                source_round=round_number,
+            )
+            prior_unresolved_items = tuple(unresolved_items)
+            prior_dispositions: dict[str, list[ReviewItemDisposition]] = {
+                item.item_id: [] for item in prior_unresolved_items
+            }
+            round_new_unresolved_items: list[UnresolvedReviewItem] = []
+            approved_review_outputs: list[tuple[str, str]] = []
             pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
             for reviewer in configured_reviewers:
                 reviewer_name = agent_display_name(reviewer)
@@ -1542,6 +1607,9 @@ def run_pr_loop(
             blocking_items = [item for item in unresolved_items if item.status == "blocking"]
             if same_pr_items and not blocking_items:
                 combined_review = _format_same_pr_unresolved_items(same_pr_items)
+                coder_human_requirements_context = render_coder_human_requirements_prompt_context(
+                    human_requirements
+                )
                 followup_prompt = build_same_pr_followup_prompt(
                     pr_number,
                     round_number,
@@ -1550,9 +1618,13 @@ def run_pr_loop(
                     memory,
                     issue_context=issue_context,
                     human_requirements=human_requirements,
+                    human_requirements_context=coder_human_requirements_context,
                 )
             else:
                 combined_review = _format_unresolved_items_for_coder(unresolved_items)
+                coder_human_requirements_context = render_coder_human_requirements_prompt_context(
+                    human_requirements
+                )
                 followup_prompt = build_followup_prompt(
                     pr_number,
                     round_number,
@@ -1561,6 +1633,7 @@ def run_pr_loop(
                     memory,
                     issue_context=issue_context,
                     human_requirements=human_requirements,
+                    human_requirements_context=coder_human_requirements_context,
                 )
             log(config, f"Round {round_number}: {coder_name} addressing reviewer feedback")
             coder_response = _run_validated_agent(
@@ -1575,6 +1648,14 @@ def run_pr_loop(
             )
             coder_output = coder_response.text
             coder_session_id = coder_response.session_id
+            latest_coder_output = coder_output
+
+            unresolved_items = _reconcile_human_requirements_ack_item(
+                unresolved_items,
+                coder_output=coder_output,
+                human_requirements=human_requirements,
+                source_round=round_number,
+            )
 
             post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
             log(config, f"Round {round_number}: {coder_name} pushed updates for re-review")

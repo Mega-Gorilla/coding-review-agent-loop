@@ -36,24 +36,32 @@ from coding_review_agent_loop.github import (
     HumanReviewRequirement,
     IssueComment,
     IssueContext,
+    PullRequestReviewContext,
     PullRequestMetadata,
     get_pr_checks,
 )
 from coding_review_agent_loop.migrations import MigrationValidationResult, validate_pr_migration_topology
 from coding_review_agent_loop.orchestrator import (
+    HUMAN_REQUIREMENTS_ACK_ITEM_ID,
     _apply_unresolved_item_dispositions,
     _review_freeform_summary_text,
     _validate_plan_review_response,
 )
 from coding_review_agent_loop.prompts import (
+    HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
+    HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK,
+    build_followup_prompt,
+    build_same_pr_followup_prompt,
     build_plan_review_prompt,
     build_plan_revision_prompt,
     build_review_prompt,
     format_human_requirements,
     format_issue_context,
+    render_coder_human_requirements_prompt_context,
 )
 from coding_review_agent_loop.protocol import (
     parse_approved_followups,
+    parse_human_requirements_acknowledgement,
     parse_plan_item_dispositions,
     parse_plan_review,
     parse_plan_review_items,
@@ -63,6 +71,7 @@ from coding_review_agent_loop.protocol import (
     parse_signed_human_requirement_body,
     parse_unresolved_item_dispositions,
     UnresolvedReviewItem,
+    validate_human_requirements_acknowledgement,
 )
 
 
@@ -1641,6 +1650,9 @@ def test_review_freeform_summary_text_strips_structured_followup_sections():
 ### Prior unresolved item dispositions
 - [item-1] still blocking: needs one more assertion
 
+### Human requirements
+- Requirement 1: addressed in the latest patch
+
 ### Same-PR follow-ups
 - Rename helper
 
@@ -1902,6 +1914,209 @@ def test_format_human_requirements_preserves_entry_spacing_when_truncated():
     assert "Oldest requirement." not in text
     assert "Middle requirement.\n\nRequirement 3:" in text
     assert "Newest requirement." in text
+
+
+def test_render_coder_human_requirements_prompt_context_tracks_surfaced_ids_after_truncation():
+    requirements = (
+        HumanReviewRequirement(
+            source_type="PR comment",
+            author="reviewer",
+            created_at="2026-05-18T10:00:00Z",
+            url="https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+            body="Oldest requirement.",
+        ),
+        HumanReviewRequirement(
+            source_type="PR comment",
+            author="reviewer",
+            created_at="2026-05-18T11:00:00Z",
+            url="https://github.com/OWNER/REPO/pull/77#issuecomment-2",
+            body="Middle requirement.",
+        ),
+        HumanReviewRequirement(
+            source_type="PR comment",
+            author="reviewer",
+            created_at="2026-05-18T12:00:00Z",
+            url="https://github.com/OWNER/REPO/pull/77#issuecomment-3",
+            body="Newest requirement.",
+        ),
+    )
+    full_text = format_human_requirements(requirements)
+
+    context = render_coder_human_requirements_prompt_context(
+        requirements,
+        max_chars=len(full_text) - 1,
+    )
+
+    assert context.block.endswith("\n")
+    assert "Older signed human requirement(s) omitted: 1." in context.block
+    assert context.surfaced_requirement_ids == ("Requirement 2", "Requirement 3")
+    assert context.requires_direct_discussion_ack is False
+
+
+def test_render_coder_human_requirements_prompt_context_handles_full_omission_fallback():
+    context = render_coder_human_requirements_prompt_context(
+        (
+            HumanReviewRequirement(
+                source_type="PR comment",
+                author="reviewer",
+                created_at="2026-05-18T10:00:00Z",
+                url="https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                body="Please use the absolute URL.",
+            ),
+        ),
+        max_chars=120,
+    )
+
+    assert "All 1 signed human requirement(s) were omitted" in context.block
+    assert context.surfaced_requirement_ids == ()
+    assert context.requires_direct_discussion_ack is True
+
+
+@pytest.mark.parametrize("builder", [build_followup_prompt, build_same_pr_followup_prompt])
+def test_coder_followup_prompts_require_human_requirements_acknowledgement_only_when_present(
+    tmp_path, builder
+):
+    config = make_config(tmp_path)
+    with_requirements = builder(
+        77,
+        2,
+        "Fix the bug.",
+        config,
+        human_requirements=(
+            HumanReviewRequirement(
+                source_type="PR comment",
+                author="reviewer",
+                created_at="2026-05-18T10:00:00Z",
+                url="https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                body="Please use the absolute URL.",
+            ),
+        ),
+    )
+    without_requirements = builder(77, 2, "Fix the bug.", config)
+
+    assert "mandatory next-revision requirements" in with_requirements
+    assert HUMAN_REQUIREMENTS_ADDRESSED_MARKER in with_requirements
+    assert "### Human requirements" in with_requirements
+    assert "`Requirement 1`" in with_requirements
+    assert HUMAN_REQUIREMENTS_ADDRESSED_MARKER not in without_requirements
+    assert "### Human requirements" not in without_requirements
+
+
+@pytest.mark.parametrize("builder", [build_followup_prompt, build_same_pr_followup_prompt])
+def test_coder_followup_prompts_accept_precomputed_human_requirements_context(tmp_path, builder):
+    config = make_config(tmp_path)
+    requirements = (
+        HumanReviewRequirement(
+            source_type="PR comment",
+            author="reviewer",
+            created_at="2026-05-18T10:00:00Z",
+            url="https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+            body="Please use the absolute URL.",
+        ),
+    )
+    context = render_coder_human_requirements_prompt_context(requirements)
+
+    prompt = builder(
+        77,
+        2,
+        "Fix the bug.",
+        config,
+        human_requirements=requirements,
+        human_requirements_context=context,
+    )
+
+    assert context.block in prompt
+    assert HUMAN_REQUIREMENTS_ADDRESSED_MARKER in prompt
+    assert "`Requirement 1`" in prompt
+
+
+def test_validate_human_requirements_acknowledgement_accepts_multiple_bullet_styles():
+    response = f"""Implemented the fix.
+{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}
+### Human requirements
+1. Requirement 1: updated the URL handling.
+* Requirement 2: could not satisfy safely without widening scope, so I documented the limit.
+<!-- AGENT_STATE: blocking -->
+"""
+
+    validate_human_requirements_acknowledgement(
+        response,
+        surfaced_requirement_ids=("Requirement 1", "Requirement 2"),
+        requires_direct_discussion_ack=False,
+    )
+
+    parsed = parse_human_requirements_acknowledgement(response)
+    assert parsed.addressed_ids == ("Requirement 1", "Requirement 2")
+
+
+@pytest.mark.parametrize(
+    ("response", "surfaced_ids", "requires_direct_discussion_ack", "message"),
+    [
+        (
+            "Implemented.\n### Human requirements\n- Requirement 1: handled.\n<!-- AGENT_STATE: blocking -->",
+            ("Requirement 1",),
+            False,
+            "missing required signed human requirements marker",
+        ),
+        (
+            f"Implemented.\n{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n<!-- AGENT_STATE: blocking -->",
+            ("Requirement 1",),
+            False,
+            "missing required `### Human requirements` section",
+        ),
+        (
+            f"Implemented.\n{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n### Human requirements\n- Requirement 1: handled.\n<!-- AGENT_STATE: blocking -->",
+            ("Requirement 1", "Requirement 2"),
+            False,
+            "did not address all surfaced signed human requirement IDs",
+        ),
+        (
+            f"Implemented.\n{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n### Human requirements\n- Requirement 1: handled.\n- Requirement 1: repeated.\n<!-- AGENT_STATE: blocking -->",
+            ("Requirement 1",),
+            False,
+            "listed signed human requirement IDs more than once",
+        ),
+        (
+            f"Implemented.\n{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n### Human requirements\n- Requirement 99: handled.\n<!-- AGENT_STATE: blocking -->",
+            ("Requirement 1",),
+            False,
+            "referenced unknown signed human requirement IDs",
+        ),
+        (
+            f"Implemented.\n{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n### Human requirements\n- Prompt omitted details.\n<!-- AGENT_STATE: blocking -->",
+            (),
+            True,
+            "must acknowledge that the prompt omitted the detailed signed human requirements",
+        ),
+    ],
+)
+def test_validate_human_requirements_acknowledgement_rejects_structural_failures(
+    response,
+    surfaced_ids,
+    requires_direct_discussion_ack,
+    message,
+):
+    with pytest.raises(AgentLoopError, match=message):
+        validate_human_requirements_acknowledgement(
+            response,
+            surfaced_requirement_ids=surfaced_ids,
+            requires_direct_discussion_ack=requires_direct_discussion_ack,
+        )
+
+
+def test_validate_human_requirements_acknowledgement_accepts_full_truncation_fallback():
+    response = f"""Implemented the fix.
+{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}
+### Human requirements
+- The prompt omitted the detailed signed human requirements, so I {HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK}.
+<!-- AGENT_STATE: blocking -->
+"""
+
+    validate_human_requirements_acknowledgement(
+        response,
+        surfaced_requirement_ids=(),
+        requires_direct_discussion_ack=True,
+    )
 
 
 def test_issue_loop_can_use_codex_as_coder_and_claude_as_reviewer(tmp_path):
@@ -2342,6 +2557,182 @@ def test_pr_loop_allows_approval_with_human_requirement_resolution_marker(tmp_pa
     assert ["pytest", "tests/test_agent_loop.py"] in commands
 
 
+def test_pr_loop_surfaces_coder_human_requirements_acknowledgement_blocker_next_round(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Implemented fix without the extra acknowledgement.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Blocking issue."
+            "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "Still blocked."
+            + prior_item_dispositions(
+                "[item-1] resolved",
+                f"[{HUMAN_REQUIREMENTS_ACK_ITEM_ID}] still blocking",
+            )
+            + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+        ],
+        pr_payload={
+            "number": 77,
+            "state": "OPEN",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "title": "Improve review prompt context",
+            "headRefName": "feature/review-context",
+            "baseRefName": "main",
+            "headRefOid": "abc123",
+            "comments": [
+                {
+                    "author": {"login": "maintainer"},
+                    "createdAt": "2026-05-18T10:00:00Z",
+                    "url": "https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                    "body": "Please use the absolute URL.\n\n-- Human Reviewer",
+                }
+            ],
+            "reviews": [],
+        },
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex", max_rounds=2)
+
+    with pytest.raises(
+        AgentLoopError,
+        match="One or more reviewers still reported blocking issues after round 2",
+    ):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    review_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]
+    assert len(review_prompts) == 2
+    assert HUMAN_REQUIREMENTS_ACK_ITEM_ID in review_prompts[1]
+    assert "Coder response missing required signed human requirements marker" in review_prompts[1]
+    assert "Orchestrator" in review_prompts[1]
+
+
+def test_pr_loop_clears_human_requirements_acknowledgement_blocker_before_next_review(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Implemented fix without the extra acknowledgement.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+            "Implemented follow-up.\n"
+            f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+            "### Human requirements\n"
+            "- Requirement 1: updated the URL handling.\n"
+            "<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Blocking issue."
+            "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "Need coder acknowledgement."
+            + prior_item_dispositions(
+                "[item-1] resolved",
+                f"[{HUMAN_REQUIREMENTS_ACK_ITEM_ID}] still blocking",
+            )
+            + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "LGTM.\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        pr_payload={
+            "number": 77,
+            "state": "OPEN",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "title": "Improve review prompt context",
+            "headRefName": "feature/review-context",
+            "baseRefName": "main",
+            "headRefOid": "abc123",
+            "comments": [
+                {
+                    "author": {"login": "maintainer"},
+                    "createdAt": "2026-05-18T10:00:00Z",
+                    "url": "https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                    "body": "Please use the absolute URL.\n\n-- Human Reviewer",
+                }
+            ],
+            "reviews": [],
+        },
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex", max_rounds=3)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    review_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]
+    assert len(review_prompts) == 3
+    assert HUMAN_REQUIREMENTS_ACK_ITEM_ID in review_prompts[1]
+    assert HUMAN_REQUIREMENTS_ACK_ITEM_ID not in review_prompts[2]
+
+
+def test_pr_loop_revalidates_latest_coder_output_against_refreshed_human_requirements(
+    tmp_path, monkeypatch
+):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Implemented fix without the extra acknowledgement.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Blocking issue.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        pr_payload={
+            "number": 77,
+            "state": "OPEN",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "title": "Improve review prompt context",
+            "headRefName": "feature/review-context",
+            "baseRefName": "main",
+            "headRefOid": "abc123",
+            "comments": [
+                {
+                    "author": {"login": "maintainer"},
+                    "createdAt": "2026-05-18T10:00:00Z",
+                    "url": "https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                    "body": "Please use the absolute URL.\n\n-- Human Reviewer",
+                }
+            ],
+            "reviews": [],
+        },
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex", max_rounds=2)
+    metadata = PullRequestMetadata(
+        number=77,
+        repo="OWNER/REPO",
+        title="Improve review prompt context",
+        head_branch="feature/review-context",
+        base_branch="main",
+        head_sha="abc123",
+        url="https://github.com/OWNER/REPO/pull/77",
+    )
+    contexts = iter(
+        [
+            PullRequestReviewContext(
+                metadata=metadata,
+                comments=(),
+                human_requirements=(
+                    HumanReviewRequirement(
+                        source_type="PR comment",
+                        author="maintainer",
+                        created_at="2026-05-18T10:00:00Z",
+                        url="https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                        body="Please use the absolute URL.",
+                    ),
+                ),
+            ),
+            PullRequestReviewContext(
+                metadata=metadata,
+                comments=(),
+                human_requirements=(),
+            ),
+        ]
+    )
+
+    monkeypatch.setattr(
+        "coding_review_agent_loop.orchestrator.get_pr_review_context",
+        lambda *args, **kwargs: next(contexts),
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    review_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]
+    assert len(review_prompts) == 2
+    assert HUMAN_REQUIREMENTS_ACK_ITEM_ID not in review_prompts[1]
+
+
 def test_pr_loop_routes_migration_validation_failure_through_coder_followup(tmp_path, monkeypatch):
     runner = FakeRunner(
         claude_outputs=["Fixed migration.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
@@ -2725,7 +3116,13 @@ def test_blocking_followup_prompt_reinjects_issue_context(tmp_path):
             + prior_item_dispositions("[item-1] resolved")
             + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
-        claude_outputs=["Fixed review.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
+        claude_outputs=[
+            "Fixed review.\n"
+            f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+            "### Human requirements\n"
+            "- Requirement 1: used the absolute URL.\n"
+            "<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+        ],
     )
     config = make_config(tmp_path)
     issue_context = IssueContext(
@@ -2762,7 +3159,13 @@ def test_blocking_followup_prompt_includes_human_requirements_before_ai_feedback
             + prior_item_dispositions("[item-1] resolved")
             + "\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
-        claude_outputs=["Fixed review.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
+        claude_outputs=[
+            "Fixed review.\n"
+            f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+            "### Human requirements\n"
+            "- Requirement 1: used the absolute URL.\n"
+            "<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+        ],
         pr_payload={
             "number": 77,
             "state": "OPEN",
