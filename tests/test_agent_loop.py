@@ -1230,6 +1230,68 @@ def test_parse_approved_followups_extracts_bullets_and_prose_paragraphs():
     ]
 
 
+def test_parse_approved_followups_keeps_multiline_markdown_finding_as_one_item():
+    review = """
+    Still blocked.
+
+    ### Same-PR follow-ups
+    #### Normalize `_plan_subject` whitespace handling
+
+    Keep the helper from creating distinct round subjects for leading/trailing
+    whitespace-only differences.
+
+    ```python
+    assert _plan_subject("x") == _plan_subject(" x ")
+    ```
+
+    The implementation should preserve the current hash format.
+
+    ---
+
+    #### Harden `_decode_round_metadata` exception handling
+
+    Invalid base64 and invalid JSON should still become `AgentLoopError`
+    consistently.
+
+    ### Notes
+    CI note outside the section.
+
+    <!-- AGENT_STATE: blocking -->
+    -- Anthropic Claude
+    """
+
+    followups = parse_approved_followups(review, reviewer="Anthropic Claude")
+
+    assert [(item.reviewer, item.text) for item in followups.same_pr] == [
+        (
+            "Anthropic Claude",
+            "\n".join(
+                [
+                    "#### Normalize `_plan_subject` whitespace handling",
+                    "",
+                    "Keep the helper from creating distinct round subjects for leading/trailing whitespace-only differences.",
+                    "",
+                    "```python",
+                    'assert _plan_subject("x") == _plan_subject(" x ")',
+                    "```",
+                    "",
+                    "The implementation should preserve the current hash format.",
+                ]
+            ),
+        ),
+        (
+            "Anthropic Claude",
+            "\n".join(
+                [
+                    "#### Harden `_decode_round_metadata` exception handling",
+                    "",
+                    "Invalid base64 and invalid JSON should still become `AgentLoopError` consistently.",
+                ]
+            ),
+        ),
+    ]
+
+
 @pytest.mark.parametrize(
     "placeholder",
     [
@@ -1316,6 +1378,49 @@ def test_parse_plan_review_items_extracts_structured_sections():
         (
             "OpenAI Codex",
             "Consider a later helper to unify plan and PR disposition rendering.",
+        )
+    ]
+
+
+def test_parse_plan_review_items_keeps_multiline_markdown_blocking_item_as_one_entry():
+    review = """
+    Plan needs one revision.
+
+    ### Blocking plan issues
+    #### Preserve multiline review items during tracking
+
+    Do not split one reviewer-authored finding into separate ledger entries for
+    paragraphs or code blocks.
+
+    ```text
+    item-2: heading
+    item-3: paragraph
+    ```
+
+    ### Same-plan follow-ups
+    - Mention the regression shape in the implementation plan.
+
+    <!-- AGENT_PLAN_STATE: blocking -->
+    -- OpenAI Codex
+    """
+
+    items = parse_plan_review_items(review, reviewer="OpenAI Codex")
+
+    assert [(item.reviewer, item.text) for item in items.blocking] == [
+        (
+            "OpenAI Codex",
+            "\n".join(
+                [
+                    "#### Preserve multiline review items during tracking",
+                    "",
+                    "Do not split one reviewer-authored finding into separate ledger entries for paragraphs or code blocks.",
+                    "",
+                    "```text",
+                    "item-2: heading",
+                    "item-3: paragraph",
+                    "```",
+                ]
+            ),
         )
     ]
 

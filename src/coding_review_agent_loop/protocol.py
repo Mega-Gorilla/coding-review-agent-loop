@@ -57,6 +57,8 @@ ANY_HEADING_RE = re.compile(r"^\s*#{1,6}\s+\S")
 HTML_COMMENT_RE = re.compile(r"^\s*<!--.*-->\s*$")
 SIGNATURE_RE = re.compile(r"^\s*--\s+\S")
 BULLET_RE = re.compile(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)(?P<text>.+?)\s*$")
+HEADING_LEVEL_RE = re.compile(r"^\s*(#{1,6})\s+\S")
+THEMATIC_BREAK_RE = re.compile(r"^\s*(?:([-*_])\s*){3,}\s*$")
 
 
 def _empty_placeholder_re(*phrases: str) -> re.Pattern[str]:
@@ -278,54 +280,129 @@ def _collect_section_items(
     empty_item_re: re.Pattern[str],
     reviewer: str,
 ) -> None:
+    def heading_level(line: str) -> int | None:
+        match = HEADING_LEVEL_RE.match(line)
+        if not match:
+            return None
+        return len(match.group(1))
+
+    def normalize_item_text(lines: list[str]) -> str:
+        trimmed = list(lines)
+        while trimmed and not trimmed[0].strip():
+            trimmed.pop(0)
+        while trimmed and not trimmed[-1].strip():
+            trimmed.pop()
+        if not trimmed:
+            return ""
+        common_indent = min(
+            len(line) - len(line.lstrip(" "))
+            for line in trimmed
+            if line.strip()
+        )
+        if common_indent:
+            trimmed = [line[common_indent:] if line.strip() else "" for line in trimmed]
+
+        rendered: list[str] = []
+        paragraph: list[str] = []
+        fence_marker: str | None = None
+
+        def flush_paragraph() -> None:
+            if paragraph:
+                rendered.append(" ".join(part.strip() for part in paragraph))
+                paragraph.clear()
+
+        for raw_line in trimmed:
+            line = raw_line.rstrip()
+            stripped = line.strip()
+            if not stripped:
+                flush_paragraph()
+                if rendered and rendered[-1] != "":
+                    rendered.append("")
+                continue
+
+            fence_match = re.match(r"^\s*(```+|~~~+)", line)
+            if fence_match:
+                flush_paragraph()
+                rendered.append(line)
+                marker = fence_match.group(1)
+                if fence_marker == marker:
+                    fence_marker = None
+                elif fence_marker is None:
+                    fence_marker = marker
+                continue
+            if fence_marker is not None:
+                rendered.append(line)
+                continue
+
+            if HEADING_LEVEL_RE.match(line):
+                flush_paragraph()
+                rendered.append(line)
+                continue
+
+            if re.match(r"^\s{2,}(?:[-*+]\s+|\d+[.)]\s+)", line) or stripped.startswith(">"):
+                flush_paragraph()
+                rendered.append(line)
+                continue
+
+            paragraph.append(stripped)
+
+        flush_paragraph()
+        while rendered and rendered[-1] == "":
+            rendered.pop()
+        return "\n".join(rendered).strip()
+
+    def section_bucket(line: str) -> list[ApprovedFollowup] | None:
+        for pattern, bucket in sections:
+            if pattern.match(line):
+                return bucket
+        return None
+
     active: list[ApprovedFollowup] | None = None
     current: list[str] = []
-    current_is_prose = False
+    active_heading_level: int | None = None
 
     def flush_current() -> None:
-        nonlocal current_is_prose
         if active is not None and current:
-            item = " ".join(part.strip() for part in current if part.strip()).strip()
+            item = normalize_item_text(current)
             if item and not empty_item_re.match(item):
                 active.append(ApprovedFollowup(reviewer=reviewer, text=item))
             current.clear()
-        current_is_prose = False
 
     for line in text.splitlines():
-        next_active = None
-        for pattern, bucket in sections:
-            if pattern.match(line):
-                next_active = bucket
-                break
+        next_active = section_bucket(line)
         if next_active is not None:
             flush_current()
             active = next_active
+            active_heading_level = heading_level(line)
             continue
         if active is None:
             continue
-        if ANY_HEADING_RE.match(line):
+
+        next_heading_level = heading_level(line)
+        if next_heading_level is not None and active_heading_level is not None and next_heading_level <= active_heading_level:
             flush_current()
             active = None
+            active_heading_level = None
             continue
         if HTML_COMMENT_RE.match(line) or SIGNATURE_RE.match(line):
             flush_current()
             active = None
+            active_heading_level = None
             continue
-        if not line.strip():
-            if current_is_prose:
-                flush_current()
+        if THEMATIC_BREAK_RE.match(line):
+            flush_current()
             continue
         bullet = BULLET_RE.match(line)
         if bullet:
             flush_current()
             current.append(bullet.group("text"))
-            current_is_prose = False
             continue
-        if current and line.strip():
-            current.append(line)
+        if next_heading_level is not None:
+            flush_current()
+            current.append(line.rstrip())
             continue
-        current.append(line)
-        current_is_prose = True
+        if current or line.strip():
+            current.append(line.rstrip())
 
     flush_current()
 
