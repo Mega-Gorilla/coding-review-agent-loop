@@ -797,21 +797,21 @@ def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
     try:
         raw = base64.urlsafe_b64decode(encoded.encode("ascii"))
         payload = json.loads(raw.decode("utf-8"))
-    except (ValueError, json.JSONDecodeError) as exc:
+        if not isinstance(payload, dict):
+            raise AgentLoopError("Invalid AGENT_LOOP_META payload.")
+        return PostedRoundMetadata(
+            flow=str(payload["flow"]),
+            role=str(payload["role"]),
+            agent=str(payload["agent"]),
+            round_number=int(payload["round_number"]),
+            subject=str(payload["subject"]),
+            prior_items=tuple(_deserialize_unresolved_item(item) for item in payload.get("prior_items", [])),
+            dispositions=tuple(_deserialize_disposition(item) for item in payload.get("dispositions", [])),
+            new_items=tuple(_deserialize_unresolved_item(item) for item in payload.get("new_items", [])),
+            state=str(payload["state"]) if payload.get("state") is not None else None,
+        )
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         raise AgentLoopError("Invalid AGENT_LOOP_META payload.") from exc
-    if not isinstance(payload, dict):
-        raise AgentLoopError("Invalid AGENT_LOOP_META payload.")
-    return PostedRoundMetadata(
-        flow=str(payload["flow"]),
-        role=str(payload["role"]),
-        agent=str(payload["agent"]),
-        round_number=int(payload["round_number"]),
-        subject=str(payload["subject"]),
-        prior_items=tuple(_deserialize_unresolved_item(item) for item in payload.get("prior_items", [])),
-        dispositions=tuple(_deserialize_disposition(item) for item in payload.get("dispositions", [])),
-        new_items=tuple(_deserialize_unresolved_item(item) for item in payload.get("new_items", [])),
-        state=str(payload["state"]) if payload.get("state") is not None else None,
-    )
 
 
 def _attach_round_metadata(body: str, metadata: PostedRoundMetadata) -> str:
@@ -880,7 +880,7 @@ def _max_unresolved_item_number_from_records(records: Sequence[PostedRoundRecord
 
 
 def _plan_subject(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
 
 def _resume_pr_round(

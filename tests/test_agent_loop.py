@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 import subprocess
@@ -47,6 +48,7 @@ from coding_review_agent_loop.orchestrator import (
     PostedRoundMetadata,
     _apply_unresolved_item_dispositions,
     _attach_round_metadata,
+    _decode_round_metadata,
     _format_unresolved_item_label,
     _plan_subject,
     _render_public_review_comment,
@@ -5698,6 +5700,45 @@ def test_issue_loop_plan_first_resumes_with_only_missing_reviewer_for_current_pl
     agent_commands = [cmd[0] for cmd, _cwd in runner.commands if cmd[:1] in (["claude"], ["codex"], ["gemini"])]
     assert agent_commands == ["gemini"]
     assert runner.comments[-1].startswith("Planning complete for issue #56.")
+
+
+def test_plan_subject_ignores_trailing_whitespace_added_by_metadata_round_trip():
+    plan = "Revised plan.\n- Add state reconstruction.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+
+    attached = _attach_round_metadata(
+        f"{plan}\n",
+        PostedRoundMetadata(
+            flow="plan",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject=_plan_subject(f"{plan}\n"),
+            prior_items=(),
+        ),
+    )
+
+    assert _plan_subject(f"{plan}\n") == _plan_subject(_strip_round_metadata(attached))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"flow": "plan"},
+        {
+            "flow": "plan",
+            "role": "coder",
+            "agent": "Claude",
+            "round_number": "not-an-int",
+            "subject": "abc",
+        },
+    ],
+)
+def test_decode_round_metadata_rejects_missing_or_invalid_required_fields(payload):
+    encoded = json.dumps(payload).encode("utf-8")
+
+    with pytest.raises(AgentLoopError, match="Invalid AGENT_LOOP_META payload"):
+        _decode_round_metadata(encoded=base64.urlsafe_b64encode(encoded).decode("ascii"))
 
 
 @pytest.mark.parametrize(
