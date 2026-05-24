@@ -1888,6 +1888,8 @@ def test_review_prompt_includes_prior_unresolved_items_and_disposition_instructi
     assert "- [item-id] resolved" in prompt
     assert "Only use `future follow-up` when returning `approved`." in prompt
     assert "Contradictory forms like `same-pr: none`, `still blocking: none`, and `future follow-up: none` are invalid" in prompt
+    assert "Only items listed under `Prior unresolved review items from earlier rounds`" in prompt
+    assert "same-round findings from\nother reviewers appear elsewhere in the PR discussion" in prompt
     assert "Same-PR follow-ups may appear only in blocking reviews." in prompt
     assert "no blocking issues, no Same-PR follow-ups, and no" in prompt
 
@@ -1957,6 +1959,8 @@ def test_plan_review_prompt_includes_structured_sections_and_prior_items(tmp_pat
     assert "[item-2] same-plan from Google Gemini in round 1" in prompt
     assert "Only use `future follow-up` when returning `approved`." in prompt
     assert "Contradictory forms like `same-plan: none`, `still blocking: none`, and `future follow-up: none` are invalid" in prompt
+    assert "Only items listed under `Prior unresolved plan items from earlier rounds`" in prompt
+    assert "same-round findings from other\nreviewers appear elsewhere in the issue discussion" in prompt
     assert "Same-plan\nfollow-ups may appear only in blocking plan reviews" in prompt
     assert "do not use structured Future follow-ups" in prompt
     assert "no blocking plan issues, no Same-plan\nfollow-ups, and no carried-forward plan items left active" in prompt
@@ -2058,7 +2062,7 @@ def test_format_unresolved_item_label_special_cases_human_requirements_ack_item(
     )
 
 
-def test_render_public_review_comment_replaces_dispositions_and_appends_new_items():
+def test_render_public_review_comment_replaces_dispositions_without_exposing_same_round_new_items():
     body = """Still blocked.
 
 ### Same-PR follow-ups
@@ -2106,10 +2110,8 @@ def test_render_public_review_comment_replaces_dispositions_and_appends_new_item
         "### Prior unresolved item dispositions\n"
         "- [item-1] Same-PR follow-up from Google Gemini, round 1: Require source issue reference in PR body. -> same-pr: keep the body reference"
     ) in rendered
-    assert (
-        "### New tracked unresolved items\n"
-        "- [item-2] Same-PR follow-up from OpenAI Codex, round 2: Keep the source issue reference in the PR body."
-    ) in rendered
+    assert "### New tracked unresolved items" not in rendered
+    assert "[item-2]" not in rendered
     assert rendered.rstrip().endswith("-- OpenAI Codex")
 
 
@@ -3462,9 +3464,7 @@ def test_pr_loop_skips_duplicate_approved_followup_issue_creation_when_marker_ex
 
     assert runner.issues == []
     assert runner.comments == [
-        "Codex approves.\n\n### Future follow-ups\n- Add cleanup docs.\n\n"
-        "### New tracked unresolved items\n"
-        "- [item-1] Future follow-up from OpenAI Codex, round 1: Add cleanup docs.\n"
+        "Codex approves.\n\n### Future follow-ups\n- Add cleanup docs.\n"
         "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
     ]
 
@@ -4630,9 +4630,7 @@ def test_pr_loop_posts_human_readable_item_labels_in_new_and_prior_sections(tmp_
 
     assert runner.comments[0] == (
         "### Same-PR follow-ups\n"
-        "- Require source issue reference in PR body.\n\n"
-        "### New tracked unresolved items\n"
-        "- [item-1] Same-PR follow-up from OpenAI Codex, round 1: Require source issue reference in PR body.\n"
+        "- Require source issue reference in PR body.\n"
         "<!-- AGENT_STATE: blocking -->\n"
         "-- OpenAI Codex"
     )
@@ -4643,6 +4641,38 @@ def test_pr_loop_posts_human_readable_item_labels_in_new_and_prior_sections(tmp_
         "<!-- AGENT_STATE: approved -->\n"
         "-- OpenAI Codex"
     )
+
+
+def test_pr_loop_does_not_expose_same_round_item_ids_to_later_reviewers(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "### Same-PR follow-ups\n"
+            "- Require source issue reference in PR body.\n"
+            "<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Still blocked.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        coder="gemini",
+        reviewer=("claude", "codex"),
+        approved_followups="fix-and-summarize",
+        max_rounds=1,
+    )
+
+    with pytest.raises(AgentLoopError, match="still reported blocking issues after round 1"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    second_reviewer_prompt = [
+        cmd[-1]
+        for cmd, _cwd in runner.commands
+        if cmd[:2] == ["codex", "exec"] and "round 1" in cmd[-1]
+    ][0]
+    assert "Only items listed under `Prior unresolved review items from earlier rounds`" in second_reviewer_prompt
+    assert "[item-1]" not in second_reviewer_prompt
+    assert "### New tracked unresolved items" not in runner.comments[0]
 
 
 def test_pr_loop_same_pr_items_remain_blocking_until_explicitly_resolved(tmp_path):
@@ -5750,10 +5780,7 @@ def test_issue_loop_plan_first_posts_human_readable_item_labels_in_new_and_prior
         "### Blocking plan issues\n"
         "- Keep plan-review wording distinct from PR wording.\n"
         "### Same-plan follow-ups\n"
-        "- Add one carry-forward plan test.\n\n"
-        "### New tracked unresolved items\n"
-        "- [item-1] Blocking issue from OpenAI Codex, round 1: Keep plan-review wording distinct from PR wording.\n"
-        "- [item-2] Same-plan follow-up from OpenAI Codex, round 1: Add one carry-forward plan test.\n"
+        "- Add one carry-forward plan test.\n"
         "<!-- AGENT_PLAN_STATE: blocking -->\n"
         "-- OpenAI Codex"
     )
@@ -5765,6 +5792,40 @@ def test_issue_loop_plan_first_posts_human_readable_item_labels_in_new_and_prior
         "<!-- AGENT_PLAN_STATE: approved -->\n"
         "-- OpenAI Codex"
     )
+
+
+def test_issue_loop_plan_first_does_not_expose_same_round_item_ids_to_later_reviewers(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Initial plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
+        ],
+        gemini_outputs=[
+            "### Same-plan follow-ups\n"
+            "- Add the carry-forward orchestration test.\n"
+            "<!-- AGENT_PLAN_STATE: blocking -->\n-- Google Gemini",
+        ],
+        claude_outputs=[
+            "Still blocked.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        coder="codex",
+        reviewer=("gemini", "claude"),
+        max_rounds=1,
+    )
+
+    with pytest.raises(AgentLoopError, match="still reported blocking plan issues after round 1"):
+        run_issue_loop(runner, issue_number=56, config=config, plan_first=True)
+
+    second_reviewer_prompt = [
+        cmd[-1]
+        for cmd, _cwd in runner.commands
+        if cmd[:1] == ["claude"] and "planning round 1" in cmd[-1]
+    ][0]
+    assert "Only items listed under `Prior unresolved plan items from earlier rounds`" in second_reviewer_prompt
+    assert "[item-1]" not in second_reviewer_prompt
+    assert "### New tracked unresolved items" not in runner.comments[1]
 
 
 def test_issue_loop_plan_first_resumes_with_only_missing_reviewer_for_current_plan(tmp_path):

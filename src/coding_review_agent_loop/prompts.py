@@ -545,6 +545,11 @@ active for this planning round. If you return `<!-- AGENT_PLAN_STATE:
 blocking -->`, do not use structured Future follow-ups; keep all required
 current-round issues in the main blocking content so they are not missed
 during plan revision.
+Only items listed under `Prior unresolved plan items from earlier rounds` are
+eligible for dispositions in this round. If same-round findings from other
+reviewers appear elsewhere in the issue discussion, treat them as
+informational only and do not disposition them until a later round carries
+them forward explicitly.
 {unresolved_items_guidance}
 Use blocking only when the current plan still has blocking plan issues or
 same-plan follow-ups. All configured reviewers ({reviewer_group}) must approve
@@ -867,6 +872,11 @@ When the PR changes files under `alembic/versions/`, verify migration topology:
 new revisions should descend from the current head unless the PR intentionally
 adds a merge migration.
 {human_requirements_guidance}
+Only items listed under `Prior unresolved review items from earlier rounds`
+are eligible for dispositions in this round. If same-round findings from
+other reviewers appear elsewhere in the PR discussion, treat them as
+informational only and do not disposition them until a later round carries
+them forward explicitly.
 {unresolved_items_guidance}
 {followup_guidance}
 Use blocking only for issues that should prevent merge.

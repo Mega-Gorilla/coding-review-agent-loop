@@ -1001,12 +1001,6 @@ def _render_public_review_comment(
                 dispositions=dispositions,
             ),
         )
-    if new_items:
-        section_lines = ["### New tracked unresolved items"]
-        section_lines.extend(
-            f"- [{item.item_id}] {_format_unresolved_item_label(item)}" for item in new_items
-        )
-        rendered = _append_before_trailing_metadata(rendered, "\n".join(section_lines))
     return rendered
 
 
