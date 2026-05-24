@@ -1,3 +1,4 @@
+import base64
 import json
 import re
 import subprocess
@@ -44,10 +45,15 @@ from coding_review_agent_loop.migrations import MigrationValidationResult, valid
 from coding_review_agent_loop.orchestrator import (
     ITEM_SUMMARY_LIMIT,
     HUMAN_REQUIREMENTS_ACK_ITEM_ID,
+    PostedRoundMetadata,
     _apply_unresolved_item_dispositions,
+    _attach_round_metadata,
+    _decode_round_metadata,
     _format_unresolved_item_label,
+    _plan_subject,
     _render_public_review_comment,
     _review_freeform_summary_text,
+    _strip_round_metadata,
     _validate_plan_review_response,
 )
 from coding_review_agent_loop.prompts import (
@@ -261,17 +267,37 @@ class FakeRunner(Runner):
         if cmd[:3] == ["gh", "pr", "comment"]:
             if "--body-file" in cmd:
                 body_path = Path(cmd[cmd.index("--body-file") + 1])
-                self.comments.append(body_path.read_text(encoding="utf-8"))
+                raw_body = body_path.read_text(encoding="utf-8")
             elif "--body" in cmd:
-                self.comments.append(cmd[cmd.index("--body") + 1])
+                raw_body = cmd[cmd.index("--body") + 1]
+            else:
+                raw_body = ""
+            self.comments.append(_strip_round_metadata(raw_body))
+            self.pr_payload.setdefault("comments", []).append(
+                {
+                    "author": {"login": "coding-review-agent-loop"},
+                    "createdAt": f"2026-05-23T00:00:{len(self.pr_payload.get('comments', [])):02d}Z",
+                    "body": raw_body,
+                }
+            )
             return CommandResult(cmd, cwd_path, "", "", 0)
 
         if cmd[:3] == ["gh", "issue", "comment"]:
             if "--body-file" in cmd:
                 body_path = Path(cmd[cmd.index("--body-file") + 1])
-                self.comments.append(body_path.read_text(encoding="utf-8"))
+                raw_body = body_path.read_text(encoding="utf-8")
             elif "--body" in cmd:
-                self.comments.append(cmd[cmd.index("--body") + 1])
+                raw_body = cmd[cmd.index("--body") + 1]
+            else:
+                raw_body = ""
+            self.comments.append(_strip_round_metadata(raw_body))
+            self.issue_comments.append(
+                {
+                    "author": {"login": "coding-review-agent-loop"},
+                    "createdAt": f"2026-05-23T00:00:{len(self.issue_comments):02d}Z",
+                    "body": raw_body,
+                }
+            )
             return CommandResult(cmd, cwd_path, "", "", 0)
 
         if cmd[:3] == ["gh", "issue", "create"]:
@@ -3333,7 +3359,7 @@ def test_pr_loop_skips_duplicate_approved_followup_issue_creation_when_marker_ex
     assert runner.comments == [
         "Codex approves.\n\n### Future follow-ups\n- Add cleanup docs.\n\n"
         "### New tracked unresolved items\n"
-        "- [item-1] Future follow-up from OpenAI Codex, round 1: Add cleanup docs.\n\n"
+        "- [item-1] Future follow-up from OpenAI Codex, round 1: Add cleanup docs.\n"
         "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
     ]
 
@@ -4501,7 +4527,7 @@ def test_pr_loop_posts_human_readable_item_labels_in_new_and_prior_sections(tmp_
         "### Same-PR follow-ups\n"
         "- Require source issue reference in PR body.\n\n"
         "### New tracked unresolved items\n"
-        "- [item-1] Same-PR follow-up from OpenAI Codex, round 1: Require source issue reference in PR body.\n\n"
+        "- [item-1] Same-PR follow-up from OpenAI Codex, round 1: Require source issue reference in PR body.\n"
         "<!-- AGENT_STATE: blocking -->\n"
         "-- OpenAI Codex"
     )
@@ -4530,6 +4556,70 @@ def test_pr_loop_same_pr_items_remain_blocking_until_explicitly_resolved(tmp_pat
 
     with pytest.raises(AgentLoopError, match="still reported blocking issues after round 2"):
         run_pr_loop(runner, pr_number=77, config=config)
+
+
+def test_pr_loop_resumes_with_only_missing_reviewer_for_current_head(tmp_path):
+    carried_item = UnresolvedReviewItem(
+        item_id="item-1",
+        reviewer="Codex",
+        source_round=1,
+        text="Add a regression test before merge.",
+        status="blocking",
+        source_status="blocking",
+    )
+    coder_comment = _attach_round_metadata(
+        "Updated the PR with the requested fix.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        PostedRoundMetadata(
+            flow="pr",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject="abc123",
+            prior_items=(carried_item,),
+        ),
+    )
+    codex_comment = _attach_round_metadata(
+        "Looks good."
+        + prior_item_dispositions("[item-1] resolved")
+        + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        PostedRoundMetadata(
+            flow="pr",
+            role="reviewer",
+            agent="Codex",
+            round_number=2,
+            subject="abc123",
+            prior_items=(carried_item,),
+            dispositions=(
+                parse_unresolved_item_dispositions(
+                    prior_item_dispositions("[item-1] resolved"),
+                    reviewer="OpenAI Codex",
+                )[0],
+            ),
+            state="approved",
+        ),
+    )
+    runner = FakeRunner(
+        gemini_outputs=[
+            "Ship it."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+        ],
+        pr_payload={
+            "comments": [
+                {"author": {"login": "bot"}, "createdAt": "2026-05-20T10:00:00Z", "body": coder_comment},
+                {"author": {"login": "bot"}, "createdAt": "2026-05-20T10:05:00Z", "body": codex_comment},
+            ],
+        },
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    agent_commands = [cmd[0] for cmd, _cwd in runner.commands if cmd[:1] in (["claude"], ["codex"], ["gemini"])]
+    assert agent_commands == ["gemini"]
+    gemini_prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["gemini"])
+    assert "[item-1]" in gemini_prompt
+    assert "Add a regression test before merge." in gemini_prompt
 
 
 @pytest.mark.parametrize(
@@ -5558,7 +5648,7 @@ def test_issue_loop_plan_first_posts_human_readable_item_labels_in_new_and_prior
         "- Add one carry-forward plan test.\n\n"
         "### New tracked unresolved items\n"
         "- [item-1] Blocking issue from OpenAI Codex, round 1: Keep plan-review wording distinct from PR wording.\n"
-        "- [item-2] Same-plan follow-up from OpenAI Codex, round 1: Add one carry-forward plan test.\n\n"
+        "- [item-2] Same-plan follow-up from OpenAI Codex, round 1: Add one carry-forward plan test.\n"
         "<!-- AGENT_PLAN_STATE: blocking -->\n"
         "-- OpenAI Codex"
     )
@@ -5570,6 +5660,85 @@ def test_issue_loop_plan_first_posts_human_readable_item_labels_in_new_and_prior
         "<!-- AGENT_PLAN_STATE: approved -->\n"
         "-- OpenAI Codex"
     )
+
+
+def test_issue_loop_plan_first_resumes_with_only_missing_reviewer_for_current_plan(tmp_path):
+    current_plan = "Revised plan.\n- Add state reconstruction.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    coder_comment = _attach_round_metadata(
+        current_plan,
+        PostedRoundMetadata(
+            flow="plan",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject=_plan_subject(current_plan),
+            prior_items=(),
+        ),
+    )
+    codex_comment = _attach_round_metadata(
+        "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+        PostedRoundMetadata(
+            flow="plan",
+            role="reviewer",
+            agent="Codex",
+            round_number=2,
+            subject=_plan_subject(current_plan),
+            state="approved",
+        ),
+    )
+    runner = FakeRunner(
+        issue_comments=[
+            {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:00:00Z", "body": coder_comment},
+            {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:05:00Z", "body": codex_comment},
+        ],
+        gemini_outputs=["Plan looks sound too.\n<!-- AGENT_PLAN_STATE: approved -->\n-- Google Gemini"],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    agent_commands = [cmd[0] for cmd, _cwd in runner.commands if cmd[:1] in (["claude"], ["codex"], ["gemini"])]
+    assert agent_commands == ["gemini"]
+    assert runner.comments[-1].startswith("Planning complete for issue #56.")
+
+
+def test_plan_subject_ignores_trailing_whitespace_added_by_metadata_round_trip():
+    plan = "Revised plan.\n- Add state reconstruction.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+
+    attached = _attach_round_metadata(
+        f"{plan}\n",
+        PostedRoundMetadata(
+            flow="plan",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject=_plan_subject(f"{plan}\n"),
+            prior_items=(),
+        ),
+    )
+
+    assert _plan_subject(f"{plan}\n") == _plan_subject(_strip_round_metadata(attached))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"flow": "plan"},
+        {
+            "flow": "plan",
+            "role": "coder",
+            "agent": "Claude",
+            "round_number": "not-an-int",
+            "subject": "abc",
+        },
+    ],
+)
+def test_decode_round_metadata_rejects_missing_or_invalid_required_fields(payload):
+    encoded = json.dumps(payload).encode("utf-8")
+
+    with pytest.raises(AgentLoopError, match="Invalid AGENT_LOOP_META payload"):
+        _decode_round_metadata(encoded=base64.urlsafe_b64encode(encoded).decode("ascii"))
 
 
 @pytest.mark.parametrize(

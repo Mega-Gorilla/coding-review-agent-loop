@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import json
 import re
 import sys
 from collections.abc import Callable, Sequence
@@ -21,6 +24,7 @@ from .errors import AgentLoopError
 from .github import (
     IssueContext,
     PullRequestChecks,
+    PullRequestReviewContext,
     create_issue,
     get_issue_context,
     get_pr_checks,
@@ -104,6 +108,7 @@ NEAR_MISS_AGENT_MARKER_RE = re.compile(
     r"(?m)^[ \t]*AGENT_(?:PLAN_)?STATE:[ \t]*(?:approved|blocking)[ \t.]*$",
     re.I,
 )
+ROUND_RESUME_MARKER_RE = re.compile(r"<!--\s*AGENT_LOOP_META:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->", re.I)
 
 
 @dataclass(frozen=True)
@@ -112,6 +117,35 @@ class ValidatedAgentResponse:
     session_id: str | None
     marker_value: object
     usage: UsageMetadata | None = None
+
+
+@dataclass(frozen=True)
+class PostedRoundMetadata:
+    flow: str
+    role: str
+    agent: str
+    round_number: int
+    subject: str
+    prior_items: tuple[UnresolvedReviewItem, ...] = ()
+    dispositions: tuple[ReviewItemDisposition, ...] = ()
+    new_items: tuple[UnresolvedReviewItem, ...] = ()
+    state: str | None = None
+
+
+@dataclass(frozen=True)
+class PostedRoundRecord:
+    index: int
+    metadata: PostedRoundMetadata
+    body: str
+
+
+@dataclass(frozen=True)
+class ResumedReviewRound:
+    round_number: int
+    prior_items: tuple[UnresolvedReviewItem, ...]
+    coder_output: str | None
+    completed_reviews: tuple[PostedRoundRecord, ...]
+    next_unresolved_item_number: int
 
 
 def _agent_log_context(log_paths: Sequence[object]) -> str:
@@ -693,6 +727,256 @@ def _append_before_trailing_metadata(body: str, section: str) -> str:
     return "\n\n".join(part for part in parts if part)
 
 
+def _serialize_unresolved_item(item: UnresolvedReviewItem) -> dict[str, object]:
+    return {
+        "item_id": item.item_id,
+        "reviewer": item.reviewer,
+        "source_round": item.source_round,
+        "text": item.text,
+        "status": item.status,
+        "source_status": item.source_status,
+        "notes": list(item.notes),
+    }
+
+
+def _deserialize_unresolved_item(payload: object) -> UnresolvedReviewItem:
+    if not isinstance(payload, dict):
+        raise AgentLoopError("Invalid round metadata unresolved-item payload.")
+    raw_notes = payload.get("notes") or []
+    notes = tuple(str(note) for note in raw_notes) if isinstance(raw_notes, list) else ()
+    return UnresolvedReviewItem(
+        item_id=str(payload["item_id"]),
+        reviewer=str(payload["reviewer"]),
+        source_round=int(payload["source_round"]),
+        text=str(payload["text"]),
+        status=str(payload["status"]),
+        source_status=str(payload["source_status"]) if payload.get("source_status") is not None else None,
+        notes=notes,
+    )
+
+
+def _serialize_disposition(disposition: ReviewItemDisposition) -> dict[str, object]:
+    return {
+        "item_id": disposition.item_id,
+        "reviewer": disposition.reviewer,
+        "disposition": disposition.disposition,
+        "note": disposition.note,
+    }
+
+
+def _deserialize_disposition(payload: object) -> ReviewItemDisposition:
+    if not isinstance(payload, dict):
+        raise AgentLoopError("Invalid round metadata disposition payload.")
+    return ReviewItemDisposition(
+        item_id=str(payload["item_id"]),
+        reviewer=str(payload["reviewer"]),
+        disposition=str(payload["disposition"]),
+        note=str(payload["note"]) if payload.get("note") is not None else None,
+    )
+
+
+def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
+    payload = {
+        "flow": metadata.flow,
+        "role": metadata.role,
+        "agent": metadata.agent,
+        "round_number": metadata.round_number,
+        "subject": metadata.subject,
+        "prior_items": [_serialize_unresolved_item(item) for item in metadata.prior_items],
+        "dispositions": [_serialize_disposition(item) for item in metadata.dispositions],
+        "new_items": [_serialize_unresolved_item(item) for item in metadata.new_items],
+        "state": metadata.state,
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    )
+    return encoded.decode("ascii")
+
+
+def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
+    try:
+        raw = base64.urlsafe_b64decode(encoded.encode("ascii"))
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            raise AgentLoopError("Invalid AGENT_LOOP_META payload.")
+        return PostedRoundMetadata(
+            flow=str(payload["flow"]),
+            role=str(payload["role"]),
+            agent=str(payload["agent"]),
+            round_number=int(payload["round_number"]),
+            subject=str(payload["subject"]),
+            prior_items=tuple(_deserialize_unresolved_item(item) for item in payload.get("prior_items", [])),
+            dispositions=tuple(_deserialize_disposition(item) for item in payload.get("dispositions", [])),
+            new_items=tuple(_deserialize_unresolved_item(item) for item in payload.get("new_items", [])),
+            state=str(payload["state"]) if payload.get("state") is not None else None,
+        )
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise AgentLoopError("Invalid AGENT_LOOP_META payload.") from exc
+
+
+def _attach_round_metadata(body: str, metadata: PostedRoundMetadata) -> str:
+    marker = f"<!-- AGENT_LOOP_META: {_encode_round_metadata(metadata)} -->"
+    lines = body.splitlines()
+    index = len(lines)
+    while index > 0 and not lines[index - 1].strip():
+        index -= 1
+    metadata_start = index
+    while metadata_start > 0:
+        candidate = lines[metadata_start - 1]
+        if not candidate.strip() or HTML_COMMENT_RE.match(candidate) or SIGNATURE_RE.match(candidate):
+            metadata_start -= 1
+            continue
+        break
+    prefix = "\n".join(lines[:metadata_start]).rstrip("\n")
+    suffix = "\n".join(lines[metadata_start:]).lstrip("\n")
+    if not prefix:
+        return "\n".join(part for part in (marker, suffix) if part)
+    if not suffix:
+        return "\n".join((prefix, marker))
+    return "\n".join((prefix, marker, suffix))
+
+
+def _strip_round_metadata(body: str) -> str:
+    cleaned = re.sub(
+        r"\n?\s*<!--\s*AGENT_LOOP_META:\s*[A-Za-z0-9+/=_-]+\s*-->\s*\n?",
+        "\n",
+        body,
+        flags=re.I,
+    )
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    return cleaned.strip()
+
+
+def _extract_round_metadata_records(comments: Sequence[object], *, flow: str) -> tuple[PostedRoundRecord, ...]:
+    records: list[PostedRoundRecord] = []
+    for index, comment in enumerate(comments):
+        body = getattr(comment, "body", None)
+        if not isinstance(body, str):
+            continue
+        matches = list(ROUND_RESUME_MARKER_RE.finditer(body))
+        if not matches:
+            continue
+        metadata = _decode_round_metadata(matches[-1].group("payload"))
+        if metadata.flow != flow:
+            continue
+        records.append(
+            PostedRoundRecord(
+                index=index,
+                metadata=metadata,
+                body=_strip_round_metadata(body),
+            )
+        )
+    return tuple(records)
+
+
+def _max_unresolved_item_number_from_records(records: Sequence[PostedRoundRecord]) -> int:
+    max_number = 0
+    for record in records:
+        for item in (*record.metadata.prior_items, *record.metadata.new_items):
+            match = re.fullmatch(r"item-(\d+)", item.item_id)
+            if match:
+                max_number = max(max_number, int(match.group(1)))
+    return max_number
+
+
+def _plan_subject(text: str) -> str:
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+
+def _resume_pr_round(
+    comments: Sequence[object],
+    *,
+    head_sha: str | None,
+    configured_reviewers: Sequence[AgentName],
+) -> ResumedReviewRound | None:
+    if not head_sha:
+        return None
+    records = _extract_round_metadata_records(comments, flow="pr")
+    if not records:
+        return None
+    current_subject_records = [record for record in records if record.metadata.subject == head_sha]
+    if not current_subject_records:
+        return None
+    latest_coder_record = next(
+        (
+            record
+            for record in reversed(current_subject_records)
+            if record.metadata.role == "coder"
+        ),
+        None,
+    )
+    current_round_records = current_subject_records
+    if latest_coder_record is not None:
+        current_round_records = [
+            record for record in current_round_records if record.index >= latest_coder_record.index
+        ]
+    reviewer_records: dict[str, PostedRoundRecord] = {}
+    configured_reviewer_names = {agent_display_name(agent) for agent in configured_reviewers}
+    for record in current_round_records:
+        metadata = record.metadata
+        if metadata.role != "reviewer" or metadata.agent not in configured_reviewer_names:
+            continue
+        reviewer_records[metadata.agent] = record
+    if latest_coder_record is None and not reviewer_records:
+        return None
+    prior_items = ()
+    if latest_coder_record is not None:
+        prior_items = latest_coder_record.metadata.prior_items
+    elif reviewer_records:
+        prior_items = next(iter(reviewer_records.values())).metadata.prior_items
+    round_number = (
+        latest_coder_record.metadata.round_number
+        if latest_coder_record is not None
+        else next(iter(reviewer_records.values())).metadata.round_number
+    )
+    return ResumedReviewRound(
+        round_number=round_number,
+        prior_items=prior_items,
+        coder_output=latest_coder_record.body if latest_coder_record is not None else None,
+        completed_reviews=tuple(reviewer_records[agent_display_name(agent)] for agent in configured_reviewers if agent_display_name(agent) in reviewer_records),
+        next_unresolved_item_number=_max_unresolved_item_number_from_records(records) + 1,
+    )
+
+
+def _resume_plan_round(
+    comments: Sequence[object],
+    *,
+    configured_reviewers: Sequence[AgentName],
+) -> tuple[str, ResumedReviewRound] | None:
+    records = _extract_round_metadata_records(comments, flow="plan")
+    if not records:
+        return None
+    latest_coder_record = next(
+        (record for record in reversed(records) if record.metadata.role == "coder"),
+        None,
+    )
+    if latest_coder_record is None:
+        return None
+    subject = latest_coder_record.metadata.subject
+    current_round_records = [
+        record
+        for record in records
+        if record.metadata.subject == subject and record.index >= latest_coder_record.index
+    ]
+    reviewer_records: dict[str, PostedRoundRecord] = {}
+    configured_reviewer_names = {agent_display_name(agent) for agent in configured_reviewers}
+    for record in current_round_records:
+        metadata = record.metadata
+        if metadata.role != "reviewer" or metadata.agent not in configured_reviewer_names:
+            continue
+        reviewer_records[metadata.agent] = record
+    return (
+        latest_coder_record.body,
+        ResumedReviewRound(
+            round_number=latest_coder_record.metadata.round_number,
+            prior_items=latest_coder_record.metadata.prior_items,
+            coder_output=latest_coder_record.body,
+            completed_reviews=tuple(reviewer_records[agent_display_name(agent)] for agent in configured_reviewers if agent_display_name(agent) in reviewer_records),
+            next_unresolved_item_number=_max_unresolved_item_number_from_records(records) + 1,
+        ),
+    )
+
+
 def _render_public_review_comment(
     body: str,
     *,
@@ -1177,29 +1461,54 @@ def _run_plan_first_loop(
     unresolved_items: list[UnresolvedReviewItem] = []
     approved_future_followups: list[ApprovedFollowup] = []
     next_unresolved_item_number = 1
-
-    log(config, f"Planning issue #{issue_number}: invoking {coder_name}")
-    plan_response = _run_validated_agent(
-        runner,
-        agent=config.coder,
-        config=config,
-        prompt=build_issue_plan_prompt(issue_number, config, memory, issue_context=issue_context),
-        marker_description="<!-- AGENT_PLAN_STATE: approved|blocking --> or <!-- AGENT_CLARIFY -->",
-        validate=_require_plan_state_or_clarification,
-        usage_context=usage_context,
-    )
-    plan_output = plan_response.text
-    coder_session_id = plan_response.session_id
-    if is_clarification_request(plan_output):
-        raise AgentLoopError(
-            f"{coder_name} requested clarification during planning; human intervention required.\n\n"
-            f"{coder_name}'s questions:\n{plan_output}"
+    resume_state = _resume_plan_round(issue_context.comments, configured_reviewers=configured_reviewers)
+    if resume_state is None:
+        log(config, f"Planning issue #{issue_number}: invoking {coder_name}")
+        plan_response = _run_validated_agent(
+            runner,
+            agent=config.coder,
+            config=config,
+            prompt=build_issue_plan_prompt(issue_number, config, memory, issue_context=issue_context),
+            marker_description="<!-- AGENT_PLAN_STATE: approved|blocking --> or <!-- AGENT_CLARIFY -->",
+            validate=_require_plan_state_or_clarification,
+            usage_context=usage_context,
         )
-    post_issue_comment(runner, config=config, issue_number=issue_number, body=plan_output)
-    current_plan = plan_output
+        plan_output = plan_response.text
+        coder_session_id = plan_response.session_id
+        if is_clarification_request(plan_output):
+            raise AgentLoopError(
+                f"{coder_name} requested clarification during planning; human intervention required.\n\n"
+                f"{coder_name}'s questions:\n{plan_output}"
+            )
+        current_plan = plan_output
+        post_issue_comment(
+            runner,
+            config=config,
+            issue_number=issue_number,
+            body=_attach_round_metadata(
+                plan_output,
+                PostedRoundMetadata(
+                    flow="plan",
+                    role="coder",
+                    agent=coder_name,
+                    round_number=1,
+                    subject=_plan_subject(current_plan),
+                    prior_items=(),
+                ),
+            ),
+        )
+        start_round_number = 1
+        resumed_round: ResumedReviewRound | None = None
+    else:
+        current_plan, resumed_round = resume_state
+        unresolved_items = list(resumed_round.prior_items)
+        next_unresolved_item_number = resumed_round.next_unresolved_item_number
+        start_round_number = resumed_round.round_number
+        log(config, f"Planning issue #{issue_number}: resuming round {start_round_number}")
 
-    for round_number in range(1, config.max_rounds + 1):
-        prior_unresolved_items = tuple(unresolved_items)
+    for round_number in range(start_round_number, config.max_rounds + 1):
+        current_resume = resumed_round if resumed_round is not None and round_number == resumed_round.round_number else None
+        prior_unresolved_items = current_resume.prior_items if current_resume is not None else tuple(unresolved_items)
         prior_dispositions: dict[str, list[ReviewItemDisposition]] = {
             item.item_id: [] for item in prior_unresolved_items
         }
@@ -1207,37 +1516,53 @@ def _run_plan_first_loop(
         round_approved_future_followups: list[ApprovedFollowup] = []
         blocking_reviews: list[tuple[str, str]] = []
         all_approved = True
+        resumed_by_name = {
+            record.metadata.agent: record for record in (current_resume.completed_reviews if current_resume is not None else ())
+        }
         for reviewer in configured_reviewers:
             reviewer_name = agent_display_name(reviewer)
-            log(config, f"Planning round {round_number}: {reviewer_name} reviewing issue #{issue_number}")
-            review_response = _run_validated_agent(
-                runner,
-                agent=reviewer,
-                config=config,
-                prompt=build_plan_review_prompt(
-                    issue_number,
-                    round_number,
-                    current_plan,
-                    config,
-                    reviewer=reviewer,
-                    memory=memory,
-                    issue_context=issue_context,
-                    unresolved_items=prior_unresolved_items,
-                ),
-                session_id=reviewer_session_ids.get(reviewer),
-                marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
-                validate=lambda text, reviewer_name=reviewer_name, items=prior_unresolved_items: _validate_plan_review_response(
-                    text,
-                    reviewer=reviewer_name,
-                    unresolved_items=items,
-                ),
-                usage_context=usage_context,
-            )
-            review_output = review_response.text
-            reviewer_session_ids[reviewer] = review_response.session_id
-            parsed_review = review_response.marker_value
-            assert isinstance(parsed_review, ParsedPlanReview)
-            review_state = parsed_review.state
+            resumed_record = resumed_by_name.get(reviewer_name)
+            if resumed_record is not None:
+                review_output = resumed_record.body
+                parsed_review = ParsedPlanReview(
+                    state=resumed_record.metadata.state or parse_plan_state(review_output),
+                    items=parse_plan_review(review_output, reviewer=reviewer_name).items,
+                    dispositions=resumed_record.metadata.dispositions,
+                )
+                review_state = parsed_review.state
+                log(config, f"Planning round {round_number}: resuming {reviewer_name}'s completed review")
+                reviewer_new_unresolved_items = list(resumed_record.metadata.new_items)
+            else:
+                log(config, f"Planning round {round_number}: {reviewer_name} reviewing issue #{issue_number}")
+                review_response = _run_validated_agent(
+                    runner,
+                    agent=reviewer,
+                    config=config,
+                    prompt=build_plan_review_prompt(
+                        issue_number,
+                        round_number,
+                        current_plan,
+                        config,
+                        reviewer=reviewer,
+                        memory=memory,
+                        issue_context=issue_context,
+                        unresolved_items=prior_unresolved_items,
+                    ),
+                    session_id=reviewer_session_ids.get(reviewer),
+                    marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+                    validate=lambda text, reviewer_name=reviewer_name, items=prior_unresolved_items: _validate_plan_review_response(
+                        text,
+                        reviewer=reviewer_name,
+                        unresolved_items=items,
+                    ),
+                    usage_context=usage_context,
+                )
+                review_output = review_response.text
+                reviewer_session_ids[reviewer] = review_response.session_id
+                parsed_review = review_response.marker_value
+                assert isinstance(parsed_review, ParsedPlanReview)
+                review_state = parsed_review.state
+                reviewer_new_unresolved_items = []
             log(
                 config,
                 "Planning round "
@@ -1245,56 +1570,76 @@ def _run_plan_first_loop(
             )
             for disposition in parsed_review.dispositions:
                 prior_dispositions[disposition.item_id].append(disposition)
-            reviewer_new_unresolved_items: list[UnresolvedReviewItem] = []
             if review_state == "blocking":
                 all_approved = False
                 blocking_reviews.append((reviewer_name, review_output))
-            for item in parsed_review.items.blocking:
-                tracked_item = _next_unresolved_item(
-                    item_number=next_unresolved_item_number,
-                    reviewer=item.reviewer,
-                    source_round=round_number,
-                    text=item.text,
-                    status="blocking",
+            if resumed_record is None:
+                for item in parsed_review.items.blocking:
+                    tracked_item = _next_unresolved_item(
+                        item_number=next_unresolved_item_number,
+                        reviewer=item.reviewer,
+                        source_round=round_number,
+                        text=item.text,
+                        status="blocking",
+                    )
+                    round_new_unresolved_items.append(tracked_item)
+                    reviewer_new_unresolved_items.append(tracked_item)
+                    next_unresolved_item_number += 1
+                for item in parsed_review.items.same_plan:
+                    tracked_item = _next_unresolved_item(
+                        item_number=next_unresolved_item_number,
+                        reviewer=item.reviewer,
+                        source_round=round_number,
+                        text=item.text,
+                        status="same-plan",
+                    )
+                    round_new_unresolved_items.append(tracked_item)
+                    reviewer_new_unresolved_items.append(tracked_item)
+                    next_unresolved_item_number += 1
+                for item in parsed_review.items.future:
+                    tracked_item = _next_unresolved_item(
+                        item_number=next_unresolved_item_number,
+                        reviewer=item.reviewer,
+                        source_round=round_number,
+                        text=item.text,
+                        status="future",
+                    )
+                    round_new_unresolved_items.append(tracked_item)
+                    reviewer_new_unresolved_items.append(tracked_item)
+                    next_unresolved_item_number += 1
+                    round_approved_future_followups.append(item)
+                post_issue_comment(
+                    runner,
+                    config=config,
+                    issue_number=issue_number,
+                    body=_attach_round_metadata(
+                        _render_public_review_comment(
+                            review_output,
+                            review_kind="plan",
+                            prior_items=prior_unresolved_items,
+                            dispositions=parsed_review.dispositions,
+                            new_items=reviewer_new_unresolved_items,
+                        ),
+                        PostedRoundMetadata(
+                            flow="plan",
+                            role="reviewer",
+                            agent=reviewer_name,
+                            round_number=round_number,
+                            subject=_plan_subject(current_plan),
+                            prior_items=prior_unresolved_items,
+                            dispositions=parsed_review.dispositions,
+                            new_items=tuple(reviewer_new_unresolved_items),
+                            state=review_state,
+                        ),
+                    ),
                 )
-                round_new_unresolved_items.append(tracked_item)
-                reviewer_new_unresolved_items.append(tracked_item)
-                next_unresolved_item_number += 1
-            for item in parsed_review.items.same_plan:
-                tracked_item = _next_unresolved_item(
-                    item_number=next_unresolved_item_number,
-                    reviewer=item.reviewer,
-                    source_round=round_number,
-                    text=item.text,
-                    status="same-plan",
+            else:
+                round_new_unresolved_items.extend(reviewer_new_unresolved_items)
+                round_approved_future_followups.extend(
+                    _approved_followup_from_unresolved_item(item)
+                    for item in reviewer_new_unresolved_items
+                    if item.status == "future"
                 )
-                round_new_unresolved_items.append(tracked_item)
-                reviewer_new_unresolved_items.append(tracked_item)
-                next_unresolved_item_number += 1
-            for item in parsed_review.items.future:
-                tracked_item = _next_unresolved_item(
-                    item_number=next_unresolved_item_number,
-                    reviewer=item.reviewer,
-                    source_round=round_number,
-                    text=item.text,
-                    status="future",
-                )
-                round_new_unresolved_items.append(tracked_item)
-                reviewer_new_unresolved_items.append(tracked_item)
-                next_unresolved_item_number += 1
-                round_approved_future_followups.append(item)
-            post_issue_comment(
-                runner,
-                config=config,
-                issue_number=issue_number,
-                body=_render_public_review_comment(
-                    review_output,
-                    review_kind="plan",
-                    prior_items=prior_unresolved_items,
-                    dispositions=parsed_review.dispositions,
-                    new_items=reviewer_new_unresolved_items,
-                ),
-            )
 
         unresolved_items, future_from_prior_items = _apply_unresolved_item_dispositions(
             prior_unresolved_items,
@@ -1356,7 +1701,22 @@ def _run_plan_first_loop(
                 pr_number=pr_number,
                 issue_number=issue_number,
             )
-            post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
+            post_pr_comment(
+                runner,
+                config=config,
+                pr_number=pr_number,
+                body=_attach_round_metadata(
+                    coder_output,
+                    PostedRoundMetadata(
+                        flow="pr",
+                        role="coder",
+                        agent=coder_name,
+                        round_number=1,
+                        subject=str(get_pr_review_context(runner, config=config, pr_number=pr_number).metadata.head_sha or "unknown"),
+                        prior_items=(),
+                    ),
+                ),
+            )
             return run_pr_loop(
                 runner,
                 pr_number=pr_number,
@@ -1397,7 +1757,24 @@ def _run_plan_first_loop(
         )
         current_plan = plan_response.text
         coder_session_id = plan_response.session_id
-        post_issue_comment(runner, config=config, issue_number=issue_number, body=current_plan)
+        post_issue_comment(
+            runner,
+            config=config,
+            issue_number=issue_number,
+            body=_attach_round_metadata(
+                current_plan,
+                PostedRoundMetadata(
+                    flow="plan",
+                    role="coder",
+                    agent=coder_name,
+                    round_number=round_number + 1,
+                    subject=_plan_subject(current_plan),
+                    prior_items=tuple(must_fix_items),
+                ),
+            ),
+        )
+        unresolved_items = list(must_fix_items)
+        resumed_round = None
 
     raise AgentLoopError(
         f"Reached max planning rounds ({config.max_rounds}) for issue #{issue_number}; "
@@ -1454,8 +1831,23 @@ def run_issue_loop(
             pr_number=pr_number,
             issue_number=issue_number,
         )
-
-        post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
+        initial_pr_metadata = get_pr_review_context(runner, config=config, pr_number=pr_number).metadata
+        post_pr_comment(
+            runner,
+            config=config,
+            pr_number=pr_number,
+            body=_attach_round_metadata(
+                coder_output,
+                PostedRoundMetadata(
+                    flow="pr",
+                    role="coder",
+                    agent=agent_display_name(config.coder),
+                    round_number=1,
+                    subject=str(initial_pr_metadata.head_sha or "unknown"),
+                    prior_items=(),
+                ),
+            ),
+        )
         return run_pr_loop(
             runner,
             pr_number=pr_number,
@@ -1536,7 +1928,23 @@ def run_task_loop(
                 pr_number = coder_response.marker_value
                 log(config, f"{coder_name} reported PR #{pr_number}; validating it is open")
                 validate_open_pr(runner, config=config, pr_number=pr_number)
-                post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
+                initial_pr_metadata = get_pr_review_context(runner, config=config, pr_number=pr_number).metadata
+                post_pr_comment(
+                    runner,
+                    config=config,
+                    pr_number=pr_number,
+                    body=_attach_round_metadata(
+                        coder_output,
+                        PostedRoundMetadata(
+                            flow="pr",
+                            role="coder",
+                            agent=coder_name,
+                            round_number=1,
+                            subject=str(initial_pr_metadata.head_sha or "unknown"),
+                            prior_items=(),
+                        ),
+                    ),
+                )
                 return run_pr_loop(
                     runner,
                     pr_number=pr_number,
@@ -1600,21 +2008,44 @@ def run_pr_loop(
         unresolved_items: list[UnresolvedReviewItem] = []
         latest_coder_output: str | None = None
         next_unresolved_item_number = 1
+        start_round_number = 1
+        resumed_round: ResumedReviewRound | None = None
         if reviewer_session_id is not None and configured_reviewers:
             # Backward-compatible single-reviewer resume support: older callers
             # pass one reviewer session, so attach it to the first configured reviewer.
             reviewer_session_ids[configured_reviewers[0]] = reviewer_session_id
-        for round_number in range(1, config.max_rounds + 1):
+        initial_pr_context = get_pr_review_context(runner, config=config, pr_number=pr_number)
+        prefetched_pr_context: PullRequestReviewContext | None = None
+        resumed_round = _resume_pr_round(
+            initial_pr_context.comments,
+            head_sha=initial_pr_context.metadata.head_sha,
+            configured_reviewers=configured_reviewers,
+        )
+        if resumed_round is not None:
+            unresolved_items = list(resumed_round.prior_items)
+            latest_coder_output = resumed_round.coder_output
+            next_unresolved_item_number = resumed_round.next_unresolved_item_number
+            start_round_number = resumed_round.round_number
+            log(config, f"PR #{pr_number}: resuming round {start_round_number}")
+        for round_number in range(start_round_number, config.max_rounds + 1):
             coder_name = agent_display_name(config.coder)
             if pre_review_test_pending:
                 run_pre_review_tests(runner, config)
                 pre_review_test_pending = False
-            pr_context = get_pr_review_context(runner, config=config, pr_number=pr_number)
+            if round_number == start_round_number:
+                pr_context = initial_pr_context
+            elif prefetched_pr_context is not None:
+                pr_context = prefetched_pr_context
+                prefetched_pr_context = None
+            else:
+                pr_context = get_pr_review_context(runner, config=config, pr_number=pr_number)
+            initial_pr_context = pr_context
             pr_metadata = pr_context.metadata
             pr_comments = pr_context.comments
             human_requirements = pr_context.human_requirements
+            current_resume = resumed_round if resumed_round is not None and round_number == resumed_round.round_number else None
             unresolved_items = _reconcile_human_requirements_ack_item(
-                unresolved_items,
+                current_resume.prior_items if current_resume is not None else unresolved_items,
                 coder_output=latest_coder_output,
                 human_requirements=human_requirements,
                 source_round=round_number,
@@ -1626,40 +2057,56 @@ def run_pr_loop(
             round_new_unresolved_items: list[UnresolvedReviewItem] = []
             approved_review_outputs: list[tuple[str, str]] = []
             pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
+            resumed_by_name = {
+                record.metadata.agent: record for record in (current_resume.completed_reviews if current_resume is not None else ())
+            }
             for reviewer in configured_reviewers:
                 reviewer_name = agent_display_name(reviewer)
-                log(config, f"Round {round_number}: {reviewer_name} reviewing PR #{pr_number}")
-                sync_reviewer_pr_before_review(config, runner, reviewer, pr_number, pr_metadata)
-                review_response = _run_validated_agent(
-                    runner,
-                    agent=reviewer,
-                    config=config,
-                    prompt=build_review_prompt(
-                        pr_number,
-                        round_number,
-                        config,
-                        reviewer=reviewer,
-                        pr_metadata=pr_metadata,
-                        pr_checks=pr_checks,
-                        memory=memory,
-                        issue_context=issue_context,
-                        human_requirements=human_requirements,
-                        unresolved_items=prior_unresolved_items,
-                    ),
-                    session_id=reviewer_session_ids.get(reviewer),
-                    marker_description="<!-- AGENT_STATE: approved|blocking -->",
-                    validate=lambda text, reviewer_name=reviewer_name, items=prior_unresolved_items: _validate_review_response(
-                        text,
-                        reviewer=reviewer_name,
-                        unresolved_items=items,
-                    ),
-                    usage_context=usage_context,
-                )
-                review_output = review_response.text
-                reviewer_session_ids[reviewer] = review_response.session_id
-                parsed_review = review_response.marker_value
-                assert isinstance(parsed_review, ParsedReview)
-                review_state = parsed_review.state
+                resumed_record = resumed_by_name.get(reviewer_name)
+                if resumed_record is not None:
+                    review_output = resumed_record.body
+                    parsed_review = ParsedReview(
+                        state=resumed_record.metadata.state or parse_agent_state(review_output),
+                        followups=parse_review(review_output, reviewer=reviewer_name).followups,
+                        dispositions=resumed_record.metadata.dispositions,
+                    )
+                    review_state = parsed_review.state
+                    reviewer_new_unresolved_items = list(resumed_record.metadata.new_items)
+                    log(config, f"Round {round_number}: resuming {reviewer_name}'s completed review")
+                else:
+                    log(config, f"Round {round_number}: {reviewer_name} reviewing PR #{pr_number}")
+                    sync_reviewer_pr_before_review(config, runner, reviewer, pr_number, pr_metadata)
+                    review_response = _run_validated_agent(
+                        runner,
+                        agent=reviewer,
+                        config=config,
+                        prompt=build_review_prompt(
+                            pr_number,
+                            round_number,
+                            config,
+                            reviewer=reviewer,
+                            pr_metadata=pr_metadata,
+                            pr_checks=pr_checks,
+                            memory=memory,
+                            issue_context=issue_context,
+                            human_requirements=human_requirements,
+                            unresolved_items=prior_unresolved_items,
+                        ),
+                        session_id=reviewer_session_ids.get(reviewer),
+                        marker_description="<!-- AGENT_STATE: approved|blocking -->",
+                        validate=lambda text, reviewer_name=reviewer_name, items=prior_unresolved_items: _validate_review_response(
+                            text,
+                            reviewer=reviewer_name,
+                            unresolved_items=items,
+                        ),
+                        usage_context=usage_context,
+                    )
+                    review_output = review_response.text
+                    reviewer_session_ids[reviewer] = review_response.session_id
+                    parsed_review = review_response.marker_value
+                    assert isinstance(parsed_review, ParsedReview)
+                    review_state = parsed_review.state
+                    reviewer_new_unresolved_items = []
 
                 for disposition in parsed_review.dispositions:
                     prior_dispositions[disposition.item_id].append(disposition)
@@ -1674,47 +2121,90 @@ def run_pr_loop(
                     f"Round {round_number}: {reviewer_name} outcome is "
                     f"{_describe_pr_review_outcome(parsed_review, has_blocking_summary=has_blocking_summary)}",
                 )
-                reviewer_new_unresolved_items: list[UnresolvedReviewItem] = []
                 if review_state == "blocking":
-                    if has_blocking_summary:
-                        tracked_item = _next_unresolved_item(
-                            item_number=next_unresolved_item_number,
-                            reviewer=reviewer_name,
-                            source_round=round_number,
-                            text=blocking_summary,
-                            status="blocking",
-                        )
-                        round_new_unresolved_items.append(tracked_item)
-                        reviewer_new_unresolved_items.append(tracked_item)
-                        next_unresolved_item_number += 1
-                    if parsed_review.followups.same_pr:
-                        if config.approved_followups.startswith("fix-and-"):
-                            for followup in parsed_review.followups.same_pr:
-                                tracked_item = _next_unresolved_item(
-                                    item_number=next_unresolved_item_number,
-                                    reviewer=followup.reviewer,
-                                    source_round=round_number,
-                                    text=followup.text,
-                                    status="same-pr",
-                                )
-                                round_new_unresolved_items.append(tracked_item)
-                                reviewer_new_unresolved_items.append(tracked_item)
-                                next_unresolved_item_number += 1
-                        else:
+                    if resumed_record is None:
+                        if has_blocking_summary:
                             tracked_item = _next_unresolved_item(
                                 item_number=next_unresolved_item_number,
                                 reviewer=reviewer_name,
                                 source_round=round_number,
-                                text="\n".join(
-                                    [
-                                        "Blocking review included Same-PR follow-ups, "
-                                        f"but --approved-followups={config.approved_followups} "
-                                        "does not enable a same-PR fix path.",
-                                        "",
-                                        _format_same_pr_followups(parsed_review.followups.same_pr),
-                                    ]
-                                ),
+                                text=blocking_summary,
                                 status="blocking",
+                            )
+                            round_new_unresolved_items.append(tracked_item)
+                            reviewer_new_unresolved_items.append(tracked_item)
+                            next_unresolved_item_number += 1
+                        if parsed_review.followups.same_pr:
+                            if config.approved_followups.startswith("fix-and-"):
+                                for followup in parsed_review.followups.same_pr:
+                                    tracked_item = _next_unresolved_item(
+                                        item_number=next_unresolved_item_number,
+                                        reviewer=followup.reviewer,
+                                        source_round=round_number,
+                                        text=followup.text,
+                                        status="same-pr",
+                                    )
+                                    round_new_unresolved_items.append(tracked_item)
+                                    reviewer_new_unresolved_items.append(tracked_item)
+                                    next_unresolved_item_number += 1
+                            else:
+                                tracked_item = _next_unresolved_item(
+                                    item_number=next_unresolved_item_number,
+                                    reviewer=reviewer_name,
+                                    source_round=round_number,
+                                    text="\n".join(
+                                        [
+                                            "Blocking review included Same-PR follow-ups, "
+                                            f"but --approved-followups={config.approved_followups} "
+                                            "does not enable a same-PR fix path.",
+                                            "",
+                                            _format_same_pr_followups(parsed_review.followups.same_pr),
+                                        ]
+                                    ),
+                                    status="blocking",
+                                )
+                                round_new_unresolved_items.append(tracked_item)
+                                reviewer_new_unresolved_items.append(tracked_item)
+                                next_unresolved_item_number += 1
+                        post_pr_comment(
+                            runner,
+                            config=config,
+                            pr_number=pr_number,
+                            body=_attach_round_metadata(
+                                _render_public_review_comment(
+                                    review_output,
+                                    review_kind="pr",
+                                    prior_items=prior_unresolved_items,
+                                    dispositions=parsed_review.dispositions,
+                                    new_items=reviewer_new_unresolved_items,
+                                ),
+                                PostedRoundMetadata(
+                                    flow="pr",
+                                    role="reviewer",
+                                    agent=reviewer_name,
+                                    round_number=round_number,
+                                    subject=str(pr_metadata.head_sha or "unknown"),
+                                    prior_items=prior_unresolved_items,
+                                    dispositions=parsed_review.dispositions,
+                                    new_items=tuple(reviewer_new_unresolved_items),
+                                    state=review_state,
+                                ),
+                            ),
+                        )
+                    else:
+                        round_new_unresolved_items.extend(reviewer_new_unresolved_items)
+                    continue
+
+                approved_review_outputs.append((reviewer_name, review_output))
+                if resumed_record is None:
+                    if config.approved_followups != "ignore":
+                        for followup in parsed_review.followups.future:
+                            tracked_item = _next_unresolved_item(
+                                item_number=next_unresolved_item_number,
+                                reviewer=followup.reviewer,
+                                source_round=round_number,
+                                text=followup.text,
+                                status="future",
                             )
                             round_new_unresolved_items.append(tracked_item)
                             reviewer_new_unresolved_items.append(tracked_item)
@@ -1723,41 +2213,29 @@ def run_pr_loop(
                         runner,
                         config=config,
                         pr_number=pr_number,
-                        body=_render_public_review_comment(
-                            review_output,
-                            review_kind="pr",
-                            prior_items=prior_unresolved_items,
-                            dispositions=parsed_review.dispositions,
-                            new_items=reviewer_new_unresolved_items,
+                        body=_attach_round_metadata(
+                            _render_public_review_comment(
+                                review_output,
+                                review_kind="pr",
+                                prior_items=prior_unresolved_items,
+                                dispositions=parsed_review.dispositions,
+                                new_items=reviewer_new_unresolved_items,
+                            ),
+                            PostedRoundMetadata(
+                                flow="pr",
+                                role="reviewer",
+                                agent=reviewer_name,
+                                round_number=round_number,
+                                subject=str(pr_metadata.head_sha or "unknown"),
+                                prior_items=prior_unresolved_items,
+                                dispositions=parsed_review.dispositions,
+                                new_items=tuple(reviewer_new_unresolved_items),
+                                state=review_state,
+                            ),
                         ),
                     )
-                    continue
-
-                approved_review_outputs.append((reviewer_name, review_output))
-                if config.approved_followups != "ignore":
-                    for followup in parsed_review.followups.future:
-                        tracked_item = _next_unresolved_item(
-                            item_number=next_unresolved_item_number,
-                            reviewer=followup.reviewer,
-                            source_round=round_number,
-                            text=followup.text,
-                            status="future",
-                        )
-                        round_new_unresolved_items.append(tracked_item)
-                        reviewer_new_unresolved_items.append(tracked_item)
-                        next_unresolved_item_number += 1
-                post_pr_comment(
-                    runner,
-                    config=config,
-                    pr_number=pr_number,
-                    body=_render_public_review_comment(
-                        review_output,
-                        review_kind="pr",
-                        prior_items=prior_unresolved_items,
-                        dispositions=parsed_review.dispositions,
-                        new_items=reviewer_new_unresolved_items,
-                    ),
-                )
+                else:
+                    round_new_unresolved_items.extend(reviewer_new_unresolved_items)
 
             unresolved_items, _future_items = _apply_unresolved_item_dispositions(
                 prior_unresolved_items,
@@ -1920,10 +2398,28 @@ def run_pr_loop(
                 human_requirements=human_requirements,
                 source_round=round_number,
             )
+            updated_pr_context = get_pr_review_context(runner, config=config, pr_number=pr_number)
 
-            post_pr_comment(runner, config=config, pr_number=pr_number, body=coder_output)
+            post_pr_comment(
+                runner,
+                config=config,
+                pr_number=pr_number,
+                body=_attach_round_metadata(
+                    coder_output,
+                    PostedRoundMetadata(
+                        flow="pr",
+                        role="coder",
+                        agent=coder_name,
+                        round_number=round_number + 1,
+                        subject=str(updated_pr_context.metadata.head_sha or "unknown"),
+                        prior_items=tuple(unresolved_items),
+                    ),
+                ),
+            )
             log(config, f"Round {round_number}: {coder_name} pushed updates for re-review")
             pre_review_test_pending = True
+            resumed_round = None
+            prefetched_pr_context = updated_pr_context
 
         raise AgentLoopError(
             f"Reached max rounds ({config.max_rounds}) for PR #{pr_number}; human review required."
