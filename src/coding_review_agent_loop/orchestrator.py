@@ -74,6 +74,7 @@ from .protocol import (
     parse_plan_review,
     parse_plan_state,
     parse_pr_number,
+    review_freeform_summary_text,
     validate_human_requirements_acknowledgement,
 )
 from .protocol import ApprovedFollowup, parse_review
@@ -569,34 +570,7 @@ def _validate_plan_review_response(
 
 
 def _review_freeform_summary_text(text: str) -> str:
-    lines: list[str] = []
-    skip_structured_section = False
-    structured_heading_res = (
-        SAME_PR_FOLLOWUP_HEADING_RE,
-        FUTURE_FOLLOWUP_HEADING_RE,
-        LEGACY_FOLLOWUP_HEADING_RE,
-        HUMAN_REQUIREMENTS_HEADING_RE,
-        PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE,
-        PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE,
-    )
-    for line in text.splitlines():
-        stripped = line.strip()
-        if any(pattern.match(line) for pattern in structured_heading_res):
-            skip_structured_section = True
-            continue
-        if skip_structured_section and stripped.startswith("### "):
-            skip_structured_section = False
-        if skip_structured_section:
-            continue
-        if not stripped:
-            lines.append("")
-            continue
-        if stripped.startswith("<!--") and stripped.endswith("-->"):
-            continue
-        if stripped.startswith("-- "):
-            continue
-        lines.append(line.rstrip())
-    return "\n".join(lines).strip()
+    return review_freeform_summary_text(text)
 
 
 def _normalize_item_summary(text: str, *, limit: int = ITEM_SUMMARY_LIMIT) -> str:
@@ -1520,6 +1494,7 @@ def _run_plan_first_loop(
                 review_output = resumed_record.body
                 parsed_review = ParsedPlanReview(
                     state=resumed_record.metadata.state or parse_plan_state(review_output),
+                    summary=review_freeform_summary_text(review_output),
                     items=parse_plan_review(review_output, reviewer=reviewer_name).items,
                     dispositions=resumed_record.metadata.dispositions,
                 )
@@ -2061,6 +2036,7 @@ def run_pr_loop(
                     review_output = resumed_record.body
                     parsed_review = ParsedReview(
                         state=resumed_record.metadata.state or parse_agent_state(review_output),
+                        summary=review_freeform_summary_text(review_output),
                         followups=parse_review(review_output, reviewer=reviewer_name).followups,
                         dispositions=resumed_record.metadata.dispositions,
                     )
