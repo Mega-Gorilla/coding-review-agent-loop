@@ -84,12 +84,16 @@ from coding_review_agent_loop.protocol import (
     parse_plan_review,
     parse_plan_review_items,
     parse_plan_state,
+    parse_structured_plan_review,
+    parse_structured_pr_review,
     parse_review,
     parse_non_blocking_followups,
     parse_signed_human_requirement_body,
     parse_unresolved_item_dispositions,
     UnresolvedReviewItem,
     validate_human_requirements_acknowledgement,
+    validate_structured_coder_followup,
+    validate_structured_plan_revision,
 )
 
 
@@ -1983,6 +1987,337 @@ def test_parse_review_rejects_approved_state_with_active_prior_disposition(line)
 
     with pytest.raises(AgentLoopError, match="Approved reviews must be fully complete"):
         parse_review(review, reviewer="OpenAI Codex")
+
+
+def test_parse_review_populates_summary_from_legacy_markdown():
+    review = """
+    Blocking issue summary.
+
+    ### Same-PR follow-ups
+    - Rename the helper.
+
+    <!-- AGENT_STATE: blocking -->
+    -- OpenAI Codex
+    """
+
+    parsed = parse_review(review, reviewer="OpenAI Codex")
+
+    assert parsed.summary == "Blocking issue summary."
+
+
+def test_parse_plan_review_populates_summary_from_legacy_markdown():
+    review = """
+    Plan needs one more regression test.
+
+    ### Same-plan follow-ups
+    - Add a regression test matrix.
+
+    <!-- AGENT_PLAN_STATE: blocking -->
+    -- OpenAI Codex
+    """
+
+    parsed = parse_plan_review(review, reviewer="OpenAI Codex")
+
+    assert parsed.summary == "Plan needs one more regression test."
+
+
+def test_parse_structured_pr_review_normalizes_v1_payload():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "pr_review",
+            "state": "approved",
+            "summary": "Looks good after the latest fix.",
+            "blocking_items": [],
+            "same_pr_followups": [],
+            "future_followups": ["Document cleanup for a later PR."],
+            "prior_item_dispositions": [
+                {"item_id": "item-1", "disposition": "resolved"},
+                {
+                    "item_id": "item-2",
+                    "disposition": "future",
+                    "note": "okay to split into follow-up work",
+                },
+            ],
+        }
+    )
+
+    parsed = parse_structured_pr_review(payload, reviewer="OpenAI Codex")
+
+    assert parsed is not None
+    assert parsed.state == "approved"
+    assert parsed.summary == "Looks good after the latest fix."
+    assert [item.text for item in parsed.followups.future] == ["Document cleanup for a later PR."]
+    assert [(item.item_id, item.disposition, item.note) for item in parsed.dispositions] == [
+        ("item-1", "resolved", None),
+        ("item-2", "future", "okay to split into follow-up work"),
+    ]
+
+
+def test_parse_structured_pr_review_rejects_kind_mismatch():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "plan_review",
+            "state": "approved",
+            "summary": "Wrong kind.",
+            "blocking_plan_issues": [],
+            "same_plan_followups": [],
+            "future_followups": [],
+            "prior_plan_item_dispositions": [],
+        }
+    )
+
+    with pytest.raises(AgentLoopError, match="kind mismatch"):
+        parse_structured_pr_review(payload, reviewer="OpenAI Codex")
+
+
+def test_parse_structured_pr_review_hard_fails_on_unsupported_schema_version():
+    payload = json.dumps(
+        {
+            "schema_version": 2,
+            "kind": "pr_review",
+            "state": "approved",
+            "summary": "Wrong version.",
+            "blocking_items": [],
+            "same_pr_followups": [],
+            "future_followups": [],
+            "prior_item_dispositions": [],
+        }
+    )
+
+    with pytest.raises(AgentLoopError, match="Unsupported structured response schema_version: 2"):
+        parse_structured_pr_review(payload, reviewer="OpenAI Codex")
+
+
+def test_parse_structured_pr_review_falls_back_on_malformed_json():
+    assert parse_structured_pr_review('{"schema_version": 1,', reviewer="OpenAI Codex") is None
+
+
+def test_parse_structured_pr_review_falls_back_on_invalid_fields():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "pr_review",
+            "state": "approved",
+            "summary": "Missing required arrays.",
+            "blocking_items": [],
+            "same_pr_followups": [],
+            "future_followups": [],
+        }
+    )
+
+    assert parse_structured_pr_review(payload, reviewer="OpenAI Codex") is None
+
+
+def test_parse_structured_pr_review_rejects_future_followups_in_blocking_reviews():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "pr_review",
+            "state": "blocking",
+            "summary": "Still blocked.",
+            "blocking_items": ["Needs one more test."],
+            "same_pr_followups": [],
+            "future_followups": ["Clean this up later."],
+            "prior_item_dispositions": [],
+        }
+    )
+
+    with pytest.raises(AgentLoopError, match="Blocking structured reviews may not include future"):
+        parse_structured_pr_review(payload, reviewer="OpenAI Codex")
+
+
+def test_parse_structured_pr_review_rejects_unknown_nested_keys_via_fallback():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "pr_review",
+            "state": "approved",
+            "summary": "LGTM.",
+            "blocking_items": [],
+            "same_pr_followups": [],
+            "future_followups": [],
+            "prior_item_dispositions": [
+                {"item_id": "item-1", "disposition": "resolved", "extra": "nope"},
+            ],
+        }
+    )
+
+    assert parse_structured_pr_review(payload, reviewer="OpenAI Codex") is None
+
+
+def test_parse_structured_pr_review_rejects_invalid_item_id_via_fallback():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "pr_review",
+            "state": "approved",
+            "summary": "LGTM.",
+            "blocking_items": [],
+            "same_pr_followups": [],
+            "future_followups": [],
+            "prior_item_dispositions": [
+                {"item_id": "item 1", "disposition": "resolved"},
+            ],
+        }
+    )
+
+    assert parse_structured_pr_review(payload, reviewer="OpenAI Codex") is None
+
+
+def test_parse_structured_pr_review_requires_strict_disposition_enums():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "pr_review",
+            "state": "approved",
+            "summary": "LGTM.",
+            "blocking_items": [],
+            "same_pr_followups": [],
+            "future_followups": [],
+            "prior_item_dispositions": [
+                {"item_id": "item-1", "disposition": "still blocking"},
+            ],
+        }
+    )
+
+    assert parse_structured_pr_review(payload, reviewer="OpenAI Codex") is None
+
+
+def test_parse_structured_pr_review_falls_back_when_json_is_embedded_in_markdown():
+    review = """
+    Here is an example:
+
+    ```json
+    {"schema_version": 1, "kind": "pr_review"}
+    ```
+
+    <!-- AGENT_STATE: approved -->
+    -- OpenAI Codex
+    """
+
+    assert parse_structured_pr_review(review, reviewer="OpenAI Codex") is None
+    assert parse_review(review, reviewer="OpenAI Codex").state == "approved"
+
+
+def test_parse_structured_plan_review_normalizes_v1_payload():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "plan_review",
+            "state": "approved",
+            "summary": "Plan looks good.",
+            "blocking_plan_issues": [],
+            "same_plan_followups": [],
+            "future_followups": ["Consider a later cleanup pass."],
+            "prior_plan_item_dispositions": [{"item_id": "item-1", "disposition": "resolved"}],
+        }
+    )
+
+    parsed = parse_structured_plan_review(payload, reviewer="OpenAI Codex")
+
+    assert parsed is not None
+    assert parsed.summary == "Plan looks good."
+    assert [item.text for item in parsed.items.future] == ["Consider a later cleanup pass."]
+    assert [(item.item_id, item.disposition) for item in parsed.dispositions] == [
+        ("item-1", "resolved")
+    ]
+
+
+def test_parse_structured_plan_review_rejects_blocking_future_followups():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "plan_review",
+            "state": "blocking",
+            "summary": "Still blocked.",
+            "blocking_plan_issues": ["Need clearer rollback coverage."],
+            "same_plan_followups": [],
+            "future_followups": ["Refactor the prompt later."],
+            "prior_plan_item_dispositions": [],
+        }
+    )
+
+    with pytest.raises(AgentLoopError, match="Blocking structured plan reviews may not include future"):
+        parse_structured_plan_review(payload, reviewer="OpenAI Codex")
+
+
+def test_validate_structured_coder_followup_accepts_v1_payload():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "coder_followup",
+            "state": "blocking",
+            "summary": "Addressed the first item; one remains.",
+            "addressed_items": ["item-1"],
+            "remaining_items": ["item-2"],
+            "human_requirements": {
+                "addressed_ids": ["Requirement 1"],
+                "checked_discussion_directly": False,
+            },
+            "tests_run": ["python -m pytest tests/test_agent_loop.py -k structured"],
+        }
+    )
+
+    parsed = validate_structured_coder_followup(payload)
+
+    assert parsed is not None
+    assert parsed.addressed_items == ("item-1",)
+    assert parsed.remaining_items == ("item-2",)
+    assert parsed.human_requirements.addressed_ids == ("Requirement 1",)
+
+
+def test_validate_structured_coder_followup_rejects_unknown_keys_via_fallback():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "coder_followup",
+            "state": "approved",
+            "summary": "Done.",
+            "addressed_items": [],
+            "remaining_items": [],
+            "human_requirements": {
+                "addressed_ids": [],
+                "checked_discussion_directly": True,
+                "extra": "nope",
+            },
+        }
+    )
+
+    assert validate_structured_coder_followup(payload) is None
+
+
+def test_validate_structured_plan_revision_accepts_v1_payload():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "plan_revision",
+            "state": "blocking",
+            "summary": "Revised the plan to cover rollback testing.",
+            "plan_steps": ["Update protocol.py.", "Add regression tests."],
+        }
+    )
+
+    parsed = validate_structured_plan_revision(payload)
+
+    assert parsed is not None
+    assert parsed.state == "blocking"
+    assert parsed.plan_steps == ("Update protocol.py.", "Add regression tests.")
+
+
+def test_validate_structured_plan_revision_rejects_non_blocking_state_via_fallback():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "plan_revision",
+            "state": "approved",
+            "summary": "Wrong state.",
+            "plan_steps": ["Update protocol.py."],
+        }
+    )
+
+    assert validate_structured_plan_revision(payload) is None
 
 
 def test_review_prompt_includes_prior_unresolved_items_and_disposition_instructions(tmp_path):
