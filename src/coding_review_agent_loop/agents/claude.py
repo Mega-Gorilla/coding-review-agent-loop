@@ -96,9 +96,12 @@ class ClaudeBackend:
             check=False,
         )
         log(config, f"Claude finished; log: {log_path}")
-        text, new_session_id, usage, raw_usage = _parse_claude_output(result.stdout)
+        message_text, new_session_id, usage, raw_usage = _parse_claude_output(result.stdout)
+        response_file_text = read_public_response_file(response_path)
         return AgentResult(
-            text=read_public_response_file(response_path) or text,
+            text=response_file_text or message_text,
+            response_file_text=response_file_text,
+            message_text=message_text,
             session_id=new_session_id,
             log_path=log_path,
             returncode=result.returncode,

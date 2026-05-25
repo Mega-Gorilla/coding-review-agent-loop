@@ -8,7 +8,13 @@ import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .base import AgentName, AgentResult
+from .base import (
+    AgentName,
+    AgentResult,
+    public_response_path,
+    read_public_response_file,
+    with_public_response_file_instruction,
+)
 from ..logging import agent_log_path, log
 from ..runner import Runner
 from ..usage import UsageMetadata, coerce_int, first_present
@@ -76,6 +82,15 @@ def _extract_codex_usage(raw: str) -> tuple[UsageMetadata | None, object | None]
     return None, last_usage
 
 
+def _read_codex_message_file(output_path: Path) -> str | None:
+    try:
+        text = output_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    text = text.strip()
+    return text or None
+
+
 class CodexBackend:
     name: AgentName = "codex"
     display_name = "Codex"
@@ -96,7 +111,12 @@ class CodexBackend:
         run_id: str | None = None,
     ) -> AgentResult:
         log_path = agent_log_path(config, "codex", run_id=run_id)
-        log(config, f"Starting Codex in {config.codex_dir}; log: {log_path}")
+        response_path = public_response_path(config, "codex")
+        prompt_with_response_file = with_public_response_file_instruction(prompt, response_path)
+        log(
+            config,
+            f"Starting Codex in {config.codex_dir}; log: {log_path}; response: {response_path}",
+        )
         if config.dry_run:
             result = runner.run(
                 [
@@ -110,7 +130,12 @@ class CodexBackend:
                 cwd=config.codex_dir,
             )
             log(config, f"Codex finished; log: {log_path}")
-            return AgentResult(text=result.stdout, log_path=log_path, returncode=result.returncode)
+            return AgentResult(
+                text=result.stdout,
+                message_text=result.stdout,
+                log_path=log_path,
+                returncode=result.returncode,
+            )
 
         with tempfile.NamedTemporaryFile("r", encoding="utf-8", delete=False) as handle:
             output_path = handle.name
@@ -125,7 +150,7 @@ class CodexBackend:
                     "--output-last-message",
                     output_path,
                     *config.codex_args,
-                    prompt,
+                    prompt_with_response_file,
                 ],
                 cwd=config.codex_dir,
                 log_path=log_path,
@@ -133,13 +158,14 @@ class CodexBackend:
                 progress_interval_seconds=config.progress_interval_seconds,
                 check=False,
             )
-            output = Path(output_path).read_text(encoding="utf-8") if Path(output_path).exists() else ""
-            if not output:
-                output = result.stdout
+            response_file_text = read_public_response_file(response_path)
+            message_text = _read_codex_message_file(Path(output_path)) or result.stdout
             usage, raw_usage = _extract_codex_usage(result.stdout)
             log(config, f"Codex finished; log: {log_path}")
             return AgentResult(
-                text=output,
+                text=response_file_text or message_text,
+                response_file_text=response_file_text,
+                message_text=message_text,
                 log_path=log_path,
                 returncode=result.returncode,
                 usage=usage,
