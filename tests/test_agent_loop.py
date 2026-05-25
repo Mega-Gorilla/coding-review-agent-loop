@@ -90,6 +90,7 @@ from coding_review_agent_loop.protocol import (
     parse_non_blocking_followups,
     parse_signed_human_requirement_body,
     parse_unresolved_item_dispositions,
+    ReviewItemDisposition,
     UnresolvedReviewItem,
     validate_human_requirements_acknowledgement,
     validate_structured_coder_followup,
@@ -2600,6 +2601,49 @@ def test_render_public_review_comment_replaces_dispositions_without_exposing_sam
     assert "### New tracked unresolved items" not in rendered
     assert "[item-2]" not in rendered
     assert rendered.rstrip().endswith("-- OpenAI Codex")
+
+
+def test_render_public_review_comment_preserves_unknown_disposition_values():
+    body = """Still blocked.
+
+### Prior unresolved item dispositions
+- [item-1] same-pr
+
+<!-- AGENT_STATE: blocking -->
+-- OpenAI Codex
+"""
+    prior_items = (
+        UnresolvedReviewItem(
+            item_id="item-1",
+            reviewer="Google Gemini",
+            source_round=1,
+            text="Keep the parser and renderer aligned when new dispositions are added.",
+            status="same-pr",
+        ),
+    )
+    dispositions = (
+        ReviewItemDisposition(
+            item_id="item-1",
+            reviewer="OpenAI Codex",
+            disposition="deferred",
+            note="tracked for a later parser update",
+        ),
+    )
+
+    rendered = _render_public_review_comment(
+        body,
+        review_kind="pr",
+        prior_items=prior_items,
+        dispositions=dispositions,
+        new_items=(),
+    )
+
+    assert (
+        "### Prior unresolved item dispositions\n"
+        "- [item-1] Same-PR follow-up from Google Gemini, round 1: "
+        "Keep the parser and renderer aligned when new dispositions are added. "
+        "-> deferred: tracked for a later parser update"
+    ) in rendered
 
 
 def test_apply_unresolved_item_dispositions_appends_disposition_notes_to_text():
