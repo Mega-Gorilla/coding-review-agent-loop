@@ -820,6 +820,7 @@ def validate_structured_plan_revision(text: str) -> StructuredPlanRevision | Non
         state = _expect_non_empty_string(payload["state"], context="plan_revision.state")
         if state != "blocking":
             raise AgentLoopError("plan_revision.state must be `blocking`.")
+        summary = _expect_non_empty_string(payload["summary"], context="plan_revision.summary")
         plan_steps = _expect_string_list(
             payload["plan_steps"],
             context="plan_revision.plan_steps",
@@ -831,7 +832,7 @@ def validate_structured_plan_revision(text: str) -> StructuredPlanRevision | Non
         schema_version=1,
         kind="plan_revision",
         state="blocking",
-        summary=_expect_non_empty_string(payload["summary"], context="plan_revision.summary"),
+        summary=summary,
         plan_steps=plan_steps,
     )
 

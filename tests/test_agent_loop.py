@@ -2320,6 +2320,20 @@ def test_validate_structured_plan_revision_rejects_non_blocking_state_via_fallba
     assert validate_structured_plan_revision(payload) is None
 
 
+def test_validate_structured_plan_revision_falls_back_on_empty_summary():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "plan_revision",
+            "state": "blocking",
+            "summary": "",
+            "plan_steps": ["Update protocol.py."],
+        }
+    )
+
+    assert validate_structured_plan_revision(payload) is None
+
+
 def test_review_prompt_includes_prior_unresolved_items_and_disposition_instructions(tmp_path):
     config = make_config(tmp_path, approved_followups="fix-and-summarize")
     prompt = build_review_prompt(
