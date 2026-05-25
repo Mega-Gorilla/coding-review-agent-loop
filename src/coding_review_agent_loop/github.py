@@ -46,6 +46,7 @@ class IssueContext:
     body: str | None
     url: str | None
     comments: tuple[IssueComment, ...]
+    human_requirements: tuple[HumanReviewRequirement, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -555,6 +556,7 @@ def get_issue_context(runner: Runner, *, config: AgentLoopConfig, issue_number: 
             body=None,
             url=None,
             comments=(),
+            human_requirements=(),
         )
 
     result = runner.run(
@@ -567,33 +569,53 @@ def get_issue_context(runner: Runner, *, config: AgentLoopConfig, issue_number: 
             config.repo,
             "--comments",
             "--json",
-            "number,title,body,url,comments",
+            "number,title,body,url,author,createdAt,comments",
         ],
         cwd=active_workdir(config),
     )
     data = json.loads(result.stdout or "{}")
-    comments: list[IssueComment] = []
-    for raw_comment in data.get("comments") or []:
-        author = raw_comment.get("author")
-        if isinstance(author, dict):
-            author_name = author.get("login")
-        else:
-            author_name = None
-        comments.append(
-            IssueComment(
-                author=author_name,
-                created_at=raw_comment.get("createdAt") or raw_comment.get("created_at"),
-                body=raw_comment.get("body"),
-            )
-        )
+    comments = _parse_issue_comments(data.get("comments"))
     return IssueContext(
         number=int(data.get("number") or issue_number),
         repo=config.repo,
-        title=data.get("title"),
-        body=data.get("body"),
-        url=data.get("url"),
-        comments=tuple(sorted(comments, key=_comment_sort_key)),
+        title=_optional_str(data.get("title")),
+        body=_optional_str(data.get("body")),
+        url=_optional_str(data.get("url")),
+        comments=comments,
+        human_requirements=_parse_issue_human_requirements(data),
     )
+
+
+def _parse_issue_human_requirements(data: dict[str, object]) -> tuple[HumanReviewRequirement, ...]:
+    requirements: list[HumanReviewRequirement] = []
+    issue_body = parse_signed_human_requirement_body(_optional_str(data.get("body")))
+    if issue_body is not None:
+        requirements.append(
+            HumanReviewRequirement(
+                source_type="Issue body",
+                author=_author_login(data.get("author")),
+                created_at=_optional_str(data.get("createdAt")) or _optional_str(data.get("created_at")),
+                url=_optional_str(data.get("url")),
+                body=issue_body,
+            )
+        )
+    for raw_comment in data.get("comments") or []:
+        if not isinstance(raw_comment, dict):
+            continue
+        body = parse_signed_human_requirement_body(_optional_str(raw_comment.get("body")))
+        if body is None:
+            continue
+        requirements.append(
+            HumanReviewRequirement(
+                source_type="Issue comment",
+                author=_author_login(raw_comment.get("author")),
+                created_at=_optional_str(raw_comment.get("createdAt"))
+                or _optional_str(raw_comment.get("created_at")),
+                url=_optional_str(raw_comment.get("url")),
+                body=body,
+            )
+        )
+    return tuple(sorted(requirements, key=_human_requirement_sort_key))
 
 
 def post_pr_comment(

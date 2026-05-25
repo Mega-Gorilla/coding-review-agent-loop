@@ -10,7 +10,9 @@ from dataclasses import dataclass
 from .errors import AgentLoopError
 
 HUMAN_REQUIREMENTS_ADDRESSED_MARKER = "<!-- HUMAN_REQUIREMENTS_ADDRESSED -->"
-HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK = "checked the PR discussion directly before responding"
+HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK = (
+    "checked the relevant GitHub discussion directly before responding"
+)
 
 STATE_RE = re.compile(r"<!--\s*AGENT_STATE:\s*(approved|blocking)\s*-->", re.I)
 PLAN_STATE_RE = re.compile(r"<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*-->", re.I)
