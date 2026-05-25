@@ -620,7 +620,7 @@ def _render_disposition_status(disposition: ReviewItemDisposition) -> str:
         "same-plan": "same-plan",
         "future": "future follow-up",
     }
-    rendered = labels[disposition.disposition]
+    rendered = labels.get(disposition.disposition, disposition.disposition)
     if disposition.note:
         rendered = f"{rendered}: {disposition.note}"
     return rendered
