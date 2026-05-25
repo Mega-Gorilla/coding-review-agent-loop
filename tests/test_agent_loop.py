@@ -6,9 +6,18 @@ from pathlib import Path
 
 import pytest
 
-from coding_review_agent_loop.agents.claude import _normalize_claude_usage, _parse_claude_output
-from coding_review_agent_loop.agents.codex import _extract_codex_usage, _normalize_codex_usage
+from coding_review_agent_loop.agents.claude import (
+    BACKEND as CLAUDE_BACKEND,
+    _normalize_claude_usage,
+    _parse_claude_output,
+)
+from coding_review_agent_loop.agents.codex import (
+    BACKEND as CODEX_BACKEND,
+    _extract_codex_usage,
+    _normalize_codex_usage,
+)
 from coding_review_agent_loop.agents.gemini import (
+    BACKEND as GEMINI_BACKEND,
     PUBLIC_RESPONSE_MARKER,
     _normalize_gemini_usage,
     _parse_gemini_payload,
@@ -229,6 +238,7 @@ class FakeRunner(Runner):
             else:
                 public_response, returncode = output
                 stdout = public_response
+            self._maybe_write_public_response_file(cmd)
             if "--output-last-message" in cmd:
                 out_path = Path(cmd[cmd.index("--output-last-message") + 1])
                 out_path.write_text(public_response, encoding="utf-8")
@@ -954,6 +964,134 @@ def test_extract_codex_usage_reads_turn_completed_jsonl():
         "reasoning_tokens": 11,
         "total_tokens": 206,
     }
+
+
+def test_claude_backend_prefers_response_file_over_message_text(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            json.dumps(
+                {
+                    "result": "stdout message text",
+                    "session_id": "claude-session-1",
+                }
+            )
+        ],
+        public_response_outputs=["response file text"],
+    )
+    config = make_config(tmp_path)
+
+    result = CLAUDE_BACKEND.run(runner, config, "Review this PR.", run_id="run-1")
+
+    assert result.response_file_text == "response file text"
+    assert result.message_text == "stdout message text"
+    assert result.text == "response file text"
+    assert result.session_id == "claude-session-1"
+
+
+def test_gemini_backend_prefers_response_file_over_message_text(tmp_path):
+    runner = FakeRunner(
+        gemini_outputs=[
+            json.dumps(
+                {
+                    "response": f"diagnostic\n{PUBLIC_RESPONSE_MARKER}\nstdout message text",
+                    "session_id": "gemini-session-1",
+                }
+            )
+        ],
+        public_response_outputs=["response file text"],
+    )
+    config = make_config(tmp_path)
+
+    result = GEMINI_BACKEND.run(runner, config, "Review this PR.", run_id="run-1")
+
+    assert result.response_file_text == "response file text"
+    assert result.message_text == "stdout message text"
+    assert result.text == "response file text"
+    assert result.session_id == "gemini-session-1"
+
+
+def test_codex_backend_prefers_response_file_over_last_message_and_stdout(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            {
+                "public_response": "last message text",
+                "stdout": "\n".join(
+                    [
+                        "noisy stdout chatter",
+                        json.dumps(
+                            {
+                                "type": "turn.completed",
+                                "usage": {
+                                    "input_tokens": 12,
+                                    "cached_input_tokens": 3,
+                                    "output_tokens": 4,
+                                    "reasoning_tokens": 1,
+                                    "total_tokens": 20,
+                                },
+                            }
+                        ),
+                    ]
+                ),
+            }
+        ],
+        public_response_outputs=["response file text"],
+    )
+    config = make_config(tmp_path)
+
+    result = CODEX_BACKEND.run(runner, config, "Review this PR.", run_id="run-1")
+
+    assert result.response_file_text == "response file text"
+    assert result.message_text == "last message text"
+    assert result.text == "response file text"
+    assert result.usage is not None
+    assert result.usage.total_tokens == 20
+
+
+def test_codex_backend_prefers_last_message_over_stdout_without_response_file(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            {
+                "public_response": "last message text",
+                "stdout": "raw stdout fallback",
+            }
+        ]
+    )
+    config = make_config(tmp_path)
+
+    result = CODEX_BACKEND.run(runner, config, "Review this PR.", run_id="run-1")
+
+    assert result.response_file_text is None
+    assert result.message_text == "last message text"
+    assert result.text == "last message text"
+
+
+def test_codex_backend_uses_stdout_when_files_are_absent_or_empty(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            {
+                "public_response": "",
+                "stdout": "raw stdout fallback",
+            }
+        ]
+    )
+    config = make_config(tmp_path)
+
+    result = CODEX_BACKEND.run(runner, config, "Review this PR.", run_id="run-1")
+
+    assert result.response_file_text is None
+    assert result.message_text == "raw stdout fallback"
+    assert result.text == "raw stdout fallback"
+
+
+def test_codex_backend_dry_run_sets_message_text_without_response_file(tmp_path):
+    runner = FakeRunner(codex_outputs=[{"stdout": "dry run stdout"}])
+    config = make_config(tmp_path, dry_run=True)
+
+    result = CODEX_BACKEND.run(runner, config, "Review this PR.", run_id="run-1")
+
+    assert result.response_file_text is None
+    assert result.message_text == "dry run stdout"
+    assert result.text == "dry run stdout"
 
 
 def test_parse_agent_state_accepts_html_marker():

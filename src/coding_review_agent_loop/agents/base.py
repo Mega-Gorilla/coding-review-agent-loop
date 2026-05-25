@@ -20,6 +20,8 @@ AgentName = Literal["claude", "codex", "gemini"]
 @dataclass(frozen=True)
 class AgentResult:
     text: str
+    response_file_text: str | None = None
+    message_text: str | None = None
     session_id: str | None = None
     log_path: Path | None = None
     returncode: int = 0
