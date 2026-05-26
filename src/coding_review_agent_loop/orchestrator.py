@@ -68,6 +68,7 @@ from .protocol import (
     SIGNATURE_RE,
     ParsedReview,
     ReviewItemDisposition,
+    StructuredCoderFollowup,
     StructuredPlanRevision,
     UnresolvedReviewItem,
     human_requirements_resolved,
@@ -79,6 +80,8 @@ from .protocol import (
     parse_pr_number,
     review_freeform_summary_text,
     validate_human_requirements_acknowledgement,
+    validate_structured_coder_followup,
+    validate_structured_human_requirements_acknowledgement,
     validate_structured_plan_revision,
 )
 from .protocol import ApprovedFollowup, parse_review
@@ -488,11 +491,20 @@ def _reconcile_human_requirements_ack_item(
 
     prompt_context = render_coder_human_requirements_prompt_context(human_requirements)
     try:
-        validate_human_requirements_acknowledgement(
-            coder_output,
-            surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
-            requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
-        )
+        structured_followup = validate_structured_coder_followup(coder_output)
+        if structured_followup is not None:
+            validate_structured_human_requirements_acknowledgement(
+                structured_followup.human_requirements.addressed_ids,
+                checked_discussion_directly=structured_followup.human_requirements.checked_discussion_directly,
+                surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
+                requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
+            )
+        else:
+            validate_human_requirements_acknowledgement(
+                coder_output,
+                surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
+                requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
+            )
     except AgentLoopError as exc:
         return _upsert_human_requirements_ack_item(
             unresolved_items,
@@ -531,6 +543,65 @@ def _merge_human_requirements(
     combined = list(issue_context.human_requirements if issue_context is not None else ())
     combined.extend(pr_context.human_requirements)
     return tuple(sorted(combined, key=lambda requirement: requirement.created_at or ""))
+
+
+def _validate_structured_coder_followup_items(
+    parsed: StructuredCoderFollowup,
+    *,
+    unresolved_items: Sequence[UnresolvedReviewItem],
+) -> None:
+    expected_ids = [
+        item.item_id for item in unresolved_items if item.item_id != HUMAN_REQUIREMENTS_ACK_ITEM_ID
+    ]
+    listed_ids = [*parsed.addressed_items, *parsed.remaining_items]
+    duplicates = sorted({item_id for item_id in listed_ids if listed_ids.count(item_id) > 1})
+    if duplicates:
+        raise AgentLoopError(
+            "Coder follow-up listed unresolved reviewer item IDs more than once: "
+            + ", ".join(duplicates)
+        )
+    unknown = sorted(set(listed_ids) - set(expected_ids))
+    if unknown:
+        raise AgentLoopError(
+            "Coder follow-up referenced unknown unresolved reviewer item IDs: "
+            + ", ".join(unknown)
+        )
+    missing = sorted(set(expected_ids) - set(listed_ids))
+    if missing:
+        raise AgentLoopError(
+            "Coder follow-up did not classify all unresolved reviewer items into addressed or remaining: "
+            + ", ".join(missing)
+        )
+
+
+def _validate_coder_followup_response(
+    text: str,
+    *,
+    unresolved_items: Sequence[UnresolvedReviewItem],
+    human_requirements,
+) -> StructuredCoderFollowup | str:
+    prompt_context = render_coder_human_requirements_prompt_context(human_requirements)
+    structured_followup = validate_structured_coder_followup(text)
+    if structured_followup is not None:
+        _validate_structured_coder_followup_items(
+            structured_followup,
+            unresolved_items=unresolved_items,
+        )
+        validate_structured_human_requirements_acknowledgement(
+            structured_followup.human_requirements.addressed_ids,
+            checked_discussion_directly=structured_followup.human_requirements.checked_discussion_directly,
+            surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
+            requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
+        )
+        return structured_followup
+
+    state = parse_agent_state(text)
+    validate_human_requirements_acknowledgement(
+        text,
+        surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
+        requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
+    )
+    return state
 
 
 def _apply_unresolved_item_dispositions(
@@ -2670,7 +2741,11 @@ def run_pr_loop(
                 prompt=followup_prompt,
                 session_id=coder_session_id,
                 marker_description="<!-- AGENT_STATE: approved|blocking -->",
-                validate=parse_agent_state,
+                validate=lambda text, items=tuple(unresolved_items), human_requirements=human_requirements: _validate_coder_followup_response(
+                    text,
+                    unresolved_items=items,
+                    human_requirements=human_requirements,
+                ),
                 usage_context=usage_context,
             )
             coder_output = coder_response.text
