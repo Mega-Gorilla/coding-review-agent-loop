@@ -71,6 +71,7 @@ from .protocol import (
     human_requirements_resolved,
     is_clarification_request,
     parse_agent_state,
+    parse_pr_review,
     parse_plan_review,
     parse_plan_state,
     parse_pr_number,
@@ -377,7 +378,7 @@ def _validate_review_response(
     reviewer: str,
     unresolved_items: Sequence[UnresolvedReviewItem],
 ) -> ParsedReview:
-    parsed = parse_review(text, reviewer=reviewer)
+    parsed = parse_pr_review(text, reviewer=reviewer)
     if not unresolved_items:
         return parsed
 
@@ -1007,6 +1008,62 @@ def _render_public_review_comment(
             ),
         )
     return rendered
+
+
+def _render_public_pr_review_comment(
+    parsed_review: ParsedReview,
+    *,
+    reviewer: str,
+    human_requirements_resolved_flag: bool,
+    prior_items: Sequence[UnresolvedReviewItem],
+    dispositions: Sequence[ReviewItemDisposition],
+) -> str:
+    sections: list[str] = []
+    if parsed_review.summary:
+        sections.append(parsed_review.summary.strip())
+    if parsed_review.blocking_items:
+        sections.append(
+            "\n".join(
+                [
+                    "### Blocking issues",
+                    *[f"- {item.text}" for item in parsed_review.blocking_items],
+                ]
+            )
+        )
+    if parsed_review.followups.same_pr:
+        sections.append(
+            "\n".join(
+                [
+                    "### Same-PR follow-ups",
+                    *[f"- {item.text}" for item in parsed_review.followups.same_pr],
+                ]
+            )
+        )
+    if parsed_review.followups.future:
+        sections.append(
+            "\n".join(
+                [
+                    "### Future follow-ups",
+                    *[f"- {item.text}" for item in parsed_review.followups.future],
+                ]
+            )
+        )
+    if prior_items:
+        sections.append(
+            _render_prior_dispositions_section(
+                heading="### Prior unresolved item dispositions",
+                prior_items=prior_items,
+                dispositions=dispositions,
+            )
+        )
+    footer: list[str] = []
+    if human_requirements_resolved_flag:
+        footer.append("<!-- HUMAN_REQUIREMENTS_RESOLVED -->")
+    footer.append(f"<!-- AGENT_STATE: {parsed_review.state} -->")
+    footer.append(f"-- {_public_reviewer_name(reviewer)}")
+    return "\n\n".join(section for section in sections if section) + (
+        ("\n\n" if sections else "") + "\n".join(footer)
+    )
 
 
 def _should_record_new_blocking_item(summary: str, *, had_prior_items: bool, had_dispositions: bool) -> bool:
@@ -2089,10 +2146,12 @@ def run_pr_loop(
                 resumed_record = resumed_by_name.get(reviewer_name)
                 if resumed_record is not None:
                     review_output = resumed_record.body
+                    reparsed_review = parse_review(review_output, reviewer=reviewer_name)
                     parsed_review = ParsedReview(
                         state=resumed_record.metadata.state or parse_agent_state(review_output),
                         summary=review_freeform_summary_text(review_output),
-                        followups=parse_review(review_output, reviewer=reviewer_name).followups,
+                        blocking_items=reparsed_review.blocking_items,
+                        followups=reparsed_review.followups,
                         dispositions=resumed_record.metadata.dispositions,
                     )
                     review_state = parsed_review.state
@@ -2135,7 +2194,7 @@ def run_pr_loop(
 
                 for disposition in parsed_review.dispositions:
                     prior_dispositions[disposition.item_id].append(disposition)
-                blocking_summary = _review_freeform_summary_text(review_output)
+                blocking_summary = parsed_review.summary
                 has_blocking_summary = _should_record_new_blocking_item(
                     blocking_summary,
                     had_prior_items=bool(prior_unresolved_items),
@@ -2196,12 +2255,14 @@ def run_pr_loop(
                             config=config,
                             pr_number=pr_number,
                             body=_attach_round_metadata(
-                                _render_public_review_comment(
-                                    review_output,
-                                    review_kind="pr",
+                                _render_public_pr_review_comment(
+                                    parsed_review,
+                                    reviewer=reviewer_name,
+                                    human_requirements_resolved_flag=human_requirements_resolved(
+                                        review_output
+                                    ),
                                     prior_items=prior_unresolved_items,
                                     dispositions=parsed_review.dispositions,
-                                    new_items=reviewer_new_unresolved_items,
                                 ),
                                 PostedRoundMetadata(
                                     flow="pr",
@@ -2239,12 +2300,14 @@ def run_pr_loop(
                         config=config,
                         pr_number=pr_number,
                         body=_attach_round_metadata(
-                            _render_public_review_comment(
-                                review_output,
-                                review_kind="pr",
+                            _render_public_pr_review_comment(
+                                parsed_review,
+                                reviewer=reviewer_name,
+                                human_requirements_resolved_flag=human_requirements_resolved(
+                                    review_output
+                                ),
                                 prior_items=prior_unresolved_items,
                                 dispositions=parsed_review.dispositions,
-                                new_items=reviewer_new_unresolved_items,
                             ),
                             PostedRoundMetadata(
                                 flow="pr",

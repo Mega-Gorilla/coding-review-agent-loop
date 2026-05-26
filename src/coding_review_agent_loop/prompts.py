@@ -948,6 +948,12 @@ instead when small or local cleanup should be fixed before merge.
 The legacy heading `### Non-blocking follow-ups` is still accepted as future
 follow-ups for compatibility, but prefer `### Future follow-ups`.
 """
+    markdown_fallback_sections = ["- summary paragraph", "- `### Blocking issues`"]
+    if config.approved_followups.startswith("fix-and-"):
+        markdown_fallback_sections.append("- `### Same-PR follow-ups`")
+    if config.approved_followups != "ignore":
+        markdown_fallback_sections.append("- `### Future follow-ups`")
+    markdown_fallback_sections.append("- `### Prior unresolved item dispositions`")
     return f"""Review pull request #{pr_number} in {config.repo} (round {round_number}).
 
 PR metadata:
@@ -997,6 +1003,38 @@ them forward explicitly.
 Use blocking only for issues that should prevent merge.
 All configured reviewers ({reviewer_group}) must approve in the same round for
 the pull request to be considered approved.
+
+Prefer this structured PR review format. Start your response with exactly one
+top-level JSON object and no prose before it:
+
+```json
+{{
+  "schema_version": 1,
+  "kind": "pr_review",
+  "state": "approved" | "blocking",
+  "summary": "short reviewer summary",
+  "blocking_items": ["render-only blocking bullet", "..."],
+  "same_pr_followups": ["same-PR fix still required", "..."],
+  "future_followups": ["future work after approval", "..."],
+  "prior_item_dispositions": [
+    {{"item_id": "item-1", "disposition": "resolved"}},
+    {{"item_id": "item-2", "disposition": "future", "note": "brief reason"}}
+  ]
+}}
+```
+
+After the JSON object, include only:
+1. optional `<!-- HUMAN_REQUIREMENTS_RESOLVED -->`
+2. required `<!-- AGENT_STATE: approved -->` or `<!-- AGENT_STATE: blocking -->`
+3. your standalone signature line `-- {reviewer_signature}`
+
+Do not include any extra prose, headings, bullets, or fenced blocks before or
+after that structured response. The footer AGENT_STATE must match the JSON
+`state`.
+
+Markdown fallback remains available for compatibility when you do not use the
+structured format. In markdown reviews, use this section order:
+{chr(10).join(markdown_fallback_sections)}
 
 End your final response with exactly one marker:
 
