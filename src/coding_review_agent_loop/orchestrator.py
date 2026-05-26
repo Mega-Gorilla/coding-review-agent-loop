@@ -111,6 +111,11 @@ NEAR_MISS_AGENT_MARKER_RE = re.compile(
     re.I,
 )
 ROUND_RESUME_MARKER_RE = re.compile(r"<!--\s*AGENT_LOOP_META:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->", re.I)
+ALL_RESOLVED_PROSE_RE = re.compile(
+    r"^all (?:prior items|listed items|carried-forward items) are resolved\.?$"
+    r"|^all prior unresolved items have been resolved\.?$",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -119,6 +124,31 @@ class ValidatedAgentResponse:
     session_id: str | None
     marker_value: object
     usage: UsageMetadata | None = None
+
+
+def _normalize_disposition_section_prose(text: str) -> str:
+    return " ".join(text.strip().split())
+
+
+def _maybe_fill_resolved_dispositions_from_prose(
+    parsed: ParsedReview | ParsedPlanReview,
+    *,
+    reviewer: str,
+    unresolved_items: Sequence[UnresolvedReviewItem],
+) -> tuple[ReviewItemDisposition, ...]:
+    if not unresolved_items or parsed.dispositions:
+        return parsed.dispositions
+    normalized = _normalize_disposition_section_prose(parsed.raw_dispositions_text)
+    if not normalized or not ALL_RESOLVED_PROSE_RE.fullmatch(normalized):
+        return parsed.dispositions
+    return tuple(
+        ReviewItemDisposition(
+            item_id=item.item_id,
+            reviewer=reviewer,
+            disposition="resolved",
+        )
+        for item in unresolved_items
+    )
 
 
 @dataclass(frozen=True)
@@ -383,7 +413,12 @@ def _validate_review_response(
         return parsed
 
     unresolved_by_id = {item.item_id: item for item in unresolved_items}
-    disposition_ids = [item.item_id for item in parsed.dispositions]
+    dispositions = _maybe_fill_resolved_dispositions_from_prose(
+        parsed,
+        reviewer=reviewer,
+        unresolved_items=unresolved_items,
+    )
+    disposition_ids = [item.item_id for item in dispositions]
     duplicates = sorted({item_id for item_id in disposition_ids if disposition_ids.count(item_id) > 1})
     if duplicates:
         raise AgentLoopError(
@@ -399,7 +434,14 @@ def _validate_review_response(
         raise AgentLoopError(
             "Review did not evaluate all prior unresolved items: " + ", ".join(missing)
         )
-    return parsed
+    return ParsedReview(
+        state=parsed.state,
+        summary=parsed.summary,
+        blocking_items=parsed.blocking_items,
+        followups=parsed.followups,
+        dispositions=dispositions,
+        raw_dispositions_text=parsed.raw_dispositions_text,
+    )
 
 
 def _upsert_human_requirements_ack_item(
@@ -579,7 +621,12 @@ def _validate_plan_review_response(
         return parsed
 
     unresolved_by_id = {item.item_id: item for item in unresolved_items}
-    disposition_ids = [item.item_id for item in parsed.dispositions]
+    dispositions = _maybe_fill_resolved_dispositions_from_prose(
+        parsed,
+        reviewer=reviewer,
+        unresolved_items=unresolved_items,
+    )
+    disposition_ids = [item.item_id for item in dispositions]
     duplicates = sorted({item_id for item_id in disposition_ids if disposition_ids.count(item_id) > 1})
     if duplicates:
         raise AgentLoopError(
@@ -598,7 +645,13 @@ def _validate_plan_review_response(
             "Plan review did not evaluate all prior unresolved plan items: "
             + ", ".join(missing)
         )
-    return parsed
+    return ParsedPlanReview(
+        state=parsed.state,
+        summary=parsed.summary,
+        items=parsed.items,
+        dispositions=dispositions,
+        raw_dispositions_text=parsed.raw_dispositions_text,
+    )
 
 
 def _review_freeform_summary_text(text: str) -> str:

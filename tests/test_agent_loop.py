@@ -1456,6 +1456,8 @@ def test_parse_approved_followups_keeps_multiline_markdown_finding_as_one_item()
     [
         "None",
         "none.",
+        "(none)",
+        "(n/a)",
         "N/A",
         "No follow-ups",
         "No same-PR follow-ups.",
@@ -1588,6 +1590,8 @@ def test_parse_plan_review_items_keeps_multiline_markdown_blocking_item_as_one_e
     "placeholder",
     [
         "None",
+        "(none)",
+        "(n/a)",
         "No blocking plan issues.",
         "No same-plan follow-ups",
         "No future follow-ups.",
@@ -1712,6 +1716,21 @@ def test_parse_plan_item_dispositions_allows_resolved_none_and_substantive_same_
         ("item-1", "resolved", "none"),
         ("item-2", "same-plan", "still need the mixed-reviewer case"),
     ]
+
+
+def test_parse_plan_item_dispositions_ignores_parenthesized_empty_placeholders():
+    review = """
+    Approved after the latest revision.
+
+    ### Prior unresolved plan item dispositions
+    - (none)
+    - (n/a)
+
+    <!-- AGENT_PLAN_STATE: approved -->
+    -- OpenAI Codex
+    """
+
+    assert parse_plan_item_dispositions(review, reviewer="OpenAI Codex") == ()
 
 
 def test_parse_plan_review_drops_future_followups_in_blocking_reviews():
@@ -1842,6 +1861,81 @@ def test_validate_plan_review_response_rejects_unknown_item_ids():
         )
 
 
+def test_validate_plan_review_response_accepts_blanket_resolved_prose():
+    review = """
+    Looks good now.
+
+    ### Prior unresolved plan item dispositions
+    All carried-forward items are resolved.
+
+    <!-- AGENT_PLAN_STATE: approved -->
+    -- OpenAI Codex
+    """
+
+    parsed = _validate_plan_review_response(
+        review,
+        reviewer="OpenAI Codex",
+        unresolved_items=(
+            UnresolvedReviewItem(
+                item_id="item-1",
+                reviewer="Anthropic Claude",
+                source_round=1,
+                text="Keep the extra regression coverage.",
+                status="same-plan",
+            ),
+            UnresolvedReviewItem(
+                item_id="item-2",
+                reviewer="Google Gemini",
+                source_round=1,
+                text="Clarify the fallback trigger.",
+                status="blocking",
+            ),
+        ),
+    )
+
+    assert [(item.item_id, item.disposition) for item in parsed.dispositions] == [
+        ("item-1", "resolved"),
+        ("item-2", "resolved"),
+    ]
+
+
+def test_validate_plan_review_response_rejects_mixed_bullets_and_blanket_prose():
+    review = """
+    Looks good now.
+
+    ### Prior unresolved plan item dispositions
+    - [item-1] resolved
+    All carried-forward items are resolved.
+
+    <!-- AGENT_PLAN_STATE: approved -->
+    -- OpenAI Codex
+    """
+
+    with pytest.raises(
+        AgentLoopError, match="did not evaluate all prior unresolved plan items: item-2"
+    ):
+        _validate_plan_review_response(
+            review,
+            reviewer="OpenAI Codex",
+            unresolved_items=(
+                UnresolvedReviewItem(
+                    item_id="item-1",
+                    reviewer="Anthropic Claude",
+                    source_round=1,
+                    text="Keep the extra regression coverage.",
+                    status="same-plan",
+                ),
+                UnresolvedReviewItem(
+                    item_id="item-2",
+                    reviewer="Google Gemini",
+                    source_round=1,
+                    text="Clarify the fallback trigger.",
+                    status="blocking",
+                ),
+            ),
+        )
+
+
 def test_parse_unresolved_item_dispositions_extracts_structured_updates():
     review = """
     LGTM.
@@ -1911,7 +2005,10 @@ def test_parse_unresolved_item_dispositions_rejects_contradictory_active_notes(l
 def test_parse_unresolved_item_dispositions_rejects_trailing_colon_syntax(line):
     review = "LGTM." + prior_item_dispositions(line) + "\n\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
 
-    with pytest.raises(AgentLoopError, match="Invalid prior unresolved item disposition"):
+    with pytest.raises(
+        AgentLoopError,
+        match=r"Invalid prior unresolved item disposition.*section `### Prior unresolved item dispositions`, line 4",
+    ):
         parse_unresolved_item_dispositions(review, reviewer="OpenAI Codex")
 
 
@@ -1933,6 +2030,21 @@ def test_parse_unresolved_item_dispositions_allows_resolved_none_and_substantive
     ]
 
 
+def test_parse_unresolved_item_dispositions_ignores_parenthesized_empty_placeholders():
+    review = """
+    LGTM.
+
+    ### Prior unresolved item dispositions
+    - (none)
+    - (n/a)
+
+    <!-- AGENT_STATE: approved -->
+    -- OpenAI Codex
+    """
+
+    assert parse_unresolved_item_dispositions(review, reviewer="OpenAI Codex") == ()
+
+
 def test_parse_unresolved_item_dispositions_ignores_non_bullet_prose():
     review = """
     LGTM.
@@ -1951,6 +2063,71 @@ def test_parse_unresolved_item_dispositions_ignores_non_bullet_prose():
     assert [(item.item_id, item.disposition, item.note) for item in dispositions] == [
         ("item-1", "resolved", None),
     ]
+
+
+def test_validate_review_response_accepts_blanket_resolved_prose():
+    review = """
+    LGTM.
+
+    ### Prior unresolved item dispositions
+    All prior unresolved items have been resolved.
+
+    <!-- AGENT_STATE: approved -->
+    -- OpenAI Codex
+    """
+
+    parsed = _validate_review_response(
+        review,
+        reviewer="OpenAI Codex",
+        unresolved_items=(
+            UnresolvedReviewItem(
+                item_id="item-1",
+                reviewer="Anthropic Claude",
+                source_round=1,
+                text="Rename the helper.",
+                status="same-pr",
+            ),
+            UnresolvedReviewItem(
+                item_id="item-2",
+                reviewer="Google Gemini",
+                source_round=1,
+                text="Keep the PR body issue reference.",
+                status="blocking",
+            ),
+        ),
+    )
+
+    assert [(item.item_id, item.disposition) for item in parsed.dispositions] == [
+        ("item-1", "resolved"),
+        ("item-2", "resolved"),
+    ]
+
+
+def test_validate_review_response_rejects_ambiguous_blanket_prose():
+    review = """
+    LGTM.
+
+    ### Prior unresolved item dispositions
+    All prior items look resolved.
+
+    <!-- AGENT_STATE: approved -->
+    -- OpenAI Codex
+    """
+
+    with pytest.raises(AgentLoopError, match="did not evaluate all prior unresolved items: item-1"):
+        _validate_review_response(
+            review,
+            reviewer="OpenAI Codex",
+            unresolved_items=(
+                UnresolvedReviewItem(
+                    item_id="item-1",
+                    reviewer="Anthropic Claude",
+                    source_round=1,
+                    text="Rename the helper.",
+                    status="same-pr",
+                ),
+            ),
+        )
 
 
 def test_parse_review_drops_future_followups_in_blocking_reviews():
