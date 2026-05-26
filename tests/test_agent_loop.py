@@ -59,15 +59,21 @@ from coding_review_agent_loop.orchestrator import (
     _apply_unresolved_item_dispositions,
     _attach_round_metadata,
     _decode_round_metadata,
+    _encode_round_metadata,
     _format_unresolved_item_label,
     _plan_subject,
+    _render_public_plan_review_comment,
+    _render_public_plan_revision_comment,
     _render_public_pr_review_comment,
     _render_public_review_comment,
     _review_freeform_summary_text,
     _resume_pr_round,
+    _resume_plan_round,
     _strip_round_metadata,
     _validate_review_response,
     _validate_plan_review_response,
+    render_canonical_plan_revision,
+    render_canonical_plan_steps,
 )
 from coding_review_agent_loop.prompts import (
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
@@ -85,6 +91,9 @@ from coding_review_agent_loop.prompts import (
     render_coder_human_requirements_prompt_context,
 )
 from coding_review_agent_loop.protocol import (
+    _expect_string_list,
+    _extract_structured_plan_review_payload,
+    _extract_structured_plan_revision_payload,
     parse_approved_followups,
     parse_human_requirements_acknowledgement,
     parse_pr_review,
@@ -2475,7 +2484,10 @@ def test_parse_structured_pr_review_rejects_trailing_content_before_footer(suffi
         }
     )
 
-    with pytest.raises(AgentLoopError, match="place <!-- AGENT_STATE|may not include trailing prose"):
+    with pytest.raises(
+        AgentLoopError,
+        match="place <!-- AGENT_STATE|may not include prose between|may not include trailing prose",
+    ):
         parse_structured_pr_review(payload + suffix, reviewer="OpenAI Codex")
 
 
@@ -2517,17 +2529,20 @@ def test_parse_structured_pr_review_falls_back_when_json_is_embedded_in_markdown
 
 
 def test_parse_structured_plan_review_normalizes_v1_payload():
-    payload = json.dumps(
-        {
-            "schema_version": 1,
-            "kind": "plan_review",
-            "state": "approved",
-            "summary": "Plan looks good.",
-            "blocking_plan_issues": [],
-            "same_plan_followups": [],
-            "future_followups": ["Consider a later cleanup pass."],
-            "prior_plan_item_dispositions": [{"item_id": "item-1", "disposition": "resolved"}],
-        }
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": "approved",
+                "summary": "Plan looks good.",
+                "blocking_plan_issues": [],
+                "same_plan_followups": [],
+                "future_followups": ["Consider a later cleanup pass."],
+                "prior_plan_item_dispositions": [{"item_id": "item-1", "disposition": "resolved"}],
+            }
+        )
+        + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex"
     )
 
     parsed = parse_structured_plan_review(payload, reviewer="OpenAI Codex")
@@ -2541,17 +2556,20 @@ def test_parse_structured_plan_review_normalizes_v1_payload():
 
 
 def test_parse_structured_plan_review_rejects_blocking_future_followups():
-    payload = json.dumps(
-        {
-            "schema_version": 1,
-            "kind": "plan_review",
-            "state": "blocking",
-            "summary": "Still blocked.",
-            "blocking_plan_issues": ["Need clearer rollback coverage."],
-            "same_plan_followups": [],
-            "future_followups": ["Refactor the prompt later."],
-            "prior_plan_item_dispositions": [],
-        }
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": "blocking",
+                "summary": "Still blocked.",
+                "blocking_plan_issues": ["Need clearer rollback coverage."],
+                "same_plan_followups": [],
+                "future_followups": ["Refactor the prompt later."],
+                "prior_plan_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"
     )
 
     with pytest.raises(AgentLoopError, match="Blocking structured plan reviews may not include future"):
@@ -2604,49 +2622,182 @@ def test_validate_structured_coder_followup_rejects_unknown_keys_via_fallback():
 
 
 def test_validate_structured_plan_revision_accepts_v1_payload():
-    payload = json.dumps(
-        {
-            "schema_version": 1,
-            "kind": "plan_revision",
-            "state": "blocking",
-            "summary": "Revised the plan to cover rollback testing.",
-            "plan_steps": ["Update protocol.py.", "Add regression tests."],
-        }
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_revision",
+                "state": "blocking",
+                "summary": "Revised the plan to cover rollback testing.",
+                "prior_plan_item_dispositions": [
+                    {"item_id": "item-1", "disposition": "resolved", "note": "Covered in the new tests."}
+                ],
+                "plan_steps": ["Update protocol.py.", "Add regression tests."],
+            }
+        )
+        + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"
     )
 
     parsed = validate_structured_plan_revision(payload)
 
     assert parsed is not None
     assert parsed.state == "blocking"
+    assert [(item.item_id, item.disposition) for item in parsed.prior_plan_item_dispositions] == [
+        ("item-1", "resolved")
+    ]
     assert parsed.plan_steps == ("Update protocol.py.", "Add regression tests.")
 
 
-def test_validate_structured_plan_revision_rejects_non_blocking_state_via_fallback():
+@pytest.mark.parametrize(
+    ("payload", "pattern"),
+    [
+        (
+            {
+                "schema_version": 1,
+                "kind": "plan_revision",
+                "state": "approved",
+                "summary": "Wrong state.",
+                "prior_plan_item_dispositions": [],
+                "plan_steps": ["Update protocol.py."],
+            },
+            "plan_revision.state must be `blocking`",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "kind": "plan_revision",
+                "state": "blocking",
+                "summary": "",
+                "prior_plan_item_dispositions": [],
+                "plan_steps": ["Update protocol.py."],
+            },
+            "plan_revision.summary must be a non-empty string",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "kind": "plan_revision",
+                "state": "blocking",
+                "summary": "Missing steps.",
+                "prior_plan_item_dispositions": [],
+                "plan_steps": [],
+            },
+            "plan_revision.plan_steps must contain at least 1 item",
+        ),
+    ],
+)
+def test_validate_structured_plan_revision_rejects_invalid_payload(payload, pattern):
+    footer_state = payload["state"]
+    text = json.dumps(payload) + f"\n<!-- AGENT_PLAN_STATE: {footer_state} -->\n-- OpenAI Codex"
+
+    with pytest.raises(AgentLoopError, match=pattern):
+        validate_structured_plan_revision(text)
+
+
+def test_extract_structured_plan_review_payload_rejects_embedded_json_markdown():
+    review = """
+    Here is an example:
+
+    ```json
+    {"schema_version": 1, "kind": "plan_review"}
+    ```
+
+    <!-- AGENT_PLAN_STATE: approved -->
+    -- OpenAI Codex
+    """
+
+    assert _extract_structured_plan_review_payload(review) is None
+
+
+def test_extract_structured_plan_review_payload_rejects_footer_state_mismatch():
     payload = json.dumps(
         {
             "schema_version": 1,
-            "kind": "plan_revision",
+            "kind": "plan_review",
             "state": "approved",
-            "summary": "Wrong state.",
-            "plan_steps": ["Update protocol.py."],
+            "summary": "Plan looks good.",
+            "blocking_plan_issues": [],
+            "same_plan_followups": [],
+            "future_followups": [],
+            "prior_plan_item_dispositions": [],
         }
     )
+    text = payload + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"
 
-    assert validate_structured_plan_revision(payload) is None
+    with pytest.raises(AgentLoopError, match="footer AGENT_PLAN_STATE must match"):
+        _extract_structured_plan_review_payload(text)
 
 
-def test_validate_structured_plan_revision_falls_back_on_empty_summary():
+def test_extract_structured_plan_review_payload_rejects_trailing_prose_after_signature():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "plan_review",
+            "state": "approved",
+            "summary": "Plan looks good.",
+            "blocking_plan_issues": [],
+            "same_plan_followups": [],
+            "future_followups": [],
+            "prior_plan_item_dispositions": [],
+        }
+    )
+    text = payload + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex\nextra"
+
+    with pytest.raises(AgentLoopError, match="trailing prose"):
+        _extract_structured_plan_review_payload(text)
+
+
+def test_parse_plan_review_hard_fails_after_top_level_json_prefix():
+    review = (
+        '{"schema_version":1,"kind":"plan_review","state":"approved","summary":"Plan looks good.",'
+        '"blocking_plan_issues":[],"same_plan_followups":[],"future_followups":[]}\n'
+        "<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex"
+    )
+
+    with pytest.raises(AgentLoopError, match="plan_review is missing required field"):
+        parse_plan_review(review, reviewer="OpenAI Codex")
+
+
+def test_extract_structured_plan_revision_payload_accepts_human_requirements_prefix():
     payload = json.dumps(
         {
             "schema_version": 1,
             "kind": "plan_revision",
             "state": "blocking",
-            "summary": "",
+            "summary": "Revised the plan.",
+            "prior_plan_item_dispositions": [],
             "plan_steps": ["Update protocol.py."],
         }
     )
+    text = (
+        payload
+        + "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n\n### Human requirements\n- Requirement 1: covered in step 1.\n"
+        + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"
+    )
 
-    assert validate_structured_plan_revision(payload) is None
+    assert _extract_structured_plan_revision_payload(text) is not None
+
+
+def test_extract_structured_plan_revision_payload_rejects_bad_footer_ordering():
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "plan_revision",
+            "state": "blocking",
+            "summary": "Revised the plan.",
+            "prior_plan_item_dispositions": [],
+            "plan_steps": ["Update protocol.py."],
+        }
+    )
+    text = payload + "\n-- OpenAI Codex\n<!-- AGENT_PLAN_STATE: blocking -->"
+
+    with pytest.raises(AgentLoopError, match="AGENT_PLAN_STATE"):
+        _extract_structured_plan_revision_payload(text)
+
+
+def test_expect_string_list_enforces_min_length():
+    with pytest.raises(AgentLoopError, match="must contain at least 1 item"):
+        _expect_string_list([], context="plan_revision.plan_steps", item_context="plan_revision.plan_steps", min_length=1)
 
 
 def test_review_prompt_includes_prior_unresolved_items_and_disposition_instructions(tmp_path):
@@ -2769,6 +2920,9 @@ def test_plan_review_prompt_includes_structured_sections_and_prior_items(tmp_pat
     assert "Same-plan\nfollow-ups may appear only in blocking plan reviews" in prompt
     assert "do not use structured Future follow-ups" in prompt
     assert "no blocking plan issues, no Same-plan\nfollow-ups, and no carried-forward plan items left active" in prompt
+    assert '"kind": "plan_review"' in prompt
+    assert '"prior_plan_item_dispositions"' in prompt
+    assert "If you do not use the structured JSON format, use this exact markdown compatibility format instead" in prompt
 
 
 def test_plan_revision_prompt_includes_unresolved_ledger_and_required_dispositions(tmp_path):
@@ -2795,6 +2949,114 @@ def test_plan_revision_prompt_includes_unresolved_ledger_and_required_dispositio
     assert "### Prior plan review item dispositions" in prompt
     assert "- [item-id] same-plan:" in prompt
     assert "Use `same-plan`, never `same-pr`" in prompt
+    assert '"kind": "plan_revision"' in prompt
+    assert '"plan_steps"' in prompt
+    assert "normalize structured plan revisions into canonical\nmarkdown for stored plan state" in prompt
+    assert "If you do not use the structured JSON format, fall back to markdown\ncompatibility" in prompt
+
+
+def test_render_canonical_plan_steps_numbers_items():
+    assert render_canonical_plan_steps(("Update protocol.py.", "Add tests.")) == (
+        "1. Update protocol.py.\n2. Add tests."
+    )
+
+
+def test_render_canonical_plan_revision_and_public_comment():
+    parsed = validate_structured_plan_revision(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_revision",
+                "state": "blocking",
+                "summary": "Revised the plan to cover rollback behavior.",
+                "prior_plan_item_dispositions": [
+                    {"item_id": "item-4", "disposition": "resolved", "note": "Added a resume-path step."}
+                ],
+                "plan_steps": ["Update protocol.py.", "Add orchestrator resume tests."],
+            }
+        )
+        + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"
+    )
+    assert parsed is not None
+    prior_items = (
+        UnresolvedReviewItem(
+            item_id="item-4",
+            reviewer="OpenAI Codex",
+            source_round=2,
+            text="Add a resume-path step.",
+            status="blocking",
+        ),
+    )
+
+    canonical = render_canonical_plan_revision(parsed, prior_items)
+    public = _render_public_plan_revision_comment(
+        parsed,
+        prior_items=prior_items,
+        raw_text='{"schema_version":1}\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex',
+        signature="OpenAI Codex",
+    )
+
+    assert canonical == (
+        "Revised the plan to cover rollback behavior.\n\n"
+        "### Prior plan review item dispositions\n"
+        "- [item-4] Blocking issue from OpenAI Codex, round 2: Add a resume-path step. -> "
+        "resolved: Added a resume-path step.\n\n"
+        "### Plan steps\n"
+        "1. Update protocol.py.\n"
+        "2. Add orchestrator resume tests."
+    )
+    assert public == canonical + "\n\n<!-- AGENT_PLAN_STATE: blocking -->\n\n-- OpenAI Codex"
+
+
+def test_render_public_plan_review_comment_normalizes_sections():
+    parsed = parse_structured_plan_review(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": "blocking",
+                "summary": "Still blocked on coverage.",
+                "blocking_plan_issues": ["Add a resume coverage test."],
+                "same_plan_followups": ["Mention canonical hashing explicitly."],
+                "future_followups": [],
+                "prior_plan_item_dispositions": [
+                    {"item_id": "item-2", "disposition": "same-plan", "note": "Still needs one more prompt assertion."}
+                ],
+            }
+        )
+        + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
+        reviewer="OpenAI Codex",
+    )
+    assert parsed is not None
+    prior_items = (
+        UnresolvedReviewItem(
+            item_id="item-2",
+            reviewer="Google Gemini",
+            source_round=1,
+            text="Mention canonical hashing explicitly.",
+            status="same-plan",
+        ),
+    )
+
+    rendered = _render_public_plan_review_comment(
+        parsed,
+        reviewer="OpenAI Codex",
+        prior_items=prior_items,
+        dispositions=parsed.dispositions,
+    )
+
+    assert rendered == (
+        "Still blocked on coverage.\n\n"
+        "### Blocking plan issues\n"
+        "- Add a resume coverage test.\n\n"
+        "### Same-plan follow-ups\n"
+        "- Mention canonical hashing explicitly.\n\n"
+        "### Prior unresolved plan item dispositions\n"
+        "- [item-2] Same-plan follow-up from Google Gemini, round 1: Mention canonical hashing explicitly. -> "
+        "same-plan: Still needs one more prompt assertion.\n\n"
+        "<!-- AGENT_PLAN_STATE: blocking -->\n"
+        "-- OpenAI Codex"
+    )
 
 
 def test_review_freeform_summary_text_strips_structured_followup_sections():
@@ -7194,6 +7456,7 @@ def test_issue_loop_plan_first_posts_human_readable_item_labels_in_new_and_prior
     assert runner.comments[1] == (
         "### Blocking plan issues\n"
         "- Keep plan-review wording distinct from PR wording.\n"
+        "\n"
         "### Same-plan follow-ups\n"
         "- Add one carry-forward plan test.\n"
         "<!-- AGENT_PLAN_STATE: blocking -->\n"
@@ -7283,6 +7546,64 @@ def test_issue_loop_plan_first_resumes_with_only_missing_reviewer_for_current_pl
     assert runner.comments[-1].startswith("Planning complete for issue #56.")
 
 
+def test_resume_plan_round_prefers_canonical_plan_metadata():
+    public_body = (
+        "Revised plan summary.\n\n### Plan steps\n1. Public body copy.\n\n"
+        "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    canonical_plan = (
+        "Revised plan summary.\n\n### Prior plan review item dispositions\n- None.\n\n"
+        "### Plan steps\n1. Canonical copy."
+    )
+    coder_comment = _attach_round_metadata(
+        public_body,
+        PostedRoundMetadata(
+            flow="plan",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject=_plan_subject(canonical_plan),
+            prior_items=(),
+            canonical_plan=canonical_plan,
+        ),
+    )
+
+    resumed = _resume_plan_round(
+        [IssueComment(author="bot", created_at="2026-05-20T09:00:00Z", body=coder_comment)],
+        configured_reviewers=("codex", "gemini"),
+    )
+
+    assert resumed is not None
+    current_plan, state = resumed
+    assert current_plan == canonical_plan
+    assert state.coder_output == canonical_plan
+
+
+def test_resume_plan_round_falls_back_to_raw_body_for_markdown_plan():
+    plan = "Revised plan.\n- Add state reconstruction.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    coder_comment = _attach_round_metadata(
+        plan,
+        PostedRoundMetadata(
+            flow="plan",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject=_plan_subject(plan),
+            prior_items=(),
+        ),
+    )
+
+    resumed = _resume_plan_round(
+        [IssueComment(author="bot", created_at="2026-05-20T09:00:00Z", body=coder_comment)],
+        configured_reviewers=("codex",),
+    )
+
+    assert resumed is not None
+    current_plan, state = resumed
+    assert current_plan == plan
+    assert state.coder_output == plan
+
+
 def test_plan_subject_ignores_trailing_whitespace_added_by_metadata_round_trip():
     plan = "Revised plan.\n- Add state reconstruction.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
 
@@ -7299,6 +7620,19 @@ def test_plan_subject_ignores_trailing_whitespace_added_by_metadata_round_trip()
     )
 
     assert _plan_subject(f"{plan}\n") == _plan_subject(_strip_round_metadata(attached))
+
+
+def test_round_metadata_round_trip_preserves_canonical_plan():
+    metadata = PostedRoundMetadata(
+        flow="plan",
+        role="coder",
+        agent="Claude",
+        round_number=2,
+        subject="abc",
+        canonical_plan="Summary\n\n### Plan steps\n1. Canonical step.",
+    )
+
+    assert _decode_round_metadata(_encode_round_metadata(metadata)).canonical_plan == metadata.canonical_plan
 
 
 @pytest.mark.parametrize(
@@ -7406,7 +7740,7 @@ def test_issue_loop_plan_first_keeps_blocking_review_when_future_followups_are_m
     assert "Add parser coverage for blocking reviews with stray future follow-ups." in claude_calls[1][-1]
     assert "Tighten the plan-review prompt wording." in claude_calls[1][-1]
     assert runner.comments[1].startswith("Still blocked.")
-    assert "### Future follow-ups" in runner.comments[1]
+    assert "### Future follow-ups" not in runner.comments[1]
 
 
 def test_issue_loop_plan_first_can_implement_after_approval(tmp_path):

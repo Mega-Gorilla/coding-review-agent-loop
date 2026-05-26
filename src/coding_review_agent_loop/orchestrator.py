@@ -59,6 +59,7 @@ from .protocol import (
     FUTURE_FOLLOWUP_HEADING_RE,
     HUMAN_REQUIREMENTS_HEADING_RE,
     LEGACY_FOLLOWUP_HEADING_RE,
+    PLAN_STATE_RE,
     ParsedPlanReview,
     HTML_COMMENT_RE,
     PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE,
@@ -67,6 +68,7 @@ from .protocol import (
     SIGNATURE_RE,
     ParsedReview,
     ReviewItemDisposition,
+    StructuredPlanRevision,
     UnresolvedReviewItem,
     human_requirements_resolved,
     is_clarification_request,
@@ -77,6 +79,7 @@ from .protocol import (
     parse_pr_number,
     review_freeform_summary_text,
     validate_human_requirements_acknowledgement,
+    validate_structured_plan_revision,
 )
 from .protocol import ApprovedFollowup, parse_review
 from .runner import Runner
@@ -162,6 +165,7 @@ class PostedRoundMetadata:
     dispositions: tuple[ReviewItemDisposition, ...] = ()
     new_items: tuple[UnresolvedReviewItem, ...] = ()
     state: str | None = None
+    canonical_plan: str | None = None
 
 
 @dataclass(frozen=True)
@@ -654,6 +658,13 @@ def _validate_plan_review_response(
     )
 
 
+def _validate_plan_revision_response(text: str) -> StructuredPlanRevision | str:
+    parsed = validate_structured_plan_revision(text)
+    if parsed is not None:
+        return parsed
+    return parse_plan_state(text)
+
+
 def _review_freeform_summary_text(text: str) -> str:
     return review_freeform_summary_text(text)
 
@@ -845,6 +856,7 @@ def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
         "dispositions": [_serialize_disposition(item) for item in metadata.dispositions],
         "new_items": [_serialize_unresolved_item(item) for item in metadata.new_items],
         "state": metadata.state,
+        "canonical_plan": metadata.canonical_plan,
     }
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -868,6 +880,11 @@ def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
             dispositions=tuple(_deserialize_disposition(item) for item in payload.get("dispositions", [])),
             new_items=tuple(_deserialize_unresolved_item(item) for item in payload.get("new_items", [])),
             state=str(payload["state"]) if payload.get("state") is not None else None,
+            canonical_plan=(
+                str(payload["canonical_plan"])
+                if payload.get("canonical_plan") is not None
+                else None
+            ),
         )
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         raise AgentLoopError("Invalid AGENT_LOOP_META payload.") from exc
@@ -940,6 +957,36 @@ def _max_unresolved_item_number_from_records(records: Sequence[PostedRoundRecord
 
 def _plan_subject(text: str) -> str:
     return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+
+def render_canonical_plan_steps(plan_steps: Sequence[str]) -> str:
+    return "\n".join(f"{index}. {step}" for index, step in enumerate(plan_steps, start=1))
+
+
+def render_canonical_plan_revision(
+    parsed_revision: StructuredPlanRevision,
+    prior_items: Sequence[UnresolvedReviewItem],
+) -> str:
+    sections = [parsed_revision.summary.strip()]
+    if prior_items or parsed_revision.prior_plan_item_dispositions:
+        sections.append(
+            _render_prior_dispositions_section(
+                heading="### Prior plan review item dispositions",
+                prior_items=prior_items,
+                dispositions=parsed_revision.prior_plan_item_dispositions,
+            )
+        )
+    else:
+        sections.append("### Prior plan review item dispositions\n- None.")
+    sections.append(
+        "\n".join(
+            [
+                "### Plan steps",
+                render_canonical_plan_steps(parsed_revision.plan_steps),
+            ]
+        )
+    )
+    return "\n\n".join(sections)
 
 
 def _resume_pr_round(
@@ -1025,11 +1072,11 @@ def _resume_plan_round(
             continue
         reviewer_records[metadata.agent] = record
     return (
-        latest_coder_record.body,
+        latest_coder_record.metadata.canonical_plan or latest_coder_record.body,
         ResumedReviewRound(
             round_number=latest_coder_record.metadata.round_number,
             prior_items=latest_coder_record.metadata.prior_items,
-            coder_output=latest_coder_record.body,
+            coder_output=latest_coder_record.metadata.canonical_plan or latest_coder_record.body,
             completed_reviews=tuple(reviewer_records[agent_display_name(agent)] for agent in configured_reviewers if agent_display_name(agent) in reviewer_records),
             next_unresolved_item_number=_max_unresolved_item_number_from_records(records) + 1,
         ),
@@ -1117,6 +1164,91 @@ def _render_public_pr_review_comment(
     return "\n\n".join(section for section in sections if section) + (
         ("\n\n" if sections else "") + "\n".join(footer)
     )
+
+
+def _render_public_plan_review_comment(
+    parsed_review: ParsedPlanReview,
+    *,
+    reviewer: str,
+    prior_items: Sequence[UnresolvedReviewItem],
+    dispositions: Sequence[ReviewItemDisposition],
+) -> str:
+    sections: list[str] = []
+    if parsed_review.summary:
+        sections.append(parsed_review.summary.strip())
+    if parsed_review.items.blocking:
+        sections.append(
+            "\n".join(
+                [
+                    "### Blocking plan issues",
+                    *[f"- {item.text}" for item in parsed_review.items.blocking],
+                ]
+            )
+        )
+    if parsed_review.items.same_plan:
+        sections.append(
+            "\n".join(
+                [
+                    "### Same-plan follow-ups",
+                    *[f"- {item.text}" for item in parsed_review.items.same_plan],
+                ]
+            )
+        )
+    if parsed_review.items.future:
+        sections.append(
+            "\n".join(
+                [
+                    "### Future follow-ups",
+                    *[f"- {item.text}" for item in parsed_review.items.future],
+                ]
+            )
+        )
+    if prior_items:
+        sections.append(
+            _render_prior_dispositions_section(
+                heading="### Prior unresolved plan item dispositions",
+                prior_items=prior_items,
+                dispositions=dispositions,
+            )
+        )
+    footer = [
+        f"<!-- AGENT_PLAN_STATE: {parsed_review.state} -->",
+        f"-- {_public_reviewer_name(reviewer)}",
+    ]
+    return "\n\n".join(section for section in sections if section) + (
+        ("\n\n" if sections else "") + "\n".join(footer)
+    )
+
+
+def _extract_plan_revision_human_requirements_block(text: str) -> str:
+    stripped = text.lstrip()
+    if not stripped.startswith("{"):
+        return ""
+    decoder = json.JSONDecoder()
+    payload, end = decoder.raw_decode(stripped)
+    if not isinstance(payload, dict):
+        return ""
+    trailing = stripped[end:].lstrip()
+    state_match = PLAN_STATE_RE.search(trailing)
+    if state_match is None:
+        return ""
+    return trailing[: state_match.start()].strip()
+
+
+def _render_public_plan_revision_comment(
+    parsed_revision: StructuredPlanRevision,
+    *,
+    prior_items: Sequence[UnresolvedReviewItem],
+    raw_text: str,
+    signature: str,
+) -> str:
+    sections = [render_canonical_plan_revision(parsed_revision, prior_items)]
+    human_requirements_block = _extract_plan_revision_human_requirements_block(raw_text)
+    if human_requirements_block:
+        sections.append(human_requirements_block)
+    sections.append(f"<!-- AGENT_PLAN_STATE: {parsed_revision.state} -->")
+    sections.append(f"-- {signature}")
+    return "\n\n".join(section for section in sections if section)
 
 
 def _should_record_new_blocking_item(summary: str, *, had_prior_items: bool, had_dispositions: bool) -> bool:
@@ -1729,12 +1861,11 @@ def _run_plan_first_loop(
                     config=config,
                     issue_number=issue_number,
                     body=_attach_round_metadata(
-                        _render_public_review_comment(
-                            review_output,
-                            review_kind="plan",
+                        _render_public_plan_review_comment(
+                            parsed_review,
+                            reviewer=reviewer_name,
                             prior_items=prior_unresolved_items,
                             dispositions=parsed_review.dispositions,
-                            new_items=reviewer_new_unresolved_items,
                         ),
                         PostedRoundMetadata(
                             flow="plan",
@@ -1876,21 +2007,33 @@ def _run_plan_first_loop(
             marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
             validate=lambda text, human_requirements=issue_context.human_requirements: _validate_response_with_human_requirements(
                 text,
-                marker_validator=parse_plan_state,
+                marker_validator=_validate_plan_revision_response,
                 human_requirements=human_requirements,
                 requirement_scope="planning requirements",
                 full_omission_fallback="Fetch the issue discussion directly before revising the plan.",
             ),
             usage_context=usage_context,
         )
-        current_plan = plan_response.text
+        canonical_plan: str | None = None
+        public_comment = plan_response.text
+        if isinstance(plan_response.marker_value, StructuredPlanRevision):
+            canonical_plan = render_canonical_plan_revision(plan_response.marker_value, must_fix_items)
+            current_plan = canonical_plan
+            public_comment = _render_public_plan_revision_comment(
+                plan_response.marker_value,
+                prior_items=must_fix_items,
+                raw_text=plan_response.text,
+                signature=agent_signature(config.coder),
+            )
+        else:
+            current_plan = plan_response.text
         coder_session_id = plan_response.session_id
         post_issue_comment(
             runner,
             config=config,
             issue_number=issue_number,
             body=_attach_round_metadata(
-                current_plan,
+                public_comment,
                 PostedRoundMetadata(
                     flow="plan",
                     role="coder",
@@ -1898,6 +2041,7 @@ def _run_plan_first_loop(
                     round_number=round_number + 1,
                     subject=_plan_subject(current_plan),
                     prior_items=tuple(must_fix_items),
+                    canonical_plan=canonical_plan,
                 ),
             ),
         )
