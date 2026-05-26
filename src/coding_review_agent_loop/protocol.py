@@ -50,6 +50,7 @@ LEGACY_FOLLOWUP_HEADING_RE = _followup_heading_re(r"non[- ]blocking follow[- ]up
 PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE = _followup_heading_re(
     r"prior unresolved item dispositions"
 )
+BLOCKING_ISSUES_HEADING_RE = _followup_heading_re(r"blocking issues")
 BLOCKING_PLAN_ISSUES_HEADING_RE = _followup_heading_re(r"blocking plan issues")
 SAME_PLAN_FOLLOWUP_HEADING_RE = _followup_heading_re(r"same[- ]plan follow[- ]ups")
 HUMAN_REQUIREMENTS_HEADING_RE = _followup_heading_re(r"human requirements")
@@ -117,6 +118,7 @@ class UnresolvedReviewItem:
 class ParsedReview:
     state: str
     summary: str
+    blocking_items: tuple[ApprovedFollowup, ...]
     followups: ApprovedFollowups
     dispositions: tuple[ReviewItemDisposition, ...]
 
@@ -334,6 +336,7 @@ def review_freeform_summary_text(text: str) -> str:
     lines: list[str] = []
     skip_structured_section = False
     structured_heading_res = (
+        BLOCKING_ISSUES_HEADING_RE,
         BLOCKING_PLAN_ISSUES_HEADING_RE,
         SAME_PLAN_FOLLOWUP_HEADING_RE,
         SAME_PR_FOLLOWUP_HEADING_RE,
@@ -471,6 +474,49 @@ def _extract_structured_response_object(text: str) -> dict[str, object] | None:
     return payload
 
 
+def _extract_json_object_prefix(text: str) -> tuple[dict[str, object], str] | None:
+    stripped = text.lstrip()
+    if not stripped.startswith("{"):
+        return None
+    decoder = json.JSONDecoder()
+    try:
+        payload, end = decoder.raw_decode(stripped)
+    except json.JSONDecodeError as exc:
+        raise AgentLoopError("Structured PR review must begin with one top-level JSON object.") from exc
+    if not isinstance(payload, dict):
+        raise AgentLoopError("Structured PR review must begin with a JSON object.")
+    return payload, stripped[end:]
+
+
+def _extract_structured_pr_review_payload(text: str) -> dict[str, object] | None:
+    extracted = _extract_json_object_prefix(text)
+    if extracted is None:
+        return None
+    payload, trailing = extracted
+    trailing = trailing.lstrip()
+    if HUMAN_REQUIREMENTS_RESOLVED_RE.match(trailing):
+        marker_match = HUMAN_REQUIREMENTS_RESOLVED_RE.match(trailing)
+        assert marker_match is not None
+        trailing = trailing[marker_match.end() :].lstrip()
+    state_match = STATE_RE.match(trailing)
+    if state_match is None:
+        raise AgentLoopError(
+            "Structured PR review must place <!-- AGENT_STATE: approved|blocking --> after the JSON object."
+        )
+    trailing = trailing[state_match.end() :].lstrip()
+    signature_match = re.match(r"^--\s+\S[^\n]*(?:\n)?$", trailing)
+    if signature_match is None or trailing[signature_match.end() :].strip():
+        raise AgentLoopError(
+            "Structured PR review may not include trailing prose after the JSON footer and signature."
+        )
+    footer_state = state_match.group(1).lower()
+    payload_state = payload.get("state")
+    if isinstance(payload_state, str) and payload_state.strip():
+        if payload_state.strip() != footer_state:
+            raise AgentLoopError("Structured PR review footer AGENT_STATE must match the payload state.")
+    return payload
+
+
 def _require_supported_schema_version(payload: dict[str, object]) -> None:
     if "schema_version" not in payload:
         raise AgentLoopError("Structured response is missing required field: schema_version")
@@ -547,6 +593,7 @@ def _finalize_parsed_review(
     *,
     state: str,
     summary: str,
+    blocking_items: tuple[ApprovedFollowup, ...],
     followups: ApprovedFollowups,
     dispositions: tuple[ReviewItemDisposition, ...],
 ) -> ParsedReview:
@@ -560,15 +607,16 @@ def _finalize_parsed_review(
         active_dispositions = [
             item.disposition for item in dispositions if item.disposition in {"blocking", "same-pr"}
         ]
-        if followups.same_pr or active_dispositions:
+        if blocking_items or followups.same_pr or active_dispositions:
             raise AgentLoopError(
                 "Approved reviews must be fully complete for this round. Do not use "
-                "`approved` when Same-PR follow-ups remain or when any prior unresolved "
+                "`approved` when blocking issues, Same-PR follow-ups, or any prior unresolved "
                 "item stays `still blocking` or `same-pr`."
             )
     return ParsedReview(
         state=state,
         summary=summary,
+        blocking_items=blocking_items,
         followups=followups,
         dispositions=dispositions,
     )
@@ -610,59 +658,57 @@ def _structured_followups(items: tuple[str, ...], *, reviewer: str) -> tuple[App
 
 
 def parse_structured_pr_review(text: str, *, reviewer: str) -> ParsedReview | None:
-    payload = _extract_structured_response_object(text)
+    payload = _extract_structured_pr_review_payload(text)
     if payload is None:
         return None
     _require_supported_schema_version(payload)
     kind = payload.get("kind")
     if isinstance(kind, str) and kind != "pr_review":
         raise AgentLoopError("Structured response kind mismatch: expected `pr_review`.")
-    try:
-        _expect_exact_keys(
-            payload,
-            context="pr_review",
-            required={
-                "schema_version",
-                "kind",
-                "state",
-                "summary",
-                "blocking_items",
-                "same_pr_followups",
-                "future_followups",
-                "prior_item_dispositions",
-            },
-        )
-        state = _expect_state(payload["state"], context="pr_review.state")
-        summary = _expect_non_empty_string(payload["summary"], context="pr_review.summary")
-        blocking_items = _expect_string_list(
-            payload["blocking_items"],
-            context="pr_review.blocking_items",
-            item_context="pr_review.blocking_items",
-        )
-        same_pr_followups = _expect_string_list(
-            payload["same_pr_followups"],
-            context="pr_review.same_pr_followups",
-            item_context="pr_review.same_pr_followups",
-        )
-        future_followups = _expect_string_list(
-            payload["future_followups"],
-            context="pr_review.future_followups",
-            item_context="pr_review.future_followups",
-        )
-        dispositions = _expect_disposition_list(
-            payload["prior_item_dispositions"],
-            context="pr_review.prior_item_dispositions",
-            reviewer=reviewer,
-            allowed_same_status="same-pr",
-            is_plan_review=False,
-        )
-    except AgentLoopError:
-        return None
+    _expect_exact_keys(
+        payload,
+        context="pr_review",
+        required={
+            "schema_version",
+            "kind",
+            "state",
+            "summary",
+            "blocking_items",
+            "same_pr_followups",
+            "future_followups",
+            "prior_item_dispositions",
+        },
+    )
+    state = _expect_state(payload["state"], context="pr_review.state")
+    summary = _expect_non_empty_string(payload["summary"], context="pr_review.summary")
+    blocking_items = _expect_string_list(
+        payload["blocking_items"],
+        context="pr_review.blocking_items",
+        item_context="pr_review.blocking_items",
+    )
+    same_pr_followups = _expect_string_list(
+        payload["same_pr_followups"],
+        context="pr_review.same_pr_followups",
+        item_context="pr_review.same_pr_followups",
+    )
+    future_followups = _expect_string_list(
+        payload["future_followups"],
+        context="pr_review.future_followups",
+        item_context="pr_review.future_followups",
+    )
+    dispositions = _expect_disposition_list(
+        payload["prior_item_dispositions"],
+        context="pr_review.prior_item_dispositions",
+        reviewer=reviewer,
+        allowed_same_status="same-pr",
+        is_plan_review=False,
+    )
     if state == "blocking" and future_followups:
         raise AgentLoopError("Blocking structured reviews may not include future follow-ups.")
     return _finalize_parsed_review(
         state=state,
         summary=summary,
+        blocking_items=_structured_followups(blocking_items, reviewer=reviewer),
         followups=ApprovedFollowups(
             same_pr=_structured_followups(same_pr_followups, reviewer=reviewer),
             future=_structured_followups(future_followups, reviewer=reviewer),
@@ -990,6 +1036,17 @@ def parse_approved_followups(text: str, *, reviewer: str) -> ApprovedFollowups:
     return ApprovedFollowups(same_pr=tuple(same_pr), future=tuple(future))
 
 
+def parse_pr_blocking_items(text: str, *, reviewer: str) -> tuple[ApprovedFollowup, ...]:
+    blocking: list[ApprovedFollowup] = []
+    _collect_section_items(
+        text,
+        sections=((BLOCKING_ISSUES_HEADING_RE, blocking),),
+        empty_item_re=EMPTY_FOLLOWUP_RE,
+        reviewer=reviewer,
+    )
+    return tuple(blocking)
+
+
 def parse_plan_review_items(text: str, *, reviewer: str) -> PlanReviewItems:
     blocking: list[ApprovedFollowup] = []
     same_plan: list[ApprovedFollowup] = []
@@ -1171,14 +1228,23 @@ def parse_review(text: str, *, reviewer: str) -> ParsedReview:
     """Parse a review, including state, follow-ups, and prior-item dispositions."""
     state = parse_agent_state(text)
     summary = review_freeform_summary_text(text)
+    blocking_items = parse_pr_blocking_items(text, reviewer=reviewer)
     followups = parse_approved_followups(text, reviewer=reviewer)
     dispositions = parse_unresolved_item_dispositions(text, reviewer=reviewer)
     return _finalize_parsed_review(
         state=state,
         summary=summary,
+        blocking_items=blocking_items,
         followups=followups,
         dispositions=dispositions,
     )
+
+
+def parse_pr_review(text: str, *, reviewer: str) -> ParsedReview:
+    parsed = parse_structured_pr_review(text, reviewer=reviewer)
+    if parsed is not None:
+        return parsed
+    return parse_review(text, reviewer=reviewer)
 
 
 def parse_plan_review(text: str, *, reviewer: str) -> ParsedPlanReview:

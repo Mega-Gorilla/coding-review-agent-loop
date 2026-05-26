@@ -61,9 +61,12 @@ from coding_review_agent_loop.orchestrator import (
     _decode_round_metadata,
     _format_unresolved_item_label,
     _plan_subject,
+    _render_public_pr_review_comment,
     _render_public_review_comment,
     _review_freeform_summary_text,
+    _resume_pr_round,
     _strip_round_metadata,
+    _validate_review_response,
     _validate_plan_review_response,
 )
 from coding_review_agent_loop.prompts import (
@@ -84,6 +87,7 @@ from coding_review_agent_loop.prompts import (
 from coding_review_agent_loop.protocol import (
     parse_approved_followups,
     parse_human_requirements_acknowledgement,
+    parse_pr_review,
     parse_plan_item_dispositions,
     parse_plan_review,
     parse_plan_review_items,
@@ -451,6 +455,12 @@ def prior_item_dispositions(*lines: str) -> str:
     if not lines:
         return ""
     return "\n\n### Prior unresolved item dispositions\n" + "\n".join(f"- {line}" for line in lines)
+
+
+def blocking_issues(*lines: str) -> str:
+    if not lines:
+        return ""
+    return "\n\n### Blocking issues\n" + "\n".join(f"- {line}" for line in lines)
 
 
 def prior_plan_item_dispositions(*lines: str) -> str:
@@ -2012,6 +2022,25 @@ def test_parse_review_populates_summary_from_legacy_markdown():
     assert parsed.summary == "Blocking issue summary."
 
 
+def test_parse_review_round_trips_blocking_issues_section_without_polluting_summary():
+    review = (
+        "Blocking issue summary."
+        + blocking_issues(
+            "Cover the regression case in the PR test suite.",
+            "Tighten the error assertion wording.",
+        )
+        + "\n\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+    )
+
+    parsed = parse_review(review, reviewer="OpenAI Codex")
+
+    assert parsed.summary == "Blocking issue summary."
+    assert [item.text for item in parsed.blocking_items] == [
+        "Cover the regression case in the PR test suite.",
+        "Tighten the error assertion wording.",
+    ]
+
+
 def test_parse_plan_review_populates_summary_from_legacy_markdown():
     review = """
     Plan needs one more regression test.
@@ -2028,25 +2057,28 @@ def test_parse_plan_review_populates_summary_from_legacy_markdown():
     assert parsed.summary == "Plan needs one more regression test."
 
 
-def test_parse_structured_pr_review_normalizes_v1_payload():
-    payload = json.dumps(
-        {
-            "schema_version": 1,
-            "kind": "pr_review",
-            "state": "approved",
-            "summary": "Looks good after the latest fix.",
-            "blocking_items": [],
-            "same_pr_followups": [],
-            "future_followups": ["Document cleanup for a later PR."],
-            "prior_item_dispositions": [
-                {"item_id": "item-1", "disposition": "resolved"},
-                {
-                    "item_id": "item-2",
-                    "disposition": "future",
-                    "note": "okay to split into follow-up work",
-                },
-            ],
-        }
+def test_parse_structured_pr_review_normalizes_v1_payload_with_footer_contract():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "approved",
+                "summary": "Looks good after the latest fix.",
+                "blocking_items": [],
+                "same_pr_followups": [],
+                "future_followups": ["Document cleanup for a later PR."],
+                "prior_item_dispositions": [
+                    {"item_id": "item-1", "disposition": "resolved"},
+                    {
+                        "item_id": "item-2",
+                        "disposition": "future",
+                        "note": "okay to split into follow-up work",
+                    },
+                ],
+            }
+        )
+        + "\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex\n"
     )
 
     parsed = parse_structured_pr_review(payload, reviewer="OpenAI Codex")
@@ -2054,6 +2086,7 @@ def test_parse_structured_pr_review_normalizes_v1_payload():
     assert parsed is not None
     assert parsed.state == "approved"
     assert parsed.summary == "Looks good after the latest fix."
+    assert parsed.blocking_items == ()
     assert [item.text for item in parsed.followups.future] == ["Document cleanup for a later PR."]
     assert [(item.item_id, item.disposition, item.note) for item in parsed.dispositions] == [
         ("item-1", "resolved", None),
@@ -2062,17 +2095,20 @@ def test_parse_structured_pr_review_normalizes_v1_payload():
 
 
 def test_parse_structured_pr_review_rejects_kind_mismatch():
-    payload = json.dumps(
-        {
-            "schema_version": 1,
-            "kind": "plan_review",
-            "state": "approved",
-            "summary": "Wrong kind.",
-            "blocking_plan_issues": [],
-            "same_plan_followups": [],
-            "future_followups": [],
-            "prior_plan_item_dispositions": [],
-        }
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": "approved",
+                "summary": "Wrong kind.",
+                "blocking_plan_issues": [],
+                "same_plan_followups": [],
+                "future_followups": [],
+                "prior_plan_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
     )
 
     with pytest.raises(AgentLoopError, match="kind mismatch"):
@@ -2080,62 +2116,175 @@ def test_parse_structured_pr_review_rejects_kind_mismatch():
 
 
 def test_parse_structured_pr_review_hard_fails_on_unsupported_schema_version():
-    payload = json.dumps(
-        {
-            "schema_version": 2,
-            "kind": "pr_review",
-            "state": "approved",
-            "summary": "Wrong version.",
-            "blocking_items": [],
-            "same_pr_followups": [],
-            "future_followups": [],
-            "prior_item_dispositions": [],
-        }
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 2,
+                "kind": "pr_review",
+                "state": "approved",
+                "summary": "Wrong version.",
+                "blocking_items": [],
+                "same_pr_followups": [],
+                "future_followups": [],
+                "prior_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
     )
 
     with pytest.raises(AgentLoopError, match="Unsupported structured response schema_version: 2"):
         parse_structured_pr_review(payload, reviewer="OpenAI Codex")
 
 
-def test_parse_structured_pr_review_falls_back_on_malformed_json():
-    assert parse_structured_pr_review('{"schema_version": 1,', reviewer="OpenAI Codex") is None
+def test_parse_pr_review_falls_back_to_markdown_when_no_structured_candidate_exists():
+    review = "Looks good in markdown.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+
+    parsed = parse_pr_review(review, reviewer="OpenAI Codex")
+
+    assert parsed.state == "approved"
+    assert parsed.summary == "Looks good in markdown."
 
 
-def test_parse_structured_pr_review_falls_back_on_invalid_fields():
-    payload = json.dumps(
-        {
-            "schema_version": 1,
-            "kind": "pr_review",
-            "state": "approved",
-            "summary": "Missing required arrays.",
-            "blocking_items": [],
-            "same_pr_followups": [],
-            "future_followups": [],
-        }
+def test_parse_pr_review_rejects_invalid_structured_candidate_instead_of_falling_back_to_markdown():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "approved",
+                "summary": "Missing required arrays.",
+                "blocking_items": [],
+                "same_pr_followups": [],
+                "future_followups": [],
+            }
+        )
+        + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
     )
 
-    assert parse_structured_pr_review(payload, reviewer="OpenAI Codex") is None
+    with pytest.raises(AgentLoopError, match="missing required field"):
+        parse_pr_review(payload, reviewer="OpenAI Codex")
 
 
 def test_parse_structured_pr_review_rejects_future_followups_in_blocking_reviews():
-    payload = json.dumps(
-        {
-            "schema_version": 1,
-            "kind": "pr_review",
-            "state": "blocking",
-            "summary": "Still blocked.",
-            "blocking_items": ["Needs one more test."],
-            "same_pr_followups": [],
-            "future_followups": ["Clean this up later."],
-            "prior_item_dispositions": [],
-        }
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "blocking",
+                "summary": "Still blocked.",
+                "blocking_items": ["Needs one more test."],
+                "same_pr_followups": [],
+                "future_followups": ["Clean this up later."],
+                "prior_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
     )
 
     with pytest.raises(AgentLoopError, match="Blocking structured reviews may not include future"):
         parse_structured_pr_review(payload, reviewer="OpenAI Codex")
 
 
-def test_parse_structured_pr_review_rejects_unknown_nested_keys_via_fallback():
+def test_parse_pr_review_rejects_structured_candidate_with_unknown_nested_keys():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "approved",
+                "summary": "LGTM.",
+                "blocking_items": [],
+                "same_pr_followups": [],
+                "future_followups": [],
+                "prior_item_dispositions": [
+                    {"item_id": "item-1", "disposition": "resolved", "extra": "nope"},
+                ],
+            }
+        )
+        + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+    )
+
+    with pytest.raises(AgentLoopError, match="unknown field"):
+        parse_pr_review(payload, reviewer="OpenAI Codex")
+
+
+def test_parse_pr_review_rejects_structured_candidate_with_invalid_item_id():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "approved",
+                "summary": "LGTM.",
+                "blocking_items": [],
+                "same_pr_followups": [],
+                "future_followups": [],
+                "prior_item_dispositions": [
+                    {"item_id": "item 1", "disposition": "resolved"},
+                ],
+            }
+        )
+        + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+    )
+
+    with pytest.raises(AgentLoopError, match="must match"):
+        parse_pr_review(payload, reviewer="OpenAI Codex")
+
+
+def test_parse_pr_review_requires_strict_structured_disposition_enums():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "approved",
+                "summary": "LGTM.",
+                "blocking_items": [],
+                "same_pr_followups": [],
+                "future_followups": [],
+                "prior_item_dispositions": [
+                    {"item_id": "item-1", "disposition": "still blocking"},
+                ],
+            }
+        )
+        + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+    )
+
+    with pytest.raises(AgentLoopError, match="must be one of"):
+        parse_pr_review(payload, reviewer="OpenAI Codex")
+
+
+def test_parse_structured_pr_review_rejects_approved_blocking_items():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "approved",
+                "summary": "Almost there.",
+                "blocking_items": ["Still needs a regression test."],
+                "same_pr_followups": [],
+                "future_followups": [],
+                "prior_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+    )
+
+    with pytest.raises(AgentLoopError, match="Approved reviews must be fully complete"):
+        parse_structured_pr_review(payload, reviewer="OpenAI Codex")
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "\nExtra explanation after the payload.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        "\n```text\nextra block\n```\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        "\n- stray bullet\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+    ],
+)
+def test_parse_structured_pr_review_rejects_trailing_content_before_footer(suffix):
     payload = json.dumps(
         {
             "schema_version": 1,
@@ -2145,51 +2294,33 @@ def test_parse_structured_pr_review_rejects_unknown_nested_keys_via_fallback():
             "blocking_items": [],
             "same_pr_followups": [],
             "future_followups": [],
-            "prior_item_dispositions": [
-                {"item_id": "item-1", "disposition": "resolved", "extra": "nope"},
-            ],
+            "prior_item_dispositions": [],
         }
     )
 
-    assert parse_structured_pr_review(payload, reviewer="OpenAI Codex") is None
+    with pytest.raises(AgentLoopError, match="place <!-- AGENT_STATE|may not include trailing prose"):
+        parse_structured_pr_review(payload + suffix, reviewer="OpenAI Codex")
 
 
-def test_parse_structured_pr_review_rejects_invalid_item_id_via_fallback():
-    payload = json.dumps(
-        {
-            "schema_version": 1,
-            "kind": "pr_review",
-            "state": "approved",
-            "summary": "LGTM.",
-            "blocking_items": [],
-            "same_pr_followups": [],
-            "future_followups": [],
-            "prior_item_dispositions": [
-                {"item_id": "item 1", "disposition": "resolved"},
-            ],
-        }
+def test_parse_structured_pr_review_rejects_footer_state_mismatch():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "approved",
+                "summary": "LGTM.",
+                "blocking_items": [],
+                "same_pr_followups": [],
+                "future_followups": [],
+                "prior_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
     )
 
-    assert parse_structured_pr_review(payload, reviewer="OpenAI Codex") is None
-
-
-def test_parse_structured_pr_review_requires_strict_disposition_enums():
-    payload = json.dumps(
-        {
-            "schema_version": 1,
-            "kind": "pr_review",
-            "state": "approved",
-            "summary": "LGTM.",
-            "blocking_items": [],
-            "same_pr_followups": [],
-            "future_followups": [],
-            "prior_item_dispositions": [
-                {"item_id": "item-1", "disposition": "still blocking"},
-            ],
-        }
-    )
-
-    assert parse_structured_pr_review(payload, reviewer="OpenAI Codex") is None
+    with pytest.raises(AgentLoopError, match="must match the payload state"):
+        parse_structured_pr_review(payload, reviewer="OpenAI Codex")
 
 
 def test_parse_structured_pr_review_falls_back_when_json_is_embedded_in_markdown():
@@ -2386,6 +2517,9 @@ def test_review_prompt_includes_prior_unresolved_items_and_disposition_instructi
     assert "same-round findings from\nother reviewers appear elsewhere in the PR discussion" in prompt
     assert "Same-PR follow-ups may appear only in blocking reviews." in prompt
     assert "no blocking issues, no Same-PR follow-ups, and no" in prompt
+    assert '"kind": "pr_review"' in prompt
+    assert "After the JSON object, include only:" in prompt
+    assert "`### Blocking issues`" in prompt
 
 
 def test_review_prompt_indents_multiline_prior_unresolved_item_text(tmp_path):
@@ -2489,6 +2623,9 @@ def test_plan_revision_prompt_includes_unresolved_ledger_and_required_dispositio
 def test_review_freeform_summary_text_strips_structured_followup_sections():
     review = """Blocking issue summary.
 
+### Blocking issues
+- needs one more assertion
+
 ### Prior unresolved item dispositions
 - [item-1] still blocking: needs one more assertion
 
@@ -2506,6 +2643,126 @@ def test_review_freeform_summary_text_strips_structured_followup_sections():
 """
 
     assert _review_freeform_summary_text(review) == "Blocking issue summary."
+
+
+def test_validate_review_response_accepts_structured_pr_review():
+    review = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "blocking",
+                "summary": "Need one more regression test before merge.",
+                "blocking_items": ["Add the mixed-history regression case to the suite."],
+                "same_pr_followups": [],
+                "future_followups": [],
+                "prior_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+    )
+
+    parsed = _validate_review_response(review, reviewer="OpenAI Codex", unresolved_items=())
+
+    assert parsed.summary == "Need one more regression test before merge."
+    assert [item.text for item in parsed.blocking_items] == [
+        "Add the mixed-history regression case to the suite."
+    ]
+
+
+def test_render_public_pr_review_comment_uses_normalized_sections_and_footer():
+    parsed = parse_pr_review(
+        (
+            "Need one more regression test."
+            + blocking_issues("Exercise the structured-resume path.")
+            + "\n\n### Same-PR follow-ups\n- Rename the helper for clarity."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+        ),
+        reviewer="OpenAI Codex",
+    )
+    prior_items = (
+        UnresolvedReviewItem(
+            item_id="item-1",
+            reviewer="Anthropic Claude",
+            source_round=1,
+            text="Add a regression test before merge.",
+            status="blocking",
+        ),
+    )
+
+    rendered = _render_public_pr_review_comment(
+        parsed,
+        reviewer="Codex",
+        human_requirements_resolved_flag=True,
+        prior_items=prior_items,
+        dispositions=parsed.dispositions,
+    )
+
+    assert rendered == (
+        "Need one more regression test.\n\n"
+        "### Blocking issues\n"
+        "- Exercise the structured-resume path.\n\n"
+        "### Same-PR follow-ups\n"
+        "- Rename the helper for clarity.\n\n"
+        "### Prior unresolved item dispositions\n"
+        "- [item-1] Blocking issue from Anthropic Claude, round 1: Add a regression test before merge. -> resolved\n\n"
+        "<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n"
+        "<!-- AGENT_STATE: blocking -->\n"
+        "-- OpenAI Codex"
+    )
+
+
+def test_render_public_pr_review_comment_normalizes_markdown_and_structured_reviews_the_same():
+    markdown_review = (
+        "Need one more regression test."
+        + blocking_issues("Exercise the structured-resume path.")
+        + "\n\n### Same-PR follow-ups\n- Rename the helper for clarity."
+        + prior_item_dispositions("[item-1] resolved")
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+    )
+    structured_review = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "blocking",
+                "summary": "Need one more regression test.",
+                "blocking_items": ["Exercise the structured-resume path."],
+                "same_pr_followups": ["Rename the helper for clarity."],
+                "future_followups": [],
+                "prior_item_dispositions": [{"item_id": "item-1", "disposition": "resolved"}],
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+    )
+    prior_items = (
+        UnresolvedReviewItem(
+            item_id="item-1",
+            reviewer="Anthropic Claude",
+            source_round=1,
+            text="Add a regression test before merge.",
+            status="blocking",
+        ),
+    )
+
+    markdown_rendered = _render_public_pr_review_comment(
+        parse_pr_review(markdown_review, reviewer="OpenAI Codex"),
+        reviewer="Codex",
+        human_requirements_resolved_flag=False,
+        prior_items=prior_items,
+        dispositions=parse_pr_review(markdown_review, reviewer="OpenAI Codex").dispositions,
+    )
+    structured_parsed = parse_pr_review(structured_review, reviewer="OpenAI Codex")
+    structured_rendered = _render_public_pr_review_comment(
+        structured_parsed,
+        reviewer="Codex",
+        human_requirements_resolved_flag=False,
+        prior_items=prior_items,
+        dispositions=structured_parsed.dispositions,
+    )
+
+    assert markdown_rendered == structured_rendered
 
 
 def test_format_unresolved_item_label_normalizes_multiline_text_and_preserves_origin_status():
@@ -4471,7 +4728,7 @@ def test_pr_loop_keeps_blocking_review_when_future_followups_are_misclassified(t
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
     assert runner.comments[0].startswith("Still blocked.")
-    assert "Consider a broader cleanup later." in runner.comments[0]
+    assert "Consider a broader cleanup later." not in runner.comments[0]
     followup_prompt = next(
         cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"] and "Address the review below" in cmd[-1]
     )
@@ -4639,7 +4896,7 @@ def test_pr_loop_ignores_approved_followups_by_default(tmp_path):
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
     assert runner.comments == [
-        "LGTM.\n\n### Non-blocking follow-ups\n- Add cleanup docs.\n"
+        "LGTM.\n\n### Future follow-ups\n- Add cleanup docs.\n"
         "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
     ]
 
@@ -5393,6 +5650,98 @@ def test_pr_loop_posts_human_readable_item_labels_in_new_and_prior_sections(tmp_
         "<!-- AGENT_STATE: approved -->\n"
         "-- OpenAI Codex"
     )
+
+
+def test_pr_loop_tracks_only_summary_when_blocking_items_phrase_the_issue_differently(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=["Implemented fixes.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
+        codex_outputs=[
+            "Needs one more regression test before merge."
+            + blocking_issues("Add the mixed-history resume case to `tests/test_agent_loop.py`.")
+            + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "Looks good."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex", max_rounds=2)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    second_coder_prompt = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]][0]
+    assert "Needs one more regression test before merge." in second_coder_prompt
+    assert "Add the mixed-history resume case" not in second_coder_prompt
+    assert runner.comments[0] == (
+        "Needs one more regression test before merge.\n\n"
+        "### Blocking issues\n"
+        "- Add the mixed-history resume case to `tests/test_agent_loop.py`.\n"
+        "<!-- AGENT_STATE: blocking -->\n"
+        "-- OpenAI Codex"
+    )
+
+
+def test_resume_pr_round_reparses_orchestrator_rendered_blocking_issues_comment():
+    carried_item = UnresolvedReviewItem(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Need one more regression test before merge.",
+        status="blocking",
+        source_status="blocking",
+    )
+    rendered_review = _render_public_pr_review_comment(
+        parse_pr_review(
+            "Need one more regression test before merge."
+            + blocking_issues("Exercise the structured-resume path.")
+            + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            reviewer="OpenAI Codex",
+        ),
+        reviewer="Codex",
+        human_requirements_resolved_flag=False,
+        prior_items=(),
+        dispositions=(),
+    )
+    review_comment = _attach_round_metadata(
+        rendered_review,
+        PostedRoundMetadata(
+            flow="pr",
+            role="reviewer",
+            agent="Codex",
+            round_number=2,
+            subject="abc123",
+            prior_items=(carried_item,),
+            dispositions=(),
+            new_items=(),
+            state="blocking",
+        ),
+    )
+    coder_comment = _attach_round_metadata(
+        "Addressed the review.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        PostedRoundMetadata(
+            flow="pr",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject="abc123",
+            prior_items=(carried_item,),
+        ),
+    )
+
+    resumed = _resume_pr_round(
+        [
+            IssueComment(author="bot", created_at="2026-05-25T00:00:00Z", body=coder_comment),
+            IssueComment(author="bot", created_at="2026-05-25T00:01:00Z", body=review_comment),
+        ],
+        head_sha="abc123",
+        configured_reviewers=("codex",),
+    )
+
+    assert resumed is not None
+    resumed_review = parse_review(resumed.completed_reviews[0].body, reviewer="Codex")
+    assert [item.text for item in resumed_review.blocking_items] == [
+        "Exercise the structured-resume path."
+    ]
+    assert resumed_review.summary == "Need one more regression test before merge."
 
 
 def test_pr_loop_does_not_expose_same_round_item_ids_to_later_reviewers(tmp_path):
