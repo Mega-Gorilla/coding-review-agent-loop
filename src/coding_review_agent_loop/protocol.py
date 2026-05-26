@@ -68,7 +68,7 @@ ITEM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 def _empty_placeholder_re(*phrases: str) -> re.Pattern[str]:
     joined = "|".join(phrases)
-    return re.compile(rf"^(?:none|n/a|{joined})\.?$", re.I)
+    return re.compile(rf"^\(?\s*(?:none|n/a|{joined})\s*\)?\.?$", re.I)
 
 
 EMPTY_FOLLOWUP_RE = _empty_placeholder_re(
@@ -121,6 +121,7 @@ class ParsedReview:
     blocking_items: tuple[ApprovedFollowup, ...]
     followups: ApprovedFollowups
     dispositions: tuple[ReviewItemDisposition, ...]
+    raw_dispositions_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -136,6 +137,7 @@ class ParsedPlanReview:
     summary: str
     items: PlanReviewItems
     dispositions: tuple[ReviewItemDisposition, ...]
+    raw_dispositions_text: str = ""
 
 
 @dataclass(frozen=True)
@@ -596,6 +598,7 @@ def _finalize_parsed_review(
     blocking_items: tuple[ApprovedFollowup, ...],
     followups: ApprovedFollowups,
     dispositions: tuple[ReviewItemDisposition, ...],
+    raw_dispositions_text: str = "",
 ) -> ParsedReview:
     if state == "blocking" and followups.future:
         followups = ApprovedFollowups(same_pr=followups.same_pr, future=())
@@ -619,6 +622,7 @@ def _finalize_parsed_review(
         blocking_items=blocking_items,
         followups=followups,
         dispositions=dispositions,
+        raw_dispositions_text=raw_dispositions_text,
     )
 
 
@@ -628,6 +632,7 @@ def _finalize_parsed_plan_review(
     summary: str,
     items: PlanReviewItems,
     dispositions: tuple[ReviewItemDisposition, ...],
+    raw_dispositions_text: str = "",
 ) -> ParsedPlanReview:
     if state == "blocking" and items.future:
         items = PlanReviewItems(blocking=items.blocking, same_plan=items.same_plan, future=())
@@ -650,6 +655,7 @@ def _finalize_parsed_plan_review(
         summary=summary,
         items=items,
         dispositions=dispositions,
+        raw_dispositions_text=raw_dispositions_text,
     )
 
 
@@ -1019,6 +1025,21 @@ def _collect_section_items(
     flush_current()
 
 
+def _extract_section_text(text: str, *, heading_re: re.Pattern[str]) -> str:
+    active = False
+    lines: list[str] = []
+    for line in text.splitlines():
+        if heading_re.match(line):
+            active = True
+            continue
+        if not active:
+            continue
+        if ANY_HEADING_RE.match(line) or HTML_COMMENT_RE.match(line) or SIGNATURE_RE.match(line):
+            break
+        lines.append(line)
+    return "\n".join(lines).strip()
+
+
 def parse_approved_followups(text: str, *, reviewer: str) -> ApprovedFollowups:
     """Extract same-PR and future follow-ups from an approved review."""
     same_pr: list[ApprovedFollowup] = []
@@ -1141,10 +1162,12 @@ def _parse_unresolved_item_dispositions(
 ) -> tuple[ReviewItemDisposition, ...]:
     dispositions: list[ReviewItemDisposition] = []
     active = False
+    section_heading: str | None = None
 
-    for line in text.splitlines():
+    for line_number, line in enumerate(text.splitlines(), start=1):
         if heading_re.match(line):
             active = True
+            section_heading = line.strip()
             continue
         if not active:
             continue
@@ -1161,7 +1184,10 @@ def _parse_unresolved_item_dispositions(
             continue
         match = disposition_re.match(entry)
         if not match:
-            raise AgentLoopError(error_message)
+            raise AgentLoopError(
+                f"{error_message} In section `{section_heading or 'unknown section'}`, "
+                f"line {line_number}: `{entry}`."
+            )
         note = match.group("note")
         normalized_note = note.strip() if note else None
         disposition = _normalize_disposition(match.group("status"), same_status=same_status)
@@ -1171,7 +1197,10 @@ def _parse_unresolved_item_dispositions(
             same_status=same_status,
             is_plan_review=is_plan_review,
         ):
-            raise AgentLoopError(error_message)
+            raise AgentLoopError(
+                f"{error_message} In section `{section_heading or 'unknown section'}`, "
+                f"line {line_number}: `{entry}`."
+            )
         dispositions.append(
             ReviewItemDisposition(
                 item_id=match.group("item_id"),
@@ -1237,6 +1266,9 @@ def parse_review(text: str, *, reviewer: str) -> ParsedReview:
         blocking_items=blocking_items,
         followups=followups,
         dispositions=dispositions,
+        raw_dispositions_text=_extract_section_text(
+            text, heading_re=PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE
+        ),
     )
 
 
@@ -1258,6 +1290,9 @@ def parse_plan_review(text: str, *, reviewer: str) -> ParsedPlanReview:
         summary=summary,
         items=items,
         dispositions=dispositions,
+        raw_dispositions_text=_extract_section_text(
+            text, heading_re=PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE
+        ),
     )
 
 
