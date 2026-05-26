@@ -179,6 +179,12 @@ class PostedRoundRecord:
 
 
 @dataclass(frozen=True)
+class ResumedRoundSelection:
+    anchor_record: PostedRoundRecord
+    current_round_records: tuple[PostedRoundRecord, ...]
+
+
+@dataclass(frozen=True)
 class ResumedReviewRound:
     round_number: int
     prior_items: tuple[UnresolvedReviewItem, ...]
@@ -1016,6 +1022,56 @@ def _extract_round_metadata_records(comments: Sequence[object], *, flow: str) ->
     return tuple(records)
 
 
+def _prior_item_ledger_signature(items: Sequence[UnresolvedReviewItem]) -> tuple[tuple[str, str, int, str, str, str | None, tuple[str, ...]], ...]:
+    return tuple(
+        (
+            item.item_id,
+            item.reviewer,
+            item.source_round,
+            item.text,
+            item.status,
+            item.source_status,
+            item.notes,
+        )
+        for item in items
+    )
+
+
+def _select_current_round_records(
+    records: Sequence[PostedRoundRecord],
+    *,
+    subject: str,
+) -> ResumedRoundSelection | None:
+    subject_records = [record for record in records if record.metadata.subject == subject]
+    if not subject_records:
+        return None
+    anchor_record = subject_records[-1]
+    anchor_metadata = anchor_record.metadata
+    prior_items_signature = _prior_item_ledger_signature(anchor_metadata.prior_items)
+    current_round_records = tuple(
+        record
+        for record in subject_records
+        if record.metadata.round_number == anchor_metadata.round_number
+        and _prior_item_ledger_signature(record.metadata.prior_items) == prior_items_signature
+    )
+    latest_coder_record = next(
+        (
+            record
+            for record in reversed(current_round_records)
+            if record.metadata.role == "coder"
+        ),
+        None,
+    )
+    if latest_coder_record is not None:
+        current_round_records = tuple(
+            record for record in current_round_records if record.index >= latest_coder_record.index
+        )
+    return ResumedRoundSelection(
+        anchor_record=anchor_record,
+        current_round_records=current_round_records,
+    )
+
+
 def _max_unresolved_item_number_from_records(records: Sequence[PostedRoundRecord]) -> int:
     max_number = 0
     for record in records:
@@ -1071,22 +1127,19 @@ def _resume_pr_round(
     records = _extract_round_metadata_records(comments, flow="pr")
     if not records:
         return None
-    current_subject_records = [record for record in records if record.metadata.subject == head_sha]
-    if not current_subject_records:
+    selection = _select_current_round_records(records, subject=head_sha)
+    if selection is None:
         return None
+    current_round_records = selection.current_round_records
+    anchor_metadata = selection.anchor_record.metadata
     latest_coder_record = next(
         (
             record
-            for record in reversed(current_subject_records)
+            for record in reversed(current_round_records)
             if record.metadata.role == "coder"
         ),
         None,
     )
-    current_round_records = current_subject_records
-    if latest_coder_record is not None:
-        current_round_records = [
-            record for record in current_round_records if record.index >= latest_coder_record.index
-        ]
     reviewer_records: dict[str, PostedRoundRecord] = {}
     configured_reviewer_names = {agent_display_name(agent) for agent in configured_reviewers}
     for record in current_round_records:
@@ -1096,22 +1149,17 @@ def _resume_pr_round(
         reviewer_records[metadata.agent] = record
     if latest_coder_record is None and not reviewer_records:
         return None
-    prior_items = ()
-    if latest_coder_record is not None:
-        prior_items = latest_coder_record.metadata.prior_items
-    elif reviewer_records:
-        prior_items = next(iter(reviewer_records.values())).metadata.prior_items
-    round_number = (
-        latest_coder_record.metadata.round_number
-        if latest_coder_record is not None
-        else next(iter(reviewer_records.values())).metadata.round_number
-    )
+    prior_items = anchor_metadata.prior_items
+    round_number = anchor_metadata.round_number
     return ResumedReviewRound(
         round_number=round_number,
         prior_items=prior_items,
         coder_output=latest_coder_record.body if latest_coder_record is not None else None,
         completed_reviews=tuple(reviewer_records[agent_display_name(agent)] for agent in configured_reviewers if agent_display_name(agent) in reviewer_records),
-        next_unresolved_item_number=_max_unresolved_item_number_from_records(records) + 1,
+        next_unresolved_item_number=_max_unresolved_item_number_from_records(
+            [record for record in records if record.metadata.subject == head_sha]
+        )
+        + 1,
     )
 
 
@@ -1123,18 +1171,15 @@ def _resume_plan_round(
     records = _extract_round_metadata_records(comments, flow="plan")
     if not records:
         return None
-    latest_coder_record = next(
-        (record for record in reversed(records) if record.metadata.role == "coder"),
-        None,
-    )
+    latest_coder_record = next((record for record in reversed(records) if record.metadata.role == "coder"), None)
     if latest_coder_record is None:
         return None
-    subject = latest_coder_record.metadata.subject
-    current_round_records = [
-        record
-        for record in records
-        if record.metadata.subject == subject and record.index >= latest_coder_record.index
-    ]
+    selection = _select_current_round_records(records, subject=latest_coder_record.metadata.subject)
+    if selection is None:
+        return None
+    current_round_records = selection.current_round_records
+    anchor_metadata = selection.anchor_record.metadata
+    current_plan = latest_coder_record.metadata.canonical_plan or latest_coder_record.body
     reviewer_records: dict[str, PostedRoundRecord] = {}
     configured_reviewer_names = {agent_display_name(agent) for agent in configured_reviewers}
     for record in current_round_records:
@@ -1143,15 +1188,37 @@ def _resume_plan_round(
             continue
         reviewer_records[metadata.agent] = record
     return (
-        latest_coder_record.metadata.canonical_plan or latest_coder_record.body,
+        current_plan,
         ResumedReviewRound(
-            round_number=latest_coder_record.metadata.round_number,
-            prior_items=latest_coder_record.metadata.prior_items,
-            coder_output=latest_coder_record.metadata.canonical_plan or latest_coder_record.body,
+            round_number=anchor_metadata.round_number,
+            prior_items=anchor_metadata.prior_items,
+            coder_output=current_plan,
             completed_reviews=tuple(reviewer_records[agent_display_name(agent)] for agent in configured_reviewers if agent_display_name(agent) in reviewer_records),
-            next_unresolved_item_number=_max_unresolved_item_number_from_records(records) + 1,
+            next_unresolved_item_number=_max_unresolved_item_number_from_records(
+                [record for record in records if record.metadata.subject == anchor_metadata.subject]
+            )
+            + 1,
         ),
     )
+
+
+def _record_prior_item_disposition(
+    prior_dispositions: dict[str, list[ReviewItemDisposition]],
+    disposition: ReviewItemDisposition,
+    *,
+    flow: str,
+    round_number: int,
+    subject: str,
+    reviewer_name: str,
+) -> None:
+    if disposition.item_id not in prior_dispositions:
+        raise AgentLoopError(
+            "Resumed "
+            f"{flow} round {round_number} reconstructed prior items "
+            f"{', '.join(sorted(prior_dispositions)) or '(none)'}, but {reviewer_name} "
+            f"dispositioned unknown item `{disposition.item_id}` for subject `{subject}`."
+        )
+    prior_dispositions[disposition.item_id].append(disposition)
 
 
 def _render_public_review_comment(
@@ -1888,7 +1955,14 @@ def _run_plan_first_loop(
                 f"{round_number}: {reviewer_name} outcome is {_describe_plan_review_outcome(parsed_review)}",
             )
             for disposition in parsed_review.dispositions:
-                prior_dispositions[disposition.item_id].append(disposition)
+                _record_prior_item_disposition(
+                    prior_dispositions,
+                    disposition,
+                    flow="plan",
+                    round_number=round_number,
+                    subject=_plan_subject(current_plan),
+                    reviewer_name=reviewer_name,
+                )
             if review_state == "blocking":
                 all_approved = False
                 blocking_reviews.append((reviewer_name, review_output))
@@ -2461,7 +2535,14 @@ def run_pr_loop(
                     reviewer_new_unresolved_items = []
 
                 for disposition in parsed_review.dispositions:
-                    prior_dispositions[disposition.item_id].append(disposition)
+                    _record_prior_item_disposition(
+                        prior_dispositions,
+                        disposition,
+                        flow="pr",
+                        round_number=round_number,
+                        subject=str(pr_metadata.head_sha or "unknown"),
+                        reviewer_name=reviewer_name,
+                    )
                 blocking_summary = parsed_review.summary
                 has_blocking_summary = _should_record_new_blocking_item(
                     blocking_summary,
