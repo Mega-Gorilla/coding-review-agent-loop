@@ -188,6 +188,7 @@ class StructuredPlanRevision:
     kind: str
     state: str
     summary: str
+    prior_plan_item_dispositions: tuple[ReviewItemDisposition, ...]
     plan_steps: tuple[str, ...]
 
 
@@ -416,13 +417,17 @@ def _expect_string_list(
     *,
     context: str,
     item_context: str,
+    min_length: int = 0,
 ) -> tuple[str, ...]:
     if not isinstance(value, list):
         raise AgentLoopError(f"{context} must be a JSON array.")
-    return tuple(
+    rendered = tuple(
         _expect_non_empty_string(item, context=f"{item_context} at index {index}")
         for index, item in enumerate(value)
     )
+    if len(rendered) < min_length:
+        raise AgentLoopError(f"{context} must contain at least {min_length} item(s).")
+    return rendered
 
 
 def _expect_state(value: object, *, context: str) -> str:
@@ -484,10 +489,60 @@ def _extract_json_object_prefix(text: str) -> tuple[dict[str, object], str] | No
     try:
         payload, end = decoder.raw_decode(stripped)
     except json.JSONDecodeError as exc:
-        raise AgentLoopError("Structured PR review must begin with one top-level JSON object.") from exc
+        raise AgentLoopError("Structured response must begin with one top-level JSON object.") from exc
     if not isinstance(payload, dict):
-        raise AgentLoopError("Structured PR review must begin with a JSON object.")
+        raise AgentLoopError("Structured response must begin with a JSON object.")
     return payload, stripped[end:]
+
+
+def _consume_structured_footer_and_signature(
+    *,
+    payload: dict[str, object],
+    trailing: str,
+    state_re: re.Pattern[str],
+    state_marker_name: str,
+    context_label: str,
+    allow_human_requirements_prefix: bool = False,
+    allow_human_requirements_marker_after_footer: bool = False,
+) -> dict[str, object]:
+    trailing = trailing.lstrip()
+    state_match = state_re.search(trailing)
+    if state_match is None:
+        raise AgentLoopError(
+            f"{context_label} must place <!-- {state_marker_name}: approved|blocking --> after the JSON object."
+        )
+
+    before_footer = trailing[: state_match.start()].strip()
+    if before_footer:
+        if not allow_human_requirements_prefix:
+            raise AgentLoopError(
+                f"{context_label} may not include prose between the JSON object and the {state_marker_name} footer."
+            )
+        parsed_human_requirements = parse_human_requirements_acknowledgement(before_footer)
+        if not parsed_human_requirements.marker_present or not parsed_human_requirements.section_present:
+            raise AgentLoopError(
+                f"{context_label} may only include a signed human requirements acknowledgement before the {state_marker_name} footer."
+            )
+
+    trailing = trailing[state_match.end() :].lstrip()
+    if allow_human_requirements_marker_after_footer and HUMAN_REQUIREMENTS_RESOLVED_RE.match(trailing):
+        marker_match = HUMAN_REQUIREMENTS_RESOLVED_RE.match(trailing)
+        assert marker_match is not None
+        trailing = trailing[marker_match.end() :].lstrip()
+    signature_match = re.match(r"^--\s+\S[^\n]*(?:\n)?$", trailing)
+    if signature_match is None or trailing[signature_match.end() :].strip():
+        raise AgentLoopError(
+            f"{context_label} may not include trailing prose after the JSON footer and signature."
+        )
+
+    footer_state = state_match.group(1).lower()
+    payload_state = payload.get("state")
+    if isinstance(payload_state, str) and payload_state.strip():
+        if payload_state.strip() != footer_state:
+            raise AgentLoopError(
+                f"{context_label} footer {state_marker_name} must match the payload state."
+            )
+    return payload
 
 
 def _extract_structured_pr_review_payload(text: str) -> dict[str, object] | None:
@@ -499,24 +554,44 @@ def _extract_structured_pr_review_payload(text: str) -> dict[str, object] | None
     if HUMAN_REQUIREMENTS_RESOLVED_RE.match(trailing):
         marker_match = HUMAN_REQUIREMENTS_RESOLVED_RE.match(trailing)
         assert marker_match is not None
-        trailing = trailing[marker_match.end() :].lstrip()
-    state_match = STATE_RE.match(trailing)
-    if state_match is None:
-        raise AgentLoopError(
-            "Structured PR review must place <!-- AGENT_STATE: approved|blocking --> after the JSON object."
-        )
-    trailing = trailing[state_match.end() :].lstrip()
-    signature_match = re.match(r"^--\s+\S[^\n]*(?:\n)?$", trailing)
-    if signature_match is None or trailing[signature_match.end() :].strip():
-        raise AgentLoopError(
-            "Structured PR review may not include trailing prose after the JSON footer and signature."
-        )
-    footer_state = state_match.group(1).lower()
-    payload_state = payload.get("state")
-    if isinstance(payload_state, str) and payload_state.strip():
-        if payload_state.strip() != footer_state:
-            raise AgentLoopError("Structured PR review footer AGENT_STATE must match the payload state.")
-    return payload
+        trailing = trailing[marker_match.end() :]
+    return _consume_structured_footer_and_signature(
+        payload=payload,
+        trailing=trailing,
+        state_re=STATE_RE,
+        state_marker_name="AGENT_STATE",
+        context_label="Structured PR review",
+        allow_human_requirements_marker_after_footer=True,
+    )
+
+
+def _extract_structured_plan_review_payload(text: str) -> dict[str, object] | None:
+    extracted = _extract_json_object_prefix(text)
+    if extracted is None:
+        return None
+    payload, trailing = extracted
+    return _consume_structured_footer_and_signature(
+        payload=payload,
+        trailing=trailing,
+        state_re=PLAN_STATE_RE,
+        state_marker_name="AGENT_PLAN_STATE",
+        context_label="Structured plan review",
+    )
+
+
+def _extract_structured_plan_revision_payload(text: str) -> dict[str, object] | None:
+    extracted = _extract_json_object_prefix(text)
+    if extracted is None:
+        return None
+    payload, trailing = extracted
+    return _consume_structured_footer_and_signature(
+        payload=payload,
+        trailing=trailing,
+        state_re=PLAN_STATE_RE,
+        state_marker_name="AGENT_PLAN_STATE",
+        context_label="Structured plan revision",
+        allow_human_requirements_prefix=True,
+    )
 
 
 def _require_supported_schema_version(payload: dict[str, object]) -> None:
@@ -724,54 +799,51 @@ def parse_structured_pr_review(text: str, *, reviewer: str) -> ParsedReview | No
 
 
 def parse_structured_plan_review(text: str, *, reviewer: str) -> ParsedPlanReview | None:
-    payload = _extract_structured_response_object(text)
+    payload = _extract_structured_plan_review_payload(text)
     if payload is None:
         return None
     _require_supported_schema_version(payload)
     kind = payload.get("kind")
     if isinstance(kind, str) and kind != "plan_review":
         raise AgentLoopError("Structured response kind mismatch: expected `plan_review`.")
-    try:
-        _expect_exact_keys(
-            payload,
-            context="plan_review",
-            required={
-                "schema_version",
-                "kind",
-                "state",
-                "summary",
-                "blocking_plan_issues",
-                "same_plan_followups",
-                "future_followups",
-                "prior_plan_item_dispositions",
-            },
-        )
-        state = _expect_state(payload["state"], context="plan_review.state")
-        summary = _expect_non_empty_string(payload["summary"], context="plan_review.summary")
-        blocking_items = _expect_string_list(
-            payload["blocking_plan_issues"],
-            context="plan_review.blocking_plan_issues",
-            item_context="plan_review.blocking_plan_issues",
-        )
-        same_plan_followups = _expect_string_list(
-            payload["same_plan_followups"],
-            context="plan_review.same_plan_followups",
-            item_context="plan_review.same_plan_followups",
-        )
-        future_followups = _expect_string_list(
-            payload["future_followups"],
-            context="plan_review.future_followups",
-            item_context="plan_review.future_followups",
-        )
-        dispositions = _expect_disposition_list(
-            payload["prior_plan_item_dispositions"],
-            context="plan_review.prior_plan_item_dispositions",
-            reviewer=reviewer,
-            allowed_same_status="same-plan",
-            is_plan_review=True,
-        )
-    except AgentLoopError:
-        return None
+    _expect_exact_keys(
+        payload,
+        context="plan_review",
+        required={
+            "schema_version",
+            "kind",
+            "state",
+            "summary",
+            "blocking_plan_issues",
+            "same_plan_followups",
+            "future_followups",
+            "prior_plan_item_dispositions",
+        },
+    )
+    state = _expect_state(payload["state"], context="plan_review.state")
+    summary = _expect_non_empty_string(payload["summary"], context="plan_review.summary")
+    blocking_items = _expect_string_list(
+        payload["blocking_plan_issues"],
+        context="plan_review.blocking_plan_issues",
+        item_context="plan_review.blocking_plan_issues",
+    )
+    same_plan_followups = _expect_string_list(
+        payload["same_plan_followups"],
+        context="plan_review.same_plan_followups",
+        item_context="plan_review.same_plan_followups",
+    )
+    future_followups = _expect_string_list(
+        payload["future_followups"],
+        context="plan_review.future_followups",
+        item_context="plan_review.future_followups",
+    )
+    dispositions = _expect_disposition_list(
+        payload["prior_plan_item_dispositions"],
+        context="plan_review.prior_plan_item_dispositions",
+        reviewer=reviewer,
+        allowed_same_status="same-plan",
+        is_plan_review=True,
+    )
     if state == "blocking" and future_followups:
         raise AgentLoopError("Blocking structured plan reviews may not include future follow-ups.")
     return _finalize_parsed_plan_review(
@@ -858,35 +930,48 @@ def validate_structured_coder_followup(text: str) -> StructuredCoderFollowup | N
 
 
 def validate_structured_plan_revision(text: str) -> StructuredPlanRevision | None:
-    payload = _extract_structured_response_object(text)
+    payload = _extract_structured_plan_revision_payload(text)
     if payload is None:
         return None
     _require_supported_schema_version(payload)
     kind = payload.get("kind")
     if isinstance(kind, str) and kind != "plan_revision":
         raise AgentLoopError("Structured response kind mismatch: expected `plan_revision`.")
-    try:
-        _expect_exact_keys(
-            payload,
-            context="plan_revision",
-            required={"schema_version", "kind", "state", "summary", "plan_steps"},
-        )
-        state = _expect_non_empty_string(payload["state"], context="plan_revision.state")
-        if state != "blocking":
-            raise AgentLoopError("plan_revision.state must be `blocking`.")
-        summary = _expect_non_empty_string(payload["summary"], context="plan_revision.summary")
-        plan_steps = _expect_string_list(
-            payload["plan_steps"],
-            context="plan_revision.plan_steps",
-            item_context="plan_revision.plan_steps",
-        )
-    except AgentLoopError:
-        return None
+    _expect_exact_keys(
+        payload,
+        context="plan_revision",
+        required={
+            "schema_version",
+            "kind",
+            "state",
+            "summary",
+            "prior_plan_item_dispositions",
+            "plan_steps",
+        },
+    )
+    state = _expect_non_empty_string(payload["state"], context="plan_revision.state")
+    if state != "blocking":
+        raise AgentLoopError("plan_revision.state must be `blocking`.")
+    summary = _expect_non_empty_string(payload["summary"], context="plan_revision.summary")
+    dispositions = _expect_disposition_list(
+        payload["prior_plan_item_dispositions"],
+        context="plan_revision.prior_plan_item_dispositions",
+        reviewer="coder",
+        allowed_same_status="same-plan",
+        is_plan_review=True,
+    )
+    plan_steps = _expect_string_list(
+        payload["plan_steps"],
+        context="plan_revision.plan_steps",
+        item_context="plan_revision.plan_steps",
+        min_length=1,
+    )
     return StructuredPlanRevision(
         schema_version=1,
         kind="plan_revision",
         state="blocking",
         summary=summary,
+        prior_plan_item_dispositions=dispositions,
         plan_steps=plan_steps,
     )
 
@@ -1281,6 +1366,9 @@ def parse_pr_review(text: str, *, reviewer: str) -> ParsedReview:
 
 def parse_plan_review(text: str, *, reviewer: str) -> ParsedPlanReview:
     """Parse a plan review, including state, structured plan items, and dispositions."""
+    parsed = parse_structured_plan_review(text, reviewer=reviewer)
+    if parsed is not None:
+        return parsed
     state = parse_plan_state(text)
     summary = review_freeform_summary_text(text)
     items = parse_plan_review_items(text, reviewer=reviewer)

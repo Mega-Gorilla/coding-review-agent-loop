@@ -617,7 +617,26 @@ Plan from {coder_name}:
 {plan}
 
 Review the plan for correctness, architecture fit, missing edge cases, test
-strategy, and ambiguity. Use this exact structured format in your response body:
+strategy, and ambiguity. Prefer this structured JSON response format first:
+
+```json
+{{
+  "schema_version": 1,
+  "kind": "plan_review",
+  "state": "approved",
+  "summary": "Plan looks good.",
+  "blocking_plan_issues": [],
+  "same_plan_followups": [],
+  "future_followups": ["Consider a later cleanup pass."],
+  "prior_plan_item_dispositions": [
+    {{"item_id": "item-1", "disposition": "resolved", "note": "Covered by the revised tests."}}
+  ]
+}}
+<!-- AGENT_PLAN_STATE: approved -->
+-- {reviewer_signature}
+```
+
+If you do not use the structured JSON format, use this exact markdown compatibility format instead:
 
 ### Blocking plan issues
 - Required corrections that must be resolved before the plan can be approved.
@@ -659,7 +678,10 @@ or:
 
 Use approved only if there are no blocking plan issues, no Same-plan
 follow-ups, and no carried-forward plan items left active for this planning
-round. Always sign your response:
+round. Structured responses must start with one top-level JSON object, place
+the `AGENT_PLAN_STATE` footer immediately after that payload, and end with only
+your standalone signature. If you fall back to markdown, keep the exact section
+headings above. Always sign your response:
 -- {reviewer_signature}
 """
 
@@ -718,6 +740,33 @@ your response and address each item ID exactly once:
 Then provide the revised implementation plan with concrete file areas, edge
 cases, and tests. Use `same-plan`, never `same-pr`, when describing plan-only
 current-round refinements.
+
+Prefer this structured JSON response format first:
+
+```json
+{{
+  "schema_version": 1,
+  "kind": "plan_revision",
+  "state": "blocking",
+  "summary": "Updated the plan to cover parser hard-fail behavior and resume state reconstruction.",
+  "prior_plan_item_dispositions": [
+    {{"item_id": "item-3", "disposition": "resolved", "note": "Added the carry-forward metadata step."}}
+  ],
+  "plan_steps": [
+    "Update `src/coding_review_agent_loop/protocol.py` to hard-fail invalid structured plan payloads after JSON-prefix detection.",
+    "Normalize structured plan rendering and metadata-backed resume behavior in `src/coding_review_agent_loop/orchestrator.py`.",
+    "Extend prompts and targeted tests for structured planning flows."
+  ]
+}}
+<!-- AGENT_PLAN_STATE: blocking -->
+-- {coder_signature}
+```
+
+The orchestrator will normalize structured plan revisions into canonical
+markdown for stored plan state, reviewer prompts, subject hashing, and resume.
+If you do not use the structured JSON format, fall back to markdown
+compatibility by keeping the `### Prior plan review item dispositions` section
+and then providing the full revised plan in markdown prose.
 
 This is planning round {round_number}. End your final response with exactly one
 planning marker:
