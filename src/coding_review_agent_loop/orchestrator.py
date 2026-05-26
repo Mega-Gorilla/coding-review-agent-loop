@@ -455,6 +455,37 @@ def _reconcile_human_requirements_ack_item(
     return _clear_human_requirements_ack_item(unresolved_items)
 
 
+def _validate_response_with_human_requirements(
+    text: str,
+    *,
+    marker_validator: Callable[[str], object],
+    human_requirements,
+    requirement_scope: str,
+    full_omission_fallback: str,
+) -> object:
+    marker_value = marker_validator(text)
+    prompt_context = render_coder_human_requirements_prompt_context(
+        human_requirements,
+        requirement_scope=requirement_scope,
+        full_omission_fallback=full_omission_fallback,
+    )
+    validate_human_requirements_acknowledgement(
+        text,
+        surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
+        requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
+    )
+    return marker_value
+
+
+def _merge_human_requirements(
+    issue_context: IssueContext | None,
+    pr_context: PullRequestReviewContext,
+):
+    combined = list(issue_context.human_requirements if issue_context is not None else ())
+    combined.extend(pr_context.human_requirements)
+    return tuple(sorted(combined, key=lambda requirement: requirement.created_at or ""))
+
+
 def _apply_unresolved_item_dispositions(
     unresolved_items: Sequence[UnresolvedReviewItem],
     dispositions_by_item: dict[str, list[ReviewItemDisposition]],
@@ -1438,7 +1469,13 @@ def _run_plan_first_loop(
             config=config,
             prompt=build_issue_plan_prompt(issue_number, config, memory, issue_context=issue_context),
             marker_description="<!-- AGENT_PLAN_STATE: approved|blocking --> or <!-- AGENT_CLARIFY -->",
-            validate=_require_plan_state_or_clarification,
+            validate=lambda text, human_requirements=issue_context.human_requirements: _validate_response_with_human_requirements(
+                text,
+                marker_validator=_require_plan_state_or_clarification,
+                human_requirements=human_requirements,
+                requirement_scope="planning requirements",
+                full_omission_fallback="Fetch the issue discussion directly before finalizing the plan.",
+            ),
             usage_context=usage_context,
         )
         plan_output = plan_response.text
@@ -1656,7 +1693,13 @@ def _run_plan_first_loop(
                 ),
                 session_id=coder_session_id,
                 marker_description="<!-- AGENT_PR: <number> --> or PR URL",
-                validate=_require_pr_number,
+                validate=lambda text, human_requirements=issue_context.human_requirements: _validate_response_with_human_requirements(
+                    text,
+                    marker_validator=_require_pr_number,
+                    human_requirements=human_requirements,
+                    requirement_scope="implementation requirements",
+                    full_omission_fallback="Fetch the issue discussion directly before implementing.",
+                ),
                 usage_context=usage_context,
             )
             coder_output = coder_response.text
@@ -1721,7 +1764,13 @@ def _run_plan_first_loop(
             ),
             session_id=coder_session_id,
             marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
-            validate=parse_plan_state,
+            validate=lambda text, human_requirements=issue_context.human_requirements: _validate_response_with_human_requirements(
+                text,
+                marker_validator=parse_plan_state,
+                human_requirements=human_requirements,
+                requirement_scope="planning requirements",
+                full_omission_fallback="Fetch the issue discussion directly before revising the plan.",
+            ),
             usage_context=usage_context,
         )
         current_plan = plan_response.text
@@ -1786,7 +1835,13 @@ def run_issue_loop(
             config=config,
             prompt=build_issue_prompt(issue_number, config, memory, issue_context=issue_context),
             marker_description="<!-- AGENT_PR: <number> --> or PR URL",
-            validate=_require_pr_number,
+            validate=lambda text, human_requirements=issue_context.human_requirements: _validate_response_with_human_requirements(
+                text,
+                marker_validator=_require_pr_number,
+                human_requirements=human_requirements,
+                requirement_scope="implementation requirements",
+                full_omission_fallback="Fetch the issue discussion directly before implementing.",
+            ),
             usage_context=usage_context,
         )
         coder_output = coder_response.text
@@ -2011,7 +2066,7 @@ def run_pr_loop(
             initial_pr_context = pr_context
             pr_metadata = pr_context.metadata
             pr_comments = pr_context.comments
-            human_requirements = pr_context.human_requirements
+            human_requirements = _merge_human_requirements(issue_context, pr_context)
             current_resume = resumed_round if resumed_round is not None and round_number == resumed_round.round_number else None
             unresolved_items = _reconcile_human_requirements_ack_item(
                 current_resume.prior_items if current_resume is not None else unresolved_items,

@@ -48,6 +48,7 @@ from coding_review_agent_loop.github import (
     IssueContext,
     PullRequestReviewContext,
     PullRequestMetadata,
+    get_issue_context,
     get_pr_checks,
 )
 from coding_review_agent_loop.migrations import MigrationValidationResult, validate_pr_migration_topology
@@ -69,6 +70,9 @@ from coding_review_agent_loop.prompts import (
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
     HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK,
     build_followup_prompt,
+    build_issue_implementation_prompt,
+    build_issue_plan_prompt,
+    build_issue_prompt,
     build_same_pr_followup_prompt,
     build_plan_review_prompt,
     build_plan_revision_prompt,
@@ -340,6 +344,8 @@ class FakeRunner(Runner):
                 "title": self.issue_payload.get("title"),
                 "body": self.issue_payload.get("body"),
                 "url": self.issue_payload.get("url"),
+                "author": self.issue_payload.get("author"),
+                "createdAt": self.issue_payload.get("createdAt"),
                 "comments": self.issue_comments,
             }
             return CommandResult(cmd, cwd_path, json_dumps(payload), "", 0)
@@ -2842,6 +2848,49 @@ def test_format_issue_context_truncates_oversized_newest_comment():
     assert "Older detail should not be kept instead of the newest comment." not in text
 
 
+def test_get_issue_context_parses_signed_issue_body_and_comments(tmp_path):
+    runner = FakeRunner(
+        issue_payload={
+            "number": 56,
+            "title": "Support signed issue requirements",
+            "body": "Use the stable API path.\n\n-- Human Reviewer",
+            "url": "https://github.com/OWNER/REPO/issues/56",
+            "author": {"login": "issue-author"},
+            "createdAt": "2026-05-17T08:00:00Z",
+        },
+        issue_comments=[
+            {
+                "author": {"login": "maintainer"},
+                "createdAt": "2026-05-17T09:00:00Z",
+                "url": "https://github.com/OWNER/REPO/issues/56#issuecomment-1",
+                "body": "Unsigned discussion remains normal context.",
+            },
+            {
+                "author": {"login": "lead"},
+                "createdAt": "2026-05-17T10:00:00Z",
+                "url": "https://github.com/OWNER/REPO/issues/56#issuecomment-2",
+                "body": "Add a regression test.\n\n-- Human Reviewer",
+            },
+        ],
+    )
+    config = make_config(tmp_path)
+
+    issue_context = get_issue_context(runner, config=config, issue_number=56)
+
+    assert [item.source_type for item in issue_context.human_requirements] == [
+        "Issue body",
+        "Issue comment",
+    ]
+    assert [item.author for item in issue_context.human_requirements] == ["issue-author", "lead"]
+    assert [item.created_at for item in issue_context.human_requirements] == [
+        "2026-05-17T08:00:00Z",
+        "2026-05-17T10:00:00Z",
+    ]
+    assert issue_context.human_requirements[0].body == "Use the stable API path."
+    assert issue_context.human_requirements[1].body == "Add a regression test."
+    assert issue_context.comments[0].body == "Unsigned discussion remains normal context."
+
+
 def test_format_human_requirements_uses_distinct_high_priority_section():
     text = format_human_requirements(
         (
@@ -2861,6 +2910,26 @@ def test_format_human_requirements_uses_distinct_high_priority_section():
     assert "- Source: PR comment" in text
     assert "- Author: reviewer" in text
     assert "Please use the absolute URL." in text
+
+
+def test_format_human_requirements_supports_issue_specific_wording_and_fallback():
+    text = format_human_requirements(
+        (
+            HumanReviewRequirement(
+                source_type="Issue body",
+                author="maintainer",
+                created_at="2026-05-18T10:00:00Z",
+                url="https://github.com/OWNER/REPO/issues/56",
+                body="Keep the current CLI flag.",
+            ),
+        ),
+        max_chars=120,
+        requirement_scope="planning requirements",
+        full_omission_fallback="Fetch the issue discussion directly before finalizing the plan.",
+    )
+
+    assert "high-priority planning requirements" in text
+    assert "Fetch the issue discussion directly before finalizing the plan." in text
 
 
 def test_format_human_requirements_preserves_entry_spacing_when_truncated():
@@ -2951,6 +3020,112 @@ def test_render_coder_human_requirements_prompt_context_handles_full_omission_fa
     assert "All 1 signed human requirement(s) were omitted" in context.block
     assert context.surfaced_requirement_ids == ()
     assert context.requires_direct_discussion_ack is True
+
+
+@pytest.mark.parametrize(
+    ("builder_name", "expected_scope", "expected_guidance"),
+    [
+        ("issue", "high-priority implementation requirements", "how you addressed that item"),
+        ("issue_plan", "high-priority planning requirements", "how the plan covers that item"),
+        ("plan_revision", "high-priority planning requirements", "how the revised plan covers that item"),
+        (
+            "issue_implementation",
+            "high-priority implementation requirements",
+            "how you addressed that item",
+        ),
+    ],
+)
+def test_issue_and_plan_prompts_surface_signed_human_requirements_before_issue_context(
+    tmp_path,
+    builder_name,
+    expected_scope,
+    expected_guidance,
+):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    issue_context = IssueContext(
+        number=56,
+        repo="OWNER/REPO",
+        title="Support issue comments",
+        body="Original request.",
+        url="https://github.com/OWNER/REPO/issues/56",
+        comments=(
+            IssueComment(
+                author="commenter",
+                created_at="2026-05-17T10:00:00Z",
+                body="General issue context.",
+            ),
+        ),
+        human_requirements=(
+            HumanReviewRequirement(
+                source_type="Issue comment",
+                author="maintainer",
+                created_at="2026-05-17T11:00:00Z",
+                url="https://github.com/OWNER/REPO/issues/56#issuecomment-1",
+                body="Preserve backward compatibility.",
+            ),
+        ),
+    )
+    if builder_name == "issue":
+        prompt = build_issue_prompt(56, config, issue_context=issue_context)
+    elif builder_name == "issue_plan":
+        prompt = build_issue_plan_prompt(56, config, issue_context=issue_context)
+    elif builder_name == "plan_revision":
+        prompt = build_plan_revision_prompt(
+            56,
+            2,
+            "Old plan.",
+            "Blocking review.",
+            config,
+            issue_context=issue_context,
+        )
+    else:
+        prompt = build_issue_implementation_prompt(
+            56,
+            "Approved plan.",
+            config,
+            issue_context=issue_context,
+        )
+
+    assert "Signed Human Reviewer Requirements" in prompt
+    assert expected_scope in prompt
+    assert expected_guidance in prompt
+    assert prompt.index("Signed Human Reviewer Requirements") < prompt.index("Issue context from GitHub")
+
+
+def test_plan_review_prompt_surfaces_signed_issue_requirements_as_approval_critical(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    issue_context = IssueContext(
+        number=56,
+        repo="OWNER/REPO",
+        title="Support issue comments",
+        body="Original request.",
+        url="https://github.com/OWNER/REPO/issues/56",
+        comments=(),
+        human_requirements=(
+            HumanReviewRequirement(
+                source_type="Issue body",
+                author="maintainer",
+                created_at="2026-05-17T08:00:00Z",
+                url="https://github.com/OWNER/REPO/issues/56",
+                body="Keep the public API unchanged.",
+            ),
+        ),
+    )
+
+    prompt = build_plan_review_prompt(
+        56,
+        1,
+        "Plan:\n- Update the parser.",
+        config,
+        reviewer="codex",
+        issue_context=issue_context,
+    )
+
+    assert "Signed Human Reviewer Requirements" in prompt
+    assert "high-priority planning requirements" in prompt
+    assert "approval-critical issue constraints" in prompt
+    assert "Verify each requirement in this set before approving." in prompt
+    assert prompt.index("Signed Human Reviewer Requirements") < prompt.index("Issue context from GitHub")
 
 
 @pytest.mark.parametrize("builder", [build_followup_prompt, build_same_pr_followup_prompt])
@@ -3830,7 +4005,7 @@ def test_review_prompt_includes_signed_human_requirements(tmp_path):
     assert "Signed Human Reviewer Requirements" in prompt
     assert "Please use the absolute URL." in prompt
     assert "Signed human reviewer requirements override AI reviewer preferences" in prompt
-    assert "Verify every signed human reviewer requirement before approving." in prompt
+    assert "Verify each requirement in this set before approving." in prompt
     assert "<!-- HUMAN_REQUIREMENTS_RESOLVED -->" in prompt
 
 
@@ -4178,6 +4353,52 @@ def test_blocking_followup_prompt_includes_human_requirements_before_ai_feedback
     )
     assert "Please use the absolute URL." in followup_prompt
     assert "Needs a fix." in followup_prompt
+
+
+def test_pr_loop_combines_issue_and_pr_signed_human_requirements(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "LGTM.\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+        ],
+        pr_payload={
+            "comments": [
+                {
+                    "author": {"login": "maintainer"},
+                    "createdAt": "2026-05-18T10:00:00Z",
+                    "url": "https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                    "body": "Use the absolute URL in the PR path.\n\n-- Human Reviewer",
+                }
+            ],
+            "reviews": [],
+        },
+    )
+    config = make_config(tmp_path, reviewer="codex")
+    issue_context = IssueContext(
+        number=56,
+        repo="OWNER/REPO",
+        title="Support issue comments",
+        body="Original request.",
+        url="https://github.com/OWNER/REPO/issues/56",
+        comments=(),
+        human_requirements=(
+            HumanReviewRequirement(
+                source_type="Issue body",
+                author="issue-author",
+                created_at="2026-05-17T08:00:00Z",
+                url="https://github.com/OWNER/REPO/issues/56",
+                body="Preserve backward compatibility.",
+            ),
+        ),
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config, issue_context=issue_context) == 0
+
+    prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"])
+    assert "Preserve backward compatibility." in prompt
+    assert "Use the absolute URL in the PR path." in prompt
+    assert prompt.index("Preserve backward compatibility.") < prompt.index(
+        "Use the absolute URL in the PR path."
+    )
 
 
 def test_review_prompt_requests_future_followups_when_processed(tmp_path):
@@ -6169,6 +6390,46 @@ def test_issue_loop_requires_claude_to_report_pr_number(tmp_path):
         run_issue_loop(runner, issue_number=56, config=config)
 
 
+def test_issue_loop_rejects_missing_initial_issue_human_requirements_acknowledgement(tmp_path):
+    runner = FakeRunner(
+        issue_payload={
+            "author": {"login": "maintainer"},
+            "createdAt": "2026-05-17T08:00:00Z",
+            "body": "Keep the legacy flag.\n\n-- Human Reviewer",
+        },
+        claude_outputs=[
+            "Created PR.\nTests: python -m pytest passed.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->"
+        ],
+    )
+    config = make_config(tmp_path)
+
+    with pytest.raises(AgentLoopError, match="missing required signed human requirements marker"):
+        run_issue_loop(runner, issue_number=56, config=config)
+
+
+def test_issue_loop_accepts_initial_issue_human_requirements_acknowledgement(tmp_path):
+    runner = FakeRunner(
+        issue_payload={
+            "author": {"login": "maintainer"},
+            "createdAt": "2026-05-17T08:00:00Z",
+            "body": "Keep the legacy flag.\n\n-- Human Reviewer",
+        },
+        claude_outputs=[
+            "Created PR.\nTests: python3 -m pytest passed.\n"
+            f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+            "### Human requirements\n"
+            "- Requirement 1: kept the legacy flag path.\n"
+            "<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->"
+        ],
+        codex_outputs=[
+            "LGTM.\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+        ],
+    )
+    config = make_config(tmp_path)
+
+    assert run_issue_loop(runner, issue_number=56, config=config) == 0
+
+
 def test_issue_loop_rejects_pr_number_before_running_claude(tmp_path):
     runner = FakeRunner(issue_payload={
         "number": 62,
@@ -6208,6 +6469,46 @@ def test_issue_loop_plan_first_stops_after_approved_plan(tmp_path):
     assert not any(cmd[:2] == ["git", "switch"] for cmd, _cwd in runner.commands)
 
 
+def test_issue_loop_plan_first_rejects_missing_initial_plan_human_requirements_acknowledgement(
+    tmp_path,
+):
+    runner = FakeRunner(
+        issue_payload={
+            "author": {"login": "maintainer"},
+            "createdAt": "2026-05-17T08:00:00Z",
+            "body": "Keep the public API unchanged.\n\n-- Human Reviewer",
+        },
+        claude_outputs=[
+            "Plan:\n- Update the parser.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+        ],
+    )
+    config = make_config(tmp_path)
+
+    with pytest.raises(AgentLoopError, match="missing required signed human requirements marker"):
+        run_issue_loop(runner, issue_number=56, config=config, plan_first=True)
+
+
+def test_issue_loop_plan_first_accepts_initial_plan_human_requirements_acknowledgement(tmp_path):
+    runner = FakeRunner(
+        issue_payload={
+            "author": {"login": "maintainer"},
+            "createdAt": "2026-05-17T08:00:00Z",
+            "body": "Keep the public API unchanged.\n\n-- Human Reviewer",
+        },
+        claude_outputs=[
+            "Plan:\n- Update the parser.\n"
+            f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+            "### Human requirements\n"
+            "- Requirement 1: the plan keeps the public API unchanged.\n"
+            "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+        ],
+        codex_outputs=["Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex"],
+    )
+    config = make_config(tmp_path)
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+
 def test_issue_loop_plan_first_revises_until_all_reviewers_approve(tmp_path):
     runner = FakeRunner(
         claude_outputs=[
@@ -6223,9 +6524,66 @@ def test_issue_loop_plan_first_revises_until_all_reviewers_approve(tmp_path):
 
     assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
 
+
+def test_issue_loop_plan_revision_rejects_missing_human_requirements_acknowledgement(tmp_path):
+    runner = FakeRunner(
+        issue_payload={
+            "author": {"login": "maintainer"},
+            "createdAt": "2026-05-17T08:00:00Z",
+            "body": "Preserve backward compatibility.\n\n-- Human Reviewer",
+        },
+        claude_outputs=[
+            "Initial plan.\n"
+            f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+            "### Human requirements\n"
+            "- Requirement 1: the plan preserves backward compatibility.\n"
+            "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Revised plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Revised plan.\n"
+            f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+            "### Human requirements\n"
+            "- Requirement 1: the revised plan still preserves backward compatibility.\n"
+            "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=["Missing a regression test.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"],
+    )
+    config = make_config(tmp_path)
+
+    with pytest.raises(AgentLoopError, match="missing required signed human requirements marker"):
+        run_issue_loop(runner, issue_number=56, config=config, plan_first=True)
+
+
+def test_issue_loop_plan_revision_accepts_human_requirements_acknowledgement(tmp_path):
+    runner = FakeRunner(
+        issue_payload={
+            "author": {"login": "maintainer"},
+            "createdAt": "2026-05-17T08:00:00Z",
+            "body": "Preserve backward compatibility.\n\n-- Human Reviewer",
+        },
+        claude_outputs=[
+            "Initial plan.\n"
+            f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+            "### Human requirements\n"
+            "- Requirement 1: the plan preserves backward compatibility.\n"
+            "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            "Revised plan.\n"
+            f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+            "### Human requirements\n"
+            "- Requirement 1: the revised plan still preserves backward compatibility.\n"
+            "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Missing a regression test.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
+            "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path)
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
     claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
     assert len(claude_calls) == 2
-    assert "Missing test strategy" in claude_calls[1][-1]
+    assert "Missing a regression test." in claude_calls[1][-1]
     assert len(runner.comments) == 5
     assert runner.comments[2].startswith("Revised plan")
 

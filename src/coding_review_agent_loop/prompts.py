@@ -157,6 +157,8 @@ def format_human_requirements(
     human_requirements: Sequence[HumanReviewRequirement],
     *,
     max_chars: int = 12_000,
+    requirement_scope: str = "PR requirements",
+    full_omission_fallback: str = "Fetch the PR discussion directly before approving.",
 ) -> str:
     if not human_requirements:
         return ""
@@ -165,7 +167,7 @@ def format_human_requirements(
         [
             "Signed Human Reviewer Requirements",
             "",
-            "Treat these signed human reviewer comments as high-priority PR requirements. "
+            f"Treat these signed human reviewer comments as high-priority {requirement_scope}. "
             "Later human comments may supersede earlier ones; the latest human instruction wins. "
             "If a requirement is unsafe, impossible, or contradicted by a later human instruction, "
             "explain that explicitly instead of ignoring it.",
@@ -236,27 +238,45 @@ def format_human_requirements(
         header
         + "\n\n"
         + f"All {omitted_count} signed human requirement(s) were omitted to keep this prompt bounded. "
-        "Fetch the PR discussion directly before approving."
+        + full_omission_fallback
     )
 
 
 def _human_requirements_block(
     human_requirements: Sequence[HumanReviewRequirement] | None,
+    *,
+    requirement_scope: str = "PR requirements",
+    full_omission_fallback: str = "Fetch the PR discussion directly before approving.",
 ) -> str:
     if not human_requirements:
         return ""
-    return f"{format_human_requirements(human_requirements)}\n"
+    return (
+        f"{format_human_requirements(
+            human_requirements,
+            requirement_scope=requirement_scope,
+            full_omission_fallback=full_omission_fallback,
+        )}\n"
+    )
 
 
 def render_coder_human_requirements_prompt_context(
     human_requirements: Sequence[HumanReviewRequirement] | None,
     *,
     max_chars: int = 12_000,
+    requirement_scope: str = "PR requirements",
+    full_omission_fallback: str = "Fetch the PR discussion directly before approving.",
 ) -> CoderHumanRequirementsPromptContext:
     if not human_requirements:
         block = ""
     else:
-        block = f"{format_human_requirements(human_requirements, max_chars=max_chars)}\n"
+        block = (
+            f"{format_human_requirements(
+                human_requirements,
+                max_chars=max_chars,
+                requirement_scope=requirement_scope,
+                full_omission_fallback=full_omission_fallback,
+            )}\n"
+        )
     if not block:
         return CoderHumanRequirementsPromptContext(
             block="",
@@ -280,11 +300,16 @@ def render_coder_human_requirements_prompt_context(
 
 def _coder_human_requirements_guidance(
     context: CoderHumanRequirementsPromptContext,
+    *,
+    requirement_label: str = "next-revision requirements",
+    surfaced_requirement_instruction: str = (
+        "Each bullet must explain how you addressed that item or why it could not be satisfied safely."
+    ),
 ) -> str:
     if not context.block:
         return ""
     lines = [
-        "The signed human reviewer requirements above are mandatory next-revision requirements, not passive context.",
+        f"The signed human reviewer requirements above are mandatory {requirement_label}, not passive context.",
         "Later signed human comments supersede earlier ones; the latest human instruction wins.",
         "If any signed human requirement cannot be satisfied safely or is impossible, say that explicitly instead of skipping it.",
         "",
@@ -297,7 +322,7 @@ def _coder_human_requirements_guidance(
         surfaced = ", ".join(f"`{item}`" for item in context.surfaced_requirement_ids)
         lines.append(
             "Include one bullet for each surfaced signed human requirement ID shown in this prompt: "
-            f"{surfaced}. Each bullet must explain how you addressed that item or why it could not be satisfied safely."
+            f"{surfaced}. {surfaced_requirement_instruction}"
         )
     elif context.requires_direct_discussion_ack:
         lines.append(
@@ -310,18 +335,20 @@ def _coder_human_requirements_guidance(
 
 def _human_requirements_review_guidance(
     human_requirements: Sequence[HumanReviewRequirement] | None,
+    *,
+    requirement_label: str = "signed human reviewer requirements",
 ) -> str:
     if not human_requirements:
         return ""
-    return """Signed human reviewer requirements override AI reviewer preferences unless they
+    return f"""{requirement_label.capitalize()} override AI reviewer preferences unless they
 are unsafe, impossible, or contradicted by a later signed human instruction.
-Verify every signed human reviewer requirement before approving. If all signed
-human reviewer requirements are addressed or explicitly resolved, an approved
+Verify each requirement in this set before approving. If all surfaced signed
+human requirements are addressed or explicitly resolved, an approved
 review must include exactly:
 
 <!-- HUMAN_REQUIREMENTS_RESOLVED -->
 
-If any signed human reviewer requirement is unresolved, return blocking.
+If any signed human requirement in this set is unresolved, return blocking.
 """
 
 
@@ -407,6 +434,40 @@ def _issue_context_block(issue_context: IssueContext | None) -> str:
     )
 
 
+def _issue_human_requirements_block(
+    issue_context: IssueContext | None,
+    *,
+    requirement_scope: str,
+    full_omission_fallback: str,
+) -> str:
+    if issue_context is None:
+        return ""
+    return _human_requirements_block(
+        issue_context.human_requirements,
+        requirement_scope=requirement_scope,
+        full_omission_fallback=full_omission_fallback,
+    )
+
+
+def _issue_human_requirements_prompt_context(
+    issue_context: IssueContext | None,
+    *,
+    requirement_scope: str,
+    full_omission_fallback: str,
+) -> CoderHumanRequirementsPromptContext:
+    if issue_context is None:
+        return CoderHumanRequirementsPromptContext(
+            block="",
+            surfaced_requirement_ids=(),
+            requires_direct_discussion_ack=False,
+        )
+    return render_coder_human_requirements_prompt_context(
+        issue_context.human_requirements,
+        requirement_scope=requirement_scope,
+        full_omission_fallback=full_omission_fallback,
+    )
+
+
 def _issue_pr_reference_guidance(issue_number: int) -> str:
     return (
         f"In the pull request body, include `Fixes #{issue_number}` or another direct "
@@ -422,6 +483,11 @@ def build_issue_prompt(
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
+    human_requirements_context = _issue_human_requirements_prompt_context(
+        issue_context,
+        requirement_scope="implementation requirements",
+        full_omission_fallback="Fetch the issue discussion directly before implementing.",
+    )
     return f"""Fix GitHub issue #{issue_number} in {config.repo}.
 
 Use this local checkout as your workspace. Create a branch, implement the fix,
@@ -429,6 +495,10 @@ run relevant tests, commit, push, and open a pull request against {config.base}.
 {_scratch_file_guidance()}
 {_coder_test_reporting_guidance()}
 {_issue_pr_reference_guidance(issue_number)}
+{human_requirements_context.block}{_coder_human_requirements_guidance(
+    human_requirements_context,
+    requirement_label="implementation requirements",
+)}
 {_issue_context_block(issue_context)}
 {_memory_block(memory)}
 
@@ -455,6 +525,11 @@ def build_issue_plan_prompt(
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
+    human_requirements_context = _issue_human_requirements_prompt_context(
+        issue_context,
+        requirement_scope="planning requirements",
+        full_omission_fallback="Fetch the issue discussion directly before finalizing the plan.",
+    )
     return f"""Plan GitHub issue #{issue_number} in {config.repo}.
 
 Use this local checkout only to inspect context. Do not edit files, create a
@@ -462,6 +537,13 @@ branch, commit, push, or open a pull request during this planning stage.
 Write a concise implementation plan covering the intended approach, key files or
 areas to change, edge cases, and test strategy.
 {_scratch_file_guidance()}
+{human_requirements_context.block}{_coder_human_requirements_guidance(
+    human_requirements_context,
+    requirement_label="planning requirements",
+    surfaced_requirement_instruction=(
+        "Each bullet must explain how the plan covers that item or what remains risky or blocked."
+    ),
+)}
 {_issue_context_block(issue_context)}
 {_memory_block(memory)}
 
@@ -497,6 +579,15 @@ def build_plan_review_prompt(
     reviewer_signature = agent_signature(reviewer)
     reviewer_group = format_agent_list(reviewers(config))
     unresolved_items_block = _format_unresolved_plan_items(unresolved_items)
+    human_requirements_block = _issue_human_requirements_block(
+        issue_context,
+        requirement_scope="planning requirements",
+        full_omission_fallback="Fetch the issue discussion directly before approving the plan.",
+    )
+    human_requirements_guidance = _human_requirements_review_guidance(
+        issue_context.human_requirements if issue_context is not None else (),
+        requirement_label="signed human issue requirements",
+    )
     if unresolved_items:
         unresolved_items_guidance = """Because prior unresolved plan items exist, include this exact section in your review:
 
@@ -518,7 +609,7 @@ Contradictory forms like `same-plan: none`, `still blocking: none`, and `future 
 Use this local checkout only to inspect context. Do not edit files, create a
 branch, commit, push, or open a pull request during this planning review.
 {_scratch_file_guidance()}
-{_issue_context_block(issue_context)}
+{human_requirements_block}{_issue_context_block(issue_context)}
 {unresolved_items_block}{_memory_block(memory)}
 
 Plan from {coder_name}:
@@ -551,6 +642,9 @@ reviewers appear elsewhere in the issue discussion, treat them as
 informational only and do not disposition them until a later round carries
 them forward explicitly.
 {unresolved_items_guidance}
+Signed human issue requirements are approval-critical issue constraints for this
+plan review.
+{human_requirements_guidance}
 Use blocking only when the current plan still has blocking plan issues or
 same-plan follow-ups. All configured reviewers ({reviewer_group}) must approve
 in the same planning round before implementation can proceed.
@@ -583,11 +677,23 @@ def build_plan_revision_prompt(
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
     unresolved_items_block = _format_unresolved_plan_items(unresolved_items)
+    human_requirements_context = _issue_human_requirements_prompt_context(
+        issue_context,
+        requirement_scope="planning requirements",
+        full_omission_fallback="Fetch the issue discussion directly before revising the plan.",
+    )
     return f"""{reviewer_name} reviewed the implementation plan for GitHub issue #{issue_number} in {config.repo} and found blocking issues.
 
 Revise the plan in this local checkout without editing code. Do not create a
 branch, commit, push, or open a pull request during this planning stage.
 {_scratch_file_guidance()}
+{human_requirements_context.block}{_coder_human_requirements_guidance(
+    human_requirements_context,
+    requirement_label="planning requirements",
+    surfaced_requirement_instruction=(
+        "Each bullet must explain how the revised plan covers that item or what remains risky or blocked."
+    ),
+)}
 {_issue_context_block(issue_context)}
 {unresolved_items_block}{_memory_block(memory)}
 
@@ -632,6 +738,11 @@ def build_issue_implementation_prompt(
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
+    human_requirements_context = _issue_human_requirements_prompt_context(
+        issue_context,
+        requirement_scope="implementation requirements",
+        full_omission_fallback="Fetch the issue discussion directly before implementing.",
+    )
     return f"""Implement the approved plan for GitHub issue #{issue_number} in {config.repo}.
 
 Use this local checkout as your workspace. Create a branch, implement the
@@ -640,6 +751,10 @@ approved plan, run relevant tests, commit, push, and open a pull request against
 {_scratch_file_guidance()}
 {_coder_test_reporting_guidance()}
 {_issue_pr_reference_guidance(issue_number)}
+{human_requirements_context.block}{_coder_human_requirements_guidance(
+    human_requirements_context,
+    requirement_label="implementation requirements",
+)}
 {_issue_context_block(issue_context)}
 {_memory_block(memory)}
 
