@@ -402,6 +402,21 @@ include a final `AGENT_STATE` marker. Plan-first coder/reviewer responses use
 `AGENT_PLAN_STATE` instead. If a response quotes older markers, the final
 matching marker is treated as authoritative.
 
+Structured-response runs follow this fallback order:
+
+1. Structured JSON payloads in agent output are authoritative when present.
+2. `AGENT_LOOP_META` on orchestrator-posted comments is the canonical resume
+   source for the active structured-response round. It carries the current
+   ledger, reviewer dispositions, and item-number allocation.
+3. Markdown parsing is a compatibility fallback for comments that do not have a
+   structured payload or active-round metadata.
+
+Mixed histories are normal during rollout. A thread may contain old raw
+markdown comments, newer orchestrator-rendered comments, or both. When
+`AGENT_LOOP_META` exists for the current PR head or plan subject, resume uses
+that metadata-backed ledger and ignores stale visible item IDs from older heads,
+superseded plans, or replayed rounds.
+
 The loop validates required markers before posting agent output to GitHub. If
 an agent exits or returns only diagnostics, empty output, or normal prose
 without the required marker, the loop fails locally with `AgentLoopError` and
@@ -464,6 +479,15 @@ and legacy `Non-blocking follow-ups` sections are parsed; each section ends at
 the next heading, HTML marker, or agent signature. The same parsing is used
 when creating follow-up issues. The issue cap keeps one approved review from
 creating a large batch of low-value issues.
+
+The remaining legacy compatibility surface is intentionally narrow:
+
+- Markdown plan/review parsing stays enabled for agents that do not emit
+  structured JSON.
+- The legacy heading `### Non-blocking follow-ups` is still treated as future
+  work.
+- Resume reconstruction should rely on `AGENT_LOOP_META` instead of reparsing
+  old prose whenever metadata exists for the active round.
 
 ## Logs
 

@@ -209,6 +209,18 @@ separate coding and review passes:
 agent-loop pr 456 --repo OWNER/REPO --reviewer codex --reviewer claude
 ```
 
+Structured-response runs use a three-level interpretation order:
+
+1. Structured JSON payloads are authoritative when present in the agent output.
+2. For resume/replay, `AGENT_LOOP_META` attached to orchestrator-posted comments is the canonical source of the active round ledger, carried `prior_items`, completed reviewer dispositions, and next `item-N` allocation for that structured-response round.
+3. Markdown section parsing remains a compatibility fallback for interpreting comments that do not include a structured payload or metadata for the current round.
+
+Mixed histories are expected during rollout. Old raw-markdown comments can
+remain earlier in the issue or PR thread, while newer orchestrator-rendered
+comments carry `AGENT_LOOP_META`. When metadata exists for the current head or
+plan subject, resume reconstruction uses that metadata-backed ledger and ignores
+stale visible item IDs from older heads, superseded plans, or replayed rounds.
+
 When `--approved-followups` is set to `summarize`, `issue`, or a `fix-and-*`
 mode, approved reviews may include future work under:
 
@@ -279,6 +291,13 @@ Bullets and prose paragraphs inside the `Same-PR follow-ups`, `Future follow-ups
 and legacy `Non-blocking follow-ups` sections are parsed. Each section ends at
 the next heading, HTML marker, or agent signature, so final protocol markers
 are not mistaken for follow-up text.
+
+The remaining legacy compatibility surface is intentional:
+
+- Markdown review/plan parsing still accepts non-structured agent responses.
+- The legacy heading `### Non-blocking follow-ups` still maps to future work.
+- Resume reconstruction should not depend on reparsing old prose once
+  `AGENT_LOOP_META` exists for the active structured-response round.
 
 For trusted local automation that must run without approval prompts:
 

@@ -6457,6 +6457,194 @@ def test_resume_pr_round_reparses_orchestrator_rendered_blocking_issues_comment(
     assert resumed_review.summary == "Need one more regression test before merge."
 
 
+def test_resume_pr_round_prefers_latest_metadata_ledger_for_same_head_replay():
+    stale_item = UnresolvedReviewItem(
+        item_id="item-3",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Stale replay item.",
+        status="blocking",
+        source_status="blocking",
+    )
+    active_item = UnresolvedReviewItem(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Active replay item.",
+        status="blocking",
+        source_status="blocking",
+    )
+    stale_coder_comment = _attach_round_metadata(
+        "Stale replay.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        PostedRoundMetadata(
+            flow="pr",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject="abc123",
+            prior_items=(stale_item,),
+        ),
+    )
+    stale_reviewer_comment = _attach_round_metadata(
+        "Still blocked."
+        + prior_item_dispositions("[item-3] still blocking: stale replay")
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+        PostedRoundMetadata(
+            flow="pr",
+            role="reviewer",
+            agent="Codex",
+            round_number=2,
+            subject="abc123",
+            prior_items=(stale_item,),
+            dispositions=(
+                parse_unresolved_item_dispositions(
+                    prior_item_dispositions("[item-3] still blocking: stale replay"),
+                    reviewer="OpenAI Codex",
+                )[0],
+            ),
+            state="blocking",
+        ),
+    )
+    active_coder_comment = _attach_round_metadata(
+        "Current replay.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        PostedRoundMetadata(
+            flow="pr",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject="abc123",
+            prior_items=(active_item,),
+        ),
+    )
+    active_reviewer_comment = _attach_round_metadata(
+        "Looks good."
+        + prior_item_dispositions("[item-1] resolved")
+        + "\n<!-- AGENT_STATE: approved -->\n-- Google Gemini",
+        PostedRoundMetadata(
+            flow="pr",
+            role="reviewer",
+            agent="Gemini",
+            round_number=2,
+            subject="abc123",
+            prior_items=(active_item,),
+            dispositions=(
+                parse_unresolved_item_dispositions(
+                    prior_item_dispositions("[item-1] resolved"),
+                    reviewer="Google Gemini",
+                )[0],
+            ),
+            state="approved",
+        ),
+    )
+    previous_head_comment = _attach_round_metadata(
+        "Older head.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        PostedRoundMetadata(
+            flow="pr",
+            role="coder",
+            agent="Claude",
+            round_number=4,
+            subject="old-head",
+            prior_items=(
+                UnresolvedReviewItem(
+                    item_id="item-9",
+                    reviewer="OpenAI Codex",
+                    source_round=3,
+                    text="Older head item.",
+                    status="blocking",
+                ),
+            ),
+        ),
+    )
+
+    resumed = _resume_pr_round(
+        [
+            IssueComment(author="bot", created_at="2026-05-25T00:00:00Z", body=previous_head_comment),
+            IssueComment(author="bot", created_at="2026-05-25T00:01:00Z", body=stale_coder_comment),
+            IssueComment(author="bot", created_at="2026-05-25T00:02:00Z", body=stale_reviewer_comment),
+            IssueComment(author="bot", created_at="2026-05-25T00:03:00Z", body=active_coder_comment),
+            IssueComment(author="bot", created_at="2026-05-25T00:04:00Z", body=active_reviewer_comment),
+        ],
+        head_sha="abc123",
+        configured_reviewers=("codex", "gemini"),
+    )
+
+    assert resumed is not None
+    assert [item.item_id for item in resumed.prior_items] == ["item-1"]
+    assert resumed.next_unresolved_item_number == 4
+    assert [record.metadata.agent for record in resumed.completed_reviews] == ["Gemini"]
+
+
+def test_pr_loop_resume_hybrid_history_prefers_metadata_ledger_over_legacy_markdown(tmp_path):
+    carried_item = UnresolvedReviewItem(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Add a regression test before merge.",
+        status="blocking",
+        source_status="blocking",
+    )
+    legacy_comment = (
+        "Legacy raw markdown review.\n\n"
+        "### Blocking issues\n"
+        "- Keep the legacy fallback path.\n"
+        "<!-- AGENT_STATE: blocking -->\n"
+        "-- OpenAI Codex"
+    )
+    coder_comment = _attach_round_metadata(
+        "Updated the PR.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        PostedRoundMetadata(
+            flow="pr",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject="abc123",
+            prior_items=(carried_item,),
+        ),
+    )
+    codex_comment = _attach_round_metadata(
+        "Looks good."
+        + prior_item_dispositions("[item-1] resolved")
+        + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        PostedRoundMetadata(
+            flow="pr",
+            role="reviewer",
+            agent="Codex",
+            round_number=2,
+            subject="abc123",
+            prior_items=(carried_item,),
+            dispositions=(
+                parse_unresolved_item_dispositions(
+                    prior_item_dispositions("[item-1] resolved"),
+                    reviewer="OpenAI Codex",
+                )[0],
+            ),
+            state="approved",
+        ),
+    )
+    runner = FakeRunner(
+        gemini_outputs=[
+            "Ship it."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+        ],
+        pr_payload={
+            "comments": [
+                {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:00:00Z", "body": legacy_comment},
+                {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:05:00Z", "body": coder_comment},
+                {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:06:00Z", "body": codex_comment},
+            ],
+        },
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    gemini_prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["gemini"])
+    assert "[item-1]" in gemini_prompt
+    assert "Add a regression test before merge." in gemini_prompt
+    assert "Keep the legacy fallback path." not in gemini_prompt
+
+
 def test_reconcile_human_requirements_ack_item_accepts_stored_structured_coder_followup():
     human_requirements = (
         HumanReviewRequirement(
@@ -6615,6 +6803,63 @@ def test_pr_loop_resumes_with_only_missing_reviewer_for_current_head(tmp_path):
     gemini_prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["gemini"])
     assert "[item-1]" in gemini_prompt
     assert "Add a regression test before merge." in gemini_prompt
+
+
+def test_pr_loop_resume_raises_agent_loop_error_for_missing_reconstructed_prior_item(tmp_path):
+    carried_item = UnresolvedReviewItem(
+        item_id="item-2",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Actual active carried item.",
+        status="blocking",
+        source_status="blocking",
+    )
+    coder_comment = _attach_round_metadata(
+        "Updated the PR.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        PostedRoundMetadata(
+            flow="pr",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject="abc123",
+            prior_items=(carried_item,),
+        ),
+    )
+    invalid_disposition = ReviewItemDisposition(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        disposition="resolved",
+    )
+    codex_comment = _attach_round_metadata(
+        "Looks good."
+        + prior_item_dispositions("[item-1] resolved")
+        + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        PostedRoundMetadata(
+            flow="pr",
+            role="reviewer",
+            agent="Codex",
+            round_number=2,
+            subject="abc123",
+            prior_items=(carried_item,),
+            dispositions=(invalid_disposition,),
+            state="approved",
+        ),
+    )
+    runner = FakeRunner(
+        pr_payload={
+            "comments": [
+                {"author": {"login": "bot"}, "createdAt": "2026-05-20T10:00:00Z", "body": coder_comment},
+                {"author": {"login": "bot"}, "createdAt": "2026-05-20T10:05:00Z", "body": codex_comment},
+            ],
+        },
+    )
+    config = make_config(tmp_path, reviewer=("codex",))
+
+    with pytest.raises(
+        AgentLoopError,
+        match=r"Resumed pr round 2 reconstructed prior items item-2, but Codex dispositioned unknown item `item-1`",
+    ):
+        run_pr_loop(runner, pr_number=77, config=config)
 
 
 @pytest.mark.parametrize(
@@ -7864,6 +8109,108 @@ def test_issue_loop_plan_first_resumes_with_only_missing_reviewer_for_current_pl
     agent_commands = [cmd[0] for cmd, _cwd in runner.commands if cmd[:1] in (["claude"], ["codex"], ["gemini"])]
     assert agent_commands == ["gemini"]
     assert runner.comments[-1].startswith("Planning complete for issue #56.")
+
+
+def test_resume_plan_round_prefers_latest_metadata_ledger_for_same_plan_replay():
+    current_plan = "Revised plan.\n- Add the active-ledger replay test.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    subject = _plan_subject(current_plan)
+    stale_item = UnresolvedReviewItem(
+        item_id="item-3",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Stale plan replay item.",
+        status="same-plan",
+        source_status="same-plan",
+    )
+    active_item = UnresolvedReviewItem(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Active plan replay item.",
+        status="same-plan",
+        source_status="same-plan",
+    )
+    stale_coder_comment = _attach_round_metadata(
+        current_plan,
+        PostedRoundMetadata(
+            flow="plan",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject=subject,
+            prior_items=(stale_item,),
+            canonical_plan=current_plan,
+        ),
+    )
+    stale_reviewer_comment = _attach_round_metadata(
+        "Still needs work."
+        + prior_plan_item_dispositions("[item-3] same-plan: stale replay")
+        + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
+        PostedRoundMetadata(
+            flow="plan",
+            role="reviewer",
+            agent="Codex",
+            round_number=2,
+            subject=subject,
+            prior_items=(stale_item,),
+            dispositions=(
+                parse_plan_item_dispositions(
+                    prior_plan_item_dispositions("[item-3] same-plan: stale replay"),
+                    reviewer="OpenAI Codex",
+                )[0],
+            ),
+            state="blocking",
+        ),
+    )
+    active_coder_comment = _attach_round_metadata(
+        current_plan,
+        PostedRoundMetadata(
+            flow="plan",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject=subject,
+            prior_items=(active_item,),
+            canonical_plan=current_plan,
+        ),
+    )
+    active_reviewer_comment = _attach_round_metadata(
+        "Plan looks sound."
+        + prior_plan_item_dispositions("[item-1] resolved")
+        + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- Google Gemini",
+        PostedRoundMetadata(
+            flow="plan",
+            role="reviewer",
+            agent="Gemini",
+            round_number=2,
+            subject=subject,
+            prior_items=(active_item,),
+            dispositions=(
+                parse_plan_item_dispositions(
+                    prior_plan_item_dispositions("[item-1] resolved"),
+                    reviewer="Google Gemini",
+                )[0],
+            ),
+            state="approved",
+        ),
+    )
+
+    resumed = _resume_plan_round(
+        [
+            IssueComment(author="bot", created_at="2026-05-25T00:00:00Z", body=stale_coder_comment),
+            IssueComment(author="bot", created_at="2026-05-25T00:01:00Z", body=stale_reviewer_comment),
+            IssueComment(author="bot", created_at="2026-05-25T00:02:00Z", body=active_coder_comment),
+            IssueComment(author="bot", created_at="2026-05-25T00:03:00Z", body=active_reviewer_comment),
+        ],
+        configured_reviewers=("codex", "gemini"),
+    )
+
+    assert resumed is not None
+    current_plan_text, resumed_state = resumed
+    assert current_plan_text == current_plan
+    assert [item.item_id for item in resumed_state.prior_items] == ["item-1"]
+    assert resumed_state.next_unresolved_item_number == 4
+    assert [record.metadata.agent for record in resumed_state.completed_reviews] == ["Gemini"]
 
 
 def test_resume_plan_round_prefers_canonical_plan_metadata():
