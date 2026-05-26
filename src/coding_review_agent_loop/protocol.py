@@ -291,20 +291,48 @@ def validate_human_requirements_acknowledgement(
     surfaced_requirement_ids: Sequence[str],
     requires_direct_discussion_ack: bool,
 ) -> None:
+    parsed = parse_human_requirements_acknowledgement(text)
+    validate_structured_human_requirements_acknowledgement(
+        parsed.addressed_ids,
+        checked_discussion_directly=HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK_RE.search(
+            parsed.section_text
+        )
+        is not None,
+        surfaced_requirement_ids=surfaced_requirement_ids,
+        requires_direct_discussion_ack=requires_direct_discussion_ack,
+        marker_present=parsed.marker_present,
+        section_present=parsed.section_present,
+    )
+
+
+def validate_structured_human_requirements_acknowledgement(
+    addressed_ids: Sequence[str],
+    *,
+    checked_discussion_directly: bool,
+    surfaced_requirement_ids: Sequence[str],
+    requires_direct_discussion_ack: bool,
+    marker_present: bool = True,
+    section_present: bool = True,
+) -> None:
     if not surfaced_requirement_ids and not requires_direct_discussion_ack:
         return
 
-    parsed = parse_human_requirements_acknowledgement(text)
-    if not parsed.marker_present:
+    if not marker_present:
         raise AgentLoopError(
             "Coder response missing required signed human requirements marker "
             f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}."
         )
-    if not parsed.section_present:
+    if not section_present:
         raise AgentLoopError("Coder response missing required `### Human requirements` section.")
 
-    addressed_ids = list(parsed.addressed_ids)
-    duplicates = sorted({item_id for item_id in addressed_ids if addressed_ids.count(item_id) > 1})
+    normalized_addressed_ids = [_normalize_requirement_label(item_id) for item_id in addressed_ids]
+    duplicates = sorted(
+        {
+            item_id
+            for item_id in normalized_addressed_ids
+            if normalized_addressed_ids.count(item_id) > 1
+        }
+    )
     if duplicates:
         raise AgentLoopError(
             "Coder response listed signed human requirement IDs more than once: "
@@ -312,7 +340,7 @@ def validate_human_requirements_acknowledgement(
         )
 
     expected_ids = tuple(_normalize_requirement_label(item_id) for item_id in surfaced_requirement_ids)
-    unknown = sorted(set(addressed_ids) - set(expected_ids))
+    unknown = sorted(set(normalized_addressed_ids) - set(expected_ids))
     if unknown:
         raise AgentLoopError(
             "Coder response referenced unknown signed human requirement IDs: "
@@ -320,7 +348,7 @@ def validate_human_requirements_acknowledgement(
         )
 
     if expected_ids:
-        missing = sorted(set(expected_ids) - set(addressed_ids))
+        missing = sorted(set(expected_ids) - set(normalized_addressed_ids))
         if missing:
             raise AgentLoopError(
                 "Coder response did not address all surfaced signed human requirement IDs: "
@@ -328,7 +356,7 @@ def validate_human_requirements_acknowledgement(
             )
         return
 
-    if not HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK_RE.search(parsed.section_text):
+    if not checked_discussion_directly:
         raise AgentLoopError(
             "Coder response must acknowledge that the prompt omitted the detailed signed human requirements "
             f"and that it {HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK}."
@@ -591,6 +619,20 @@ def _extract_structured_plan_revision_payload(text: str) -> dict[str, object] | 
         state_marker_name="AGENT_PLAN_STATE",
         context_label="Structured plan revision",
         allow_human_requirements_prefix=True,
+    )
+
+
+def _extract_structured_coder_followup_payload(text: str) -> dict[str, object] | None:
+    extracted = _extract_json_object_prefix(text)
+    if extracted is None:
+        return None
+    payload, trailing = extracted
+    return _consume_structured_footer_and_signature(
+        payload=payload,
+        trailing=trailing,
+        state_re=STATE_RE,
+        state_marker_name="AGENT_STATE",
+        context_label="Structured coder follow-up",
     )
 
 
@@ -859,74 +901,71 @@ def parse_structured_plan_review(text: str, *, reviewer: str) -> ParsedPlanRevie
 
 
 def validate_structured_coder_followup(text: str) -> StructuredCoderFollowup | None:
-    payload = _extract_structured_response_object(text)
+    payload = _extract_structured_coder_followup_payload(text)
     if payload is None:
         return None
     _require_supported_schema_version(payload)
     kind = payload.get("kind")
     if isinstance(kind, str) and kind != "coder_followup":
         raise AgentLoopError("Structured response kind mismatch: expected `coder_followup`.")
-    try:
-        _expect_exact_keys(
-            payload,
-            context="coder_followup",
-            required={
-                "schema_version",
-                "kind",
-                "state",
-                "summary",
-                "addressed_items",
-                "remaining_items",
-                "human_requirements",
-            },
-            optional={"tests_run"},
+    _expect_exact_keys(
+        payload,
+        context="coder_followup",
+        required={
+            "schema_version",
+            "kind",
+            "state",
+            "summary",
+            "addressed_items",
+            "remaining_items",
+            "human_requirements",
+        },
+        optional={"tests_run"},
+    )
+    human_requirements_payload = _expect_object(
+        payload["human_requirements"],
+        context="coder_followup.human_requirements",
+    )
+    _expect_exact_keys(
+        human_requirements_payload,
+        context="coder_followup.human_requirements",
+        required={"addressed_ids", "checked_discussion_directly"},
+    )
+    tests_run_value = payload.get("tests_run")
+    tests_run = (
+        _expect_string_list(
+            tests_run_value,
+            context="coder_followup.tests_run",
+            item_context="coder_followup.tests_run",
         )
-        human_requirements_payload = _expect_object(
-            payload["human_requirements"],
-            context="coder_followup.human_requirements",
-        )
-        _expect_exact_keys(
-            human_requirements_payload,
-            context="coder_followup.human_requirements",
-            required={"addressed_ids", "checked_discussion_directly"},
-        )
-        tests_run_value = payload.get("tests_run")
-        tests_run = (
-            _expect_string_list(
-                tests_run_value,
-                context="coder_followup.tests_run",
-                item_context="coder_followup.tests_run",
-            )
-            if tests_run_value is not None
-            else None
-        )
-        return StructuredCoderFollowup(
-            schema_version=1,
-            kind="coder_followup",
-            state=_expect_state(payload["state"], context="coder_followup.state"),
-            summary=_expect_non_empty_string(payload["summary"], context="coder_followup.summary"),
-            addressed_items=_expect_item_id_list(
-                payload["addressed_items"],
-                context="coder_followup.addressed_items",
+        if tests_run_value is not None
+        else None
+    )
+    return StructuredCoderFollowup(
+        schema_version=1,
+        kind="coder_followup",
+        state=_expect_state(payload["state"], context="coder_followup.state"),
+        summary=_expect_non_empty_string(payload["summary"], context="coder_followup.summary"),
+        addressed_items=_expect_item_id_list(
+            payload["addressed_items"],
+            context="coder_followup.addressed_items",
+        ),
+        remaining_items=_expect_item_id_list(
+            payload["remaining_items"],
+            context="coder_followup.remaining_items",
+        ),
+        human_requirements=StructuredHumanRequirementsPayload(
+            addressed_ids=_expect_requirement_id_list(
+                human_requirements_payload["addressed_ids"],
+                context="coder_followup.human_requirements.addressed_ids",
             ),
-            remaining_items=_expect_item_id_list(
-                payload["remaining_items"],
-                context="coder_followup.remaining_items",
+            checked_discussion_directly=_expect_bool(
+                human_requirements_payload["checked_discussion_directly"],
+                context="coder_followup.human_requirements.checked_discussion_directly",
             ),
-            human_requirements=StructuredHumanRequirementsPayload(
-                addressed_ids=_expect_requirement_id_list(
-                    human_requirements_payload["addressed_ids"],
-                    context="coder_followup.human_requirements.addressed_ids",
-                ),
-                checked_discussion_directly=_expect_bool(
-                    human_requirements_payload["checked_discussion_directly"],
-                    context="coder_followup.human_requirements.checked_discussion_directly",
-                ),
-            ),
-            tests_run=tests_run,
-        )
-    except AgentLoopError:
-        return None
+        ),
+        tests_run=tests_run,
+    )
 
 
 def validate_structured_plan_revision(text: str) -> StructuredPlanRevision | None:

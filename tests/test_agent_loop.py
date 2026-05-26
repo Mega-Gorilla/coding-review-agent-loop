@@ -66,10 +66,12 @@ from coding_review_agent_loop.orchestrator import (
     _render_public_plan_revision_comment,
     _render_public_pr_review_comment,
     _render_public_review_comment,
+    _reconcile_human_requirements_ack_item,
     _review_freeform_summary_text,
     _resume_pr_round,
     _resume_plan_round,
     _strip_round_metadata,
+    _validate_coder_followup_response,
     _validate_review_response,
     _validate_plan_review_response,
     render_canonical_plan_revision,
@@ -111,6 +113,7 @@ from coding_review_agent_loop.protocol import (
     UnresolvedReviewItem,
     validate_human_requirements_acknowledgement,
     validate_structured_coder_followup,
+    validate_structured_human_requirements_acknowledgement,
     validate_structured_plan_revision,
 )
 
@@ -2577,20 +2580,23 @@ def test_parse_structured_plan_review_rejects_blocking_future_followups():
 
 
 def test_validate_structured_coder_followup_accepts_v1_payload():
-    payload = json.dumps(
-        {
-            "schema_version": 1,
-            "kind": "coder_followup",
-            "state": "blocking",
-            "summary": "Addressed the first item; one remains.",
-            "addressed_items": ["item-1"],
-            "remaining_items": ["item-2"],
-            "human_requirements": {
-                "addressed_ids": ["Requirement 1"],
-                "checked_discussion_directly": False,
-            },
-            "tests_run": ["python -m pytest tests/test_agent_loop.py -k structured"],
-        }
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "blocking",
+                "summary": "Addressed the first item; one remains.",
+                "addressed_items": ["item-1"],
+                "remaining_items": ["item-2"],
+                "human_requirements": {
+                    "addressed_ids": ["Requirement 1"],
+                    "checked_discussion_directly": False,
+                },
+                "tests_run": ["python -m pytest tests/test_agent_loop.py -k structured"],
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
     )
 
     parsed = validate_structured_coder_followup(payload)
@@ -2601,24 +2607,132 @@ def test_validate_structured_coder_followup_accepts_v1_payload():
     assert parsed.human_requirements.addressed_ids == ("Requirement 1",)
 
 
-def test_validate_structured_coder_followup_rejects_unknown_keys_via_fallback():
-    payload = json.dumps(
-        {
-            "schema_version": 1,
-            "kind": "coder_followup",
-            "state": "approved",
-            "summary": "Done.",
-            "addressed_items": [],
-            "remaining_items": [],
-            "human_requirements": {
-                "addressed_ids": [],
-                "checked_discussion_directly": True,
-                "extra": "nope",
-            },
-        }
+def test_validate_structured_coder_followup_returns_none_when_no_structured_candidate_exists():
+    assert (
+        validate_structured_coder_followup(
+            "Implemented the fix.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+        )
+        is None
     )
 
-    assert validate_structured_coder_followup(payload) is None
+
+def test_validate_structured_coder_followup_rejects_unknown_keys_in_structured_candidate():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "approved",
+                "summary": "Done.",
+                "addressed_items": [],
+                "remaining_items": [],
+                "human_requirements": {
+                    "addressed_ids": [],
+                    "checked_discussion_directly": True,
+                    "extra": "nope",
+                },
+            }
+        )
+        + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+    )
+
+    with pytest.raises(AgentLoopError, match="unknown field\\(s\\): extra"):
+        validate_structured_coder_followup(payload)
+
+
+def test_validate_structured_coder_followup_rejects_footer_state_mismatch():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "blocking",
+                "summary": "Done.",
+                "addressed_items": [],
+                "remaining_items": [],
+                "human_requirements": {
+                    "addressed_ids": [],
+                    "checked_discussion_directly": True,
+                },
+            }
+        )
+        + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+    )
+
+    with pytest.raises(AgentLoopError, match="footer AGENT_STATE must match the payload state"):
+        validate_structured_coder_followup(payload)
+
+
+def test_validate_structured_coder_followup_rejects_trailing_prose_after_footer():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "blocking",
+                "summary": "Done.",
+                "addressed_items": [],
+                "remaining_items": [],
+                "human_requirements": {
+                    "addressed_ids": [],
+                    "checked_discussion_directly": True,
+                },
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex\nextra"
+    )
+
+    with pytest.raises(AgentLoopError, match="may not include trailing prose"):
+        validate_structured_coder_followup(payload)
+
+
+@pytest.mark.parametrize(
+    ("addressed_ids", "checked_discussion_directly", "surfaced_ids", "requires_direct_discussion_ack", "message"),
+    [
+        (
+            ("Requirement 1",),
+            False,
+            ("Requirement 1", "Requirement 2"),
+            False,
+            "did not address all surfaced signed human requirement IDs",
+        ),
+        (
+            ("Requirement 1", "Requirement 1"),
+            False,
+            ("Requirement 1",),
+            False,
+            "listed signed human requirement IDs more than once",
+        ),
+        (
+            ("Requirement 99",),
+            False,
+            ("Requirement 1",),
+            False,
+            "referenced unknown signed human requirement IDs",
+        ),
+        (
+            (),
+            False,
+            (),
+            True,
+            "must acknowledge that the prompt omitted the detailed signed human requirements",
+        ),
+    ],
+)
+def test_validate_structured_human_requirements_acknowledgement_rejects_invalid_payloads(
+    addressed_ids,
+    checked_discussion_directly,
+    surfaced_ids,
+    requires_direct_discussion_ack,
+    message,
+):
+    with pytest.raises(AgentLoopError, match=message):
+        validate_structured_human_requirements_acknowledgement(
+            addressed_ids,
+            checked_discussion_directly=checked_discussion_directly,
+            surfaced_requirement_ids=surfaced_ids,
+            requires_direct_discussion_ack=requires_direct_discussion_ack,
+        )
 
 
 def test_validate_structured_plan_revision_accepts_v1_payload():
@@ -3107,6 +3221,113 @@ def test_validate_review_response_accepts_structured_pr_review():
     assert [item.text for item in parsed.blocking_items] == [
         "Add the mixed-history regression case to the suite."
     ]
+
+
+def test_validate_coder_followup_response_accepts_structured_item_partition():
+    unresolved_items = (
+        UnresolvedReviewItem(
+            item_id="item-1",
+            reviewer="OpenAI Codex",
+            source_round=1,
+            text="Add a regression test.",
+            status="blocking",
+        ),
+        UnresolvedReviewItem(
+            item_id="item-2",
+            reviewer="Anthropic Claude",
+            source_round=1,
+            text="Rename the helper.",
+            status="same-pr",
+        ),
+        UnresolvedReviewItem(
+            item_id=HUMAN_REQUIREMENTS_ACK_ITEM_ID,
+            reviewer="Orchestrator",
+            source_round=1,
+            text="Ack missing.",
+            status="blocking",
+        ),
+    )
+    response = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "blocking",
+                "summary": "Addressed the test, helper rename still pending.",
+                "addressed_items": ["item-1"],
+                "remaining_items": ["item-2"],
+                "human_requirements": {
+                    "addressed_ids": [],
+                    "checked_discussion_directly": False,
+                },
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+    )
+
+    parsed = _validate_coder_followup_response(
+        response,
+        unresolved_items=unresolved_items,
+        human_requirements=(),
+    )
+
+    assert parsed.addressed_items == ("item-1",)
+    assert parsed.remaining_items == ("item-2",)
+
+
+@pytest.mark.parametrize(
+    ("addressed_items", "remaining_items", "message"),
+    [
+        (["item-1"], ["item-1"], "listed unresolved reviewer item IDs more than once"),
+        (["item-9"], [], "referenced unknown unresolved reviewer item IDs"),
+        (["item-1"], [], "did not classify all unresolved reviewer items"),
+    ],
+)
+def test_validate_coder_followup_response_rejects_invalid_structured_item_partition(
+    addressed_items,
+    remaining_items,
+    message,
+):
+    unresolved_items = (
+        UnresolvedReviewItem(
+            item_id="item-1",
+            reviewer="OpenAI Codex",
+            source_round=1,
+            text="Add a regression test.",
+            status="blocking",
+        ),
+        UnresolvedReviewItem(
+            item_id="item-2",
+            reviewer="Anthropic Claude",
+            source_round=1,
+            text="Rename the helper.",
+            status="same-pr",
+        ),
+    )
+    response = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "blocking",
+                "summary": "Status update.",
+                "addressed_items": addressed_items,
+                "remaining_items": remaining_items,
+                "human_requirements": {
+                    "addressed_ids": [],
+                    "checked_discussion_directly": False,
+                },
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+    )
+
+    with pytest.raises(AgentLoopError, match=message):
+        _validate_coder_followup_response(
+            response,
+            unresolved_items=unresolved_items,
+            human_requirements=(),
+        )
 
 
 def test_render_public_pr_review_comment_uses_normalized_sections_and_footer():
@@ -3850,8 +4071,8 @@ def test_coder_followup_prompts_require_human_requirements_acknowledgement_only_
     assert HUMAN_REQUIREMENTS_ADDRESSED_MARKER in with_requirements
     assert "### Human requirements" in with_requirements
     assert "`Requirement 1`" in with_requirements
-    assert HUMAN_REQUIREMENTS_ADDRESSED_MARKER not in without_requirements
-    assert "### Human requirements" not in without_requirements
+    assert "mandatory next-revision requirements" not in without_requirements
+    assert "`Requirement 1`" not in without_requirements
 
 
 @pytest.mark.parametrize("builder", [build_followup_prompt, build_same_pr_followup_prompt])
@@ -3880,6 +4101,21 @@ def test_coder_followup_prompts_accept_precomputed_human_requirements_context(tm
     assert context.block in prompt
     assert HUMAN_REQUIREMENTS_ADDRESSED_MARKER in prompt
     assert "`Requirement 1`" in prompt
+
+
+@pytest.mark.parametrize("builder", [build_followup_prompt, build_same_pr_followup_prompt])
+def test_coder_followup_prompts_prefer_structured_json_but_keep_markdown_fallback(tmp_path, builder):
+    config = make_config(tmp_path)
+
+    prompt = builder(77, 2, "Fix the bug.", config)
+
+    assert '"kind": "coder_followup"' in prompt
+    assert '"addressed_items": ["item-1"]' in prompt
+    assert '"remaining_items": ["item-2"]' in prompt
+    assert '"human_requirements": {' in prompt
+    assert "The JSON `state` must match the `AGENT_STATE` footer exactly." in prompt
+    assert "Markdown follow-up output remains a compatibility fallback during migration" in prompt
+    assert "Legacy markdown replies must still include" in prompt
 
 
 def test_validate_human_requirements_acknowledgement_accepts_multiple_bullet_styles():
@@ -4409,103 +4645,137 @@ def test_pr_loop_allows_approval_with_human_requirement_resolution_marker(tmp_pa
     assert ["pytest", "tests/test_agent_loop.py"] in commands
 
 
-def test_pr_loop_surfaces_coder_human_requirements_acknowledgement_blocker_next_round(tmp_path):
+def test_pr_loop_accepts_structured_coder_followup_in_pr_round(tmp_path):
     runner = FakeRunner(
         claude_outputs=[
-            "Implemented fix without the extra acknowledgement.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "coder_followup",
+                    "state": "blocking",
+                    "summary": "Added the requested regression test.",
+                    "addressed_items": ["item-1"],
+                    "remaining_items": [],
+                    "human_requirements": {
+                        "addressed_ids": [],
+                        "checked_discussion_directly": False,
+                    },
+                    "tests_run": ["pytest tests/test_agent_loop.py -k structured_coder_followup"],
+                }
+            )
+            + "\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
         ],
         codex_outputs=[
-            "Blocking issue."
-            "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
-            "Still blocked."
-            + prior_item_dispositions(
-                "[item-1] resolved",
-                f"[{HUMAN_REQUIREMENTS_ACK_ITEM_ID}] still blocking",
-            )
+            "Need one more regression test before merge."
+            + blocking_issues("Add the structured coder follow-up regression case.")
             + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
-        pr_payload={
-            "number": 77,
-            "state": "OPEN",
-            "url": "https://github.com/OWNER/REPO/pull/77",
-            "title": "Improve review prompt context",
-            "headRefName": "feature/review-context",
-            "baseRefName": "main",
-            "headRefOid": "abc123",
-            "comments": [
-                {
-                    "author": {"login": "maintainer"},
-                    "createdAt": "2026-05-18T10:00:00Z",
-                    "url": "https://github.com/OWNER/REPO/pull/77#issuecomment-1",
-                    "body": "Please use the absolute URL.\n\n-- Human Reviewer",
-                }
-            ],
-            "reviews": [],
-        },
     )
     config = make_config(tmp_path, coder="claude", reviewer="codex", max_rounds=2)
 
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert any('"kind": "coder_followup"' in comment for comment in runner.comments)
+
+
+def test_pr_loop_rejects_malformed_structured_coder_followup_before_re_review(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "coder_followup",
+                    "state": "blocking",
+                    "summary": "Tried to handle the feedback.",
+                    "addressed_items": ["item-9"],
+                    "remaining_items": [],
+                    "human_requirements": {
+                        "addressed_ids": [],
+                        "checked_discussion_directly": False,
+                    },
+                }
+            )
+            + "\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+        ],
+        codex_outputs=[
+            "Need one more regression test before merge."
+            + blocking_issues("Add the structured coder follow-up regression case.")
+            + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        coder="claude",
+        reviewer="codex",
+        max_rounds=2,
+        agent_max_retries=0,
+    )
+
     with pytest.raises(
         AgentLoopError,
-        match="One or more reviewers still reported blocking issues after round 2",
+        match="Coder follow-up referenced unknown unresolved reviewer item IDs: item-9",
     ):
         run_pr_loop(runner, pr_number=77, config=config)
 
-    review_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]
-    assert len(review_prompts) == 2
-    assert HUMAN_REQUIREMENTS_ACK_ITEM_ID in review_prompts[1]
-    assert "Coder response missing required signed human requirements marker" in review_prompts[1]
-    assert "Orchestrator" in review_prompts[1]
+
+def test_reconcile_human_requirements_ack_item_surfaces_markdown_ack_blocker():
+    human_requirements = (
+        HumanReviewRequirement(
+            source_type="PR comment",
+            author="reviewer",
+            created_at="2026-05-18T10:00:00Z",
+            url="https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+            body="Please use the absolute URL.",
+        ),
+    )
+
+    reconciled = _reconcile_human_requirements_ack_item(
+        (),
+        coder_output="Implemented fix without the extra acknowledgement.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        human_requirements=human_requirements,
+        source_round=2,
+    )
+
+    assert [item.item_id for item in reconciled] == [HUMAN_REQUIREMENTS_ACK_ITEM_ID]
+    assert "missing required signed human requirements marker" in reconciled[0].text
 
 
-def test_pr_loop_clears_human_requirements_acknowledgement_blocker_before_next_review(tmp_path):
-    runner = FakeRunner(
-        claude_outputs=[
-            "Implemented fix without the extra acknowledgement.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+def test_reconcile_human_requirements_ack_item_clears_markdown_ack_blocker():
+    human_requirements = (
+        HumanReviewRequirement(
+            source_type="PR comment",
+            author="reviewer",
+            created_at="2026-05-18T10:00:00Z",
+            url="https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+            body="Please use the absolute URL.",
+        ),
+    )
+
+    reconciled = _reconcile_human_requirements_ack_item(
+        (
+            UnresolvedReviewItem(
+                item_id=HUMAN_REQUIREMENTS_ACK_ITEM_ID,
+                reviewer="Orchestrator",
+                source_round=1,
+                text="Ack missing.",
+                status="blocking",
+            ),
+        ),
+        coder_output=(
             "Implemented follow-up.\n"
             f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
             "### Human requirements\n"
             "- Requirement 1: updated the URL handling.\n"
-            "<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
-        ],
-        codex_outputs=[
-            "Blocking issue."
-            "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
-            "Need coder acknowledgement."
-            + prior_item_dispositions(
-                "[item-1] resolved",
-                f"[{HUMAN_REQUIREMENTS_ACK_ITEM_ID}] still blocking",
-            )
-            + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
-            "LGTM.\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
-        ],
-        pr_payload={
-            "number": 77,
-            "state": "OPEN",
-            "url": "https://github.com/OWNER/REPO/pull/77",
-            "title": "Improve review prompt context",
-            "headRefName": "feature/review-context",
-            "baseRefName": "main",
-            "headRefOid": "abc123",
-            "comments": [
-                {
-                    "author": {"login": "maintainer"},
-                    "createdAt": "2026-05-18T10:00:00Z",
-                    "url": "https://github.com/OWNER/REPO/pull/77#issuecomment-1",
-                    "body": "Please use the absolute URL.\n\n-- Human Reviewer",
-                }
-            ],
-            "reviews": [],
-        },
+            "<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+        ),
+        human_requirements=human_requirements,
+        source_round=2,
     )
-    config = make_config(tmp_path, coder="claude", reviewer="codex", max_rounds=3)
 
-    assert run_pr_loop(runner, pr_number=77, config=config) == 0
-
-    review_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]
-    assert len(review_prompts) == 3
-    assert HUMAN_REQUIREMENTS_ACK_ITEM_ID in review_prompts[1]
-    assert HUMAN_REQUIREMENTS_ACK_ITEM_ID not in review_prompts[2]
+    assert reconciled == []
 
 
 def test_pr_loop_revalidates_latest_coder_output_against_refreshed_human_requirements(
@@ -4513,7 +4783,11 @@ def test_pr_loop_revalidates_latest_coder_output_against_refreshed_human_require
 ):
     runner = FakeRunner(
         claude_outputs=[
-            "Implemented fix without the extra acknowledgement.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+            "Implemented fix with the required acknowledgement.\n"
+            f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+            "### Human requirements\n"
+            "- Requirement 1: updated the URL handling.\n"
+            "<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
         ],
         codex_outputs=[
             "Blocking issue.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
@@ -6181,6 +6455,52 @@ def test_resume_pr_round_reparses_orchestrator_rendered_blocking_issues_comment(
         "Exercise the structured-resume path."
     ]
     assert resumed_review.summary == "Need one more regression test before merge."
+
+
+def test_reconcile_human_requirements_ack_item_accepts_stored_structured_coder_followup():
+    human_requirements = (
+        HumanReviewRequirement(
+            source_type="PR comment",
+            author="reviewer",
+            created_at="2026-05-18T10:00:00Z",
+            url="https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+            body="Please use the absolute URL.",
+        ),
+    )
+    structured_followup = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "blocking",
+                "summary": "Implemented the requested URL fix.",
+                "addressed_items": ["item-1"],
+                "remaining_items": [],
+                "human_requirements": {
+                    "addressed_ids": ["Requirement 1"],
+                    "checked_discussion_directly": False,
+                },
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+    )
+
+    reconciled = _reconcile_human_requirements_ack_item(
+        (
+            UnresolvedReviewItem(
+                item_id=HUMAN_REQUIREMENTS_ACK_ITEM_ID,
+                reviewer="Orchestrator",
+                source_round=1,
+                text="Ack missing.",
+                status="blocking",
+            ),
+        ),
+        coder_output=structured_followup,
+        human_requirements=human_requirements,
+        source_round=2,
+    )
+
+    assert reconciled == []
 
 
 def test_pr_loop_does_not_expose_same_round_item_ids_to_later_reviewers(tmp_path):

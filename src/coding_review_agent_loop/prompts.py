@@ -352,6 +352,56 @@ If any signed human requirement in this set is unresolved, return blocking.
 """
 
 
+def _structured_coder_followup_guidance(
+    *,
+    reviewer_name: str,
+    human_requirements_context: CoderHumanRequirementsPromptContext,
+) -> str:
+    lines = [
+        f"Prefer this structured JSON follow-up format first so {reviewer_name} and the orchestrator can validate your response deterministically:",
+        "",
+        "```json",
+        "{",
+        '  "schema_version": 1,',
+        '  "kind": "coder_followup",',
+        '  "state": "blocking",',
+        '  "summary": "Implemented the requested fix and left one reviewer item for follow-up.",',
+        '  "addressed_items": ["item-1"],',
+        '  "remaining_items": ["item-2"],',
+        '  "human_requirements": {',
+        '    "addressed_ids": ["Requirement 1"],',
+        '    "checked_discussion_directly": false',
+        "  },",
+        '  "tests_run": ["python -m pytest tests/test_agent_loop.py -k followup"]',
+        "}",
+        "```",
+        "",
+        "Required structured fields: `schema_version`, `kind`, `state`, `summary`, `addressed_items`, `remaining_items`, and `human_requirements`. `tests_run` is optional.",
+        "The response must begin with exactly one top-level JSON object and must not include prose before or between the JSON and footer.",
+        "After the JSON object, add exactly one footer `<!-- AGENT_STATE: approved|blocking -->` and your signature. The JSON `state` must match the `AGENT_STATE` footer exactly.",
+        "Use `addressed_items` and `remaining_items` to classify the unresolved reviewer item IDs shown in this prompt. Do not omit any listed reviewer item ID and do not list any item ID more than once.",
+    ]
+    if human_requirements_context.block:
+        if human_requirements_context.surfaced_requirement_ids:
+            surfaced = ", ".join(f"`{item}`" for item in human_requirements_context.surfaced_requirement_ids)
+            lines.append(
+                "In structured replies, set `human_requirements.addressed_ids` to exactly the surfaced signed human requirement IDs you addressed in this prompt: "
+                f"{surfaced}."
+            )
+        elif human_requirements_context.requires_direct_discussion_ack:
+            lines.append(
+                "If the prompt omitted detailed signed human requirements, set `human_requirements.addressed_ids` to `[]` and `human_requirements.checked_discussion_directly` to `true` only after checking the GitHub discussion directly."
+            )
+    lines.extend(
+        [
+            "",
+            "Markdown follow-up output remains a compatibility fallback during migration when you are not using the structured JSON format.",
+            f"Legacy markdown replies must still include `{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}` and a `### Human requirements` section when signed human reviewer requirements are present.",
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
 def _format_unresolved_review_items(unresolved_items: Sequence[UnresolvedReviewItem] | None) -> str:
     if not unresolved_items:
         return ""
@@ -1130,7 +1180,10 @@ Do not create a new PR.
 
 {review}
 
-This is round {round_number}. End your final response with exactly one marker:
+{_structured_coder_followup_guidance(
+    reviewer_name=reviewer_name,
+    human_requirements_context=human_requirements_context,
+)}This is round {round_number}. End your final response with exactly one marker:
 
 <!-- AGENT_STATE: blocking -->
 
@@ -1175,7 +1228,10 @@ Same-PR follow-ups:
 
 {review}
 
-This is round {round_number}. End your final response with exactly one marker:
+{_structured_coder_followup_guidance(
+    reviewer_name=reviewer_name,
+    human_requirements_context=human_requirements_context,
+)}This is round {round_number}. End your final response with exactly one marker:
 
 <!-- AGENT_STATE: blocking -->
 
