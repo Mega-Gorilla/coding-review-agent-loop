@@ -458,6 +458,23 @@ def _expect_string_list(
     return rendered
 
 
+def _expect_optional_string_list(
+    payload: dict[str, object],
+    field_name: str,
+    *,
+    context: str,
+    item_context: str,
+    min_length: int = 0,
+) -> tuple[str, ...]:
+    value = payload.get(field_name, [])
+    return _expect_string_list(
+        value,
+        context=context,
+        item_context=item_context,
+        min_length=min_length,
+    )
+
+
 def _expect_state(value: object, *, context: str) -> str:
     state = _expect_non_empty_string(value, context=context)
     if state not in {"approved", "blocking"}:
@@ -796,26 +813,27 @@ def parse_structured_pr_review(text: str, *, reviewer: str) -> ParsedReview | No
             "kind",
             "state",
             "summary",
-            "blocking_items",
-            "same_pr_followups",
-            "future_followups",
             "prior_item_dispositions",
         },
+        optional={"blocking_items", "same_pr_followups", "future_followups"},
     )
     state = _expect_state(payload["state"], context="pr_review.state")
     summary = _expect_non_empty_string(payload["summary"], context="pr_review.summary")
-    blocking_items = _expect_string_list(
-        payload["blocking_items"],
+    blocking_items = _expect_optional_string_list(
+        payload,
+        "blocking_items",
         context="pr_review.blocking_items",
         item_context="pr_review.blocking_items",
     )
-    same_pr_followups = _expect_string_list(
-        payload["same_pr_followups"],
+    same_pr_followups = _expect_optional_string_list(
+        payload,
+        "same_pr_followups",
         context="pr_review.same_pr_followups",
         item_context="pr_review.same_pr_followups",
     )
-    future_followups = _expect_string_list(
-        payload["future_followups"],
+    future_followups = _expect_optional_string_list(
+        payload,
+        "future_followups",
         context="pr_review.future_followups",
         item_context="pr_review.future_followups",
     )
@@ -856,26 +874,27 @@ def parse_structured_plan_review(text: str, *, reviewer: str) -> ParsedPlanRevie
             "kind",
             "state",
             "summary",
-            "blocking_plan_issues",
-            "same_plan_followups",
-            "future_followups",
             "prior_plan_item_dispositions",
         },
+        optional={"blocking_plan_issues", "same_plan_followups", "future_followups"},
     )
     state = _expect_state(payload["state"], context="plan_review.state")
     summary = _expect_non_empty_string(payload["summary"], context="plan_review.summary")
-    blocking_items = _expect_string_list(
-        payload["blocking_plan_issues"],
+    blocking_items = _expect_optional_string_list(
+        payload,
+        "blocking_plan_issues",
         context="plan_review.blocking_plan_issues",
         item_context="plan_review.blocking_plan_issues",
     )
-    same_plan_followups = _expect_string_list(
-        payload["same_plan_followups"],
+    same_plan_followups = _expect_optional_string_list(
+        payload,
+        "same_plan_followups",
         context="plan_review.same_plan_followups",
         item_context="plan_review.same_plan_followups",
     )
-    future_followups = _expect_string_list(
-        payload["future_followups"],
+    future_followups = _expect_optional_string_list(
+        payload,
+        "future_followups",
         context="plan_review.future_followups",
         item_context="plan_review.future_followups",
     )
