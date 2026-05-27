@@ -3213,6 +3213,7 @@ def test_render_public_plan_review_comment_normalizes_sections():
     )
 
     assert rendered == (
+        "**Review verdict:** Blocking\n\n"
         "Still blocked on coverage.\n\n"
         "### Blocking plan issues\n"
         "- Add a resume coverage test.\n\n"
@@ -3227,7 +3228,9 @@ def test_render_public_plan_review_comment_normalizes_sections():
 
 
 def test_review_freeform_summary_text_strips_structured_followup_sections():
-    review = """Blocking issue summary.
+    review = """**Review verdict:** blocking
+
+Blocking issue summary.
 
 ### Blocking issues
 - needs one more assertion
@@ -4573,7 +4576,7 @@ def test_plan_loop_retries_plain_agent_plan_state_near_miss_once(tmp_path):
     assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
 
     assert near_miss not in runner.comments
-    assert any(comment == valid for comment in runner.comments)
+    assert any(comment == f"**Review verdict:** Approved\n\n{valid}" for comment in runner.comments)
     sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
     assert sleep_commands == [["sleep", "1"]]
 
@@ -7895,7 +7898,7 @@ def test_issue_loop_plan_first_stops_after_approved_plan(tmp_path):
     assert not any(cmd[:3] == ["gh", "pr", "view"] for cmd, _cwd in runner.commands)
     assert len(runner.comments) == 3
     assert runner.comments[0].startswith("Plan:")
-    assert runner.comments[1].startswith("Plan looks sound.")
+    assert runner.comments[1].startswith("**Review verdict:** Approved\n\nPlan looks sound.")
     assert "Outcome: implement" in runner.comments[2]
     assert not any(cmd[:2] == ["git", "fetch"] for cmd, _cwd in runner.commands)
     assert not any(cmd[:2] == ["git", "switch"] for cmd, _cwd in runner.commands)
@@ -8098,6 +8101,7 @@ def test_issue_loop_plan_first_posts_human_readable_item_labels_in_new_and_prior
     assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
 
     assert runner.comments[1] == (
+        "**Review verdict:** Blocking\n\n"
         "### Blocking plan issues\n"
         "- Keep plan-review wording distinct from PR wording.\n"
         "\n"
@@ -8107,6 +8111,7 @@ def test_issue_loop_plan_first_posts_human_readable_item_labels_in_new_and_prior
         "-- OpenAI Codex"
     )
     assert runner.comments[3] == (
+        "**Review verdict:** Approved\n\n"
         "Plan looks sound.\n\n"
         "### Prior unresolved plan item dispositions\n"
         "- [item-1] Blocking issue from OpenAI Codex, round 1: Keep plan-review wording distinct from PR wording. -> resolved\n"
@@ -8485,7 +8490,7 @@ def test_issue_loop_plan_first_keeps_blocking_review_when_future_followups_are_m
     claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
     assert "Add parser coverage for blocking reviews with stray future follow-ups." in claude_calls[1][-1]
     assert "Tighten the plan-review prompt wording." in claude_calls[1][-1]
-    assert runner.comments[1].startswith("Still blocked.")
+    assert runner.comments[1].startswith("**Review verdict:** Blocking\n\nStill blocked.")
     assert "### Future follow-ups" not in runner.comments[1]
 
 

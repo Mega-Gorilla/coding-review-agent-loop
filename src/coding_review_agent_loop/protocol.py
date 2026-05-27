@@ -379,7 +379,11 @@ def review_freeform_summary_text(text: str) -> str:
     )
     for line in text.splitlines():
         stripped = line.strip()
-        if re.match(r"^\*\*Review verdict:\*\*\s+(Approved|Blocking)\s*$", stripped):
+        if re.match(
+            r"^\*\*Review verdict:\*\*\s+(Approved|Blocking)\s*$",
+            stripped,
+            re.IGNORECASE,
+        ):
             continue
         if any(pattern.match(line) for pattern in structured_heading_res):
             skip_structured_section = True
