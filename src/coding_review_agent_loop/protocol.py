@@ -379,6 +379,12 @@ def review_freeform_summary_text(text: str) -> str:
     )
     for line in text.splitlines():
         stripped = line.strip()
+        if re.match(
+            r"^\*\*Review verdict:\*\*\s+(Approved|Blocking)\s*$",
+            stripped,
+            re.IGNORECASE,
+        ):
+            continue
         if any(pattern.match(line) for pattern in structured_heading_res):
             skip_structured_section = True
             continue
@@ -818,7 +824,9 @@ def parse_structured_pr_review(text: str, *, reviewer: str) -> ParsedReview | No
         optional={"blocking_items", "same_pr_followups", "future_followups"},
     )
     state = _expect_state(payload["state"], context="pr_review.state")
-    summary = _expect_non_empty_string(payload["summary"], context="pr_review.summary")
+    summary = review_freeform_summary_text(
+        _expect_non_empty_string(payload["summary"], context="pr_review.summary")
+    )
     blocking_items = _expect_optional_string_list(
         payload,
         "blocking_items",
@@ -879,7 +887,9 @@ def parse_structured_plan_review(text: str, *, reviewer: str) -> ParsedPlanRevie
         optional={"blocking_plan_issues", "same_plan_followups", "future_followups"},
     )
     state = _expect_state(payload["state"], context="plan_review.state")
-    summary = _expect_non_empty_string(payload["summary"], context="plan_review.summary")
+    summary = review_freeform_summary_text(
+        _expect_non_empty_string(payload["summary"], context="plan_review.summary")
+    )
     blocking_items = _expect_optional_string_list(
         payload,
         "blocking_plan_issues",

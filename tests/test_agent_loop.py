@@ -2311,6 +2311,34 @@ def test_parse_structured_pr_review_tolerates_omitted_empty_collections():
     ]
 
 
+def test_parse_structured_pr_review_strips_verdict_and_sections_from_json_summary():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "blocking",
+                "summary": (
+                    "**Review verdict:** blocking\n\n"
+                    "Need one more regression test.\n\n"
+                    "### Blocking issues\n"
+                    "- Duplicate line that should not remain in the summary."
+                ),
+                "blocking_items": ["Need one more regression test."],
+                "same_pr_followups": [],
+                "future_followups": [],
+                "prior_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex\n"
+    )
+
+    parsed = parse_structured_pr_review(payload, reviewer="OpenAI Codex")
+
+    assert parsed is not None
+    assert parsed.summary == "Need one more regression test."
+
+
 def test_parse_structured_pr_review_rejects_kind_mismatch():
     payload = (
         json.dumps(
@@ -2609,6 +2637,34 @@ def test_parse_structured_plan_review_tolerates_omitted_empty_collections():
     assert [(item.item_id, item.disposition) for item in parsed.dispositions] == [
         ("item-1", "resolved")
     ]
+
+
+def test_parse_structured_plan_review_strips_verdict_and_sections_from_json_summary():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": "blocking",
+                "summary": (
+                    "**Review verdict:** blocking\n\n"
+                    "Need clearer rollback coverage.\n\n"
+                    "### Same-plan follow-ups\n"
+                    "- Extra duplicate text."
+                ),
+                "blocking_plan_issues": ["Need clearer rollback coverage."],
+                "same_plan_followups": [],
+                "future_followups": [],
+                "prior_plan_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"
+    )
+
+    parsed = parse_structured_plan_review(payload, reviewer="OpenAI Codex")
+
+    assert parsed is not None
+    assert parsed.summary == "Need clearer rollback coverage."
 
 
 def test_parse_structured_plan_review_rejects_blocking_future_followups():
@@ -3213,6 +3269,7 @@ def test_render_public_plan_review_comment_normalizes_sections():
     )
 
     assert rendered == (
+        "**Review verdict:** Blocking\n\n"
         "Still blocked on coverage.\n\n"
         "### Blocking plan issues\n"
         "- Add a resume coverage test.\n\n"
@@ -3227,7 +3284,9 @@ def test_render_public_plan_review_comment_normalizes_sections():
 
 
 def test_review_freeform_summary_text_strips_structured_followup_sections():
-    review = """Blocking issue summary.
+    review = """**Review verdict:** blocking
+
+Blocking issue summary.
 
 ### Blocking issues
 - needs one more assertion
@@ -3413,6 +3472,7 @@ def test_render_public_pr_review_comment_uses_normalized_sections_and_footer():
     )
 
     assert rendered == (
+        "**Review verdict:** Blocking\n\n"
         "Need one more regression test.\n\n"
         "### Blocking issues\n"
         "- Exercise the structured-resume path.\n\n"
@@ -3476,6 +3536,26 @@ def test_render_public_pr_review_comment_normalizes_markdown_and_structured_revi
     )
 
     assert markdown_rendered == structured_rendered
+
+
+def test_render_public_pr_review_comment_includes_visible_approved_verdict():
+    rendered = _render_public_pr_review_comment(
+        parse_pr_review(
+            "Looks good to me.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            reviewer="OpenAI Codex",
+        ),
+        reviewer="Codex",
+        human_requirements_resolved_flag=False,
+        prior_items=(),
+        dispositions=(),
+    )
+
+    assert rendered == (
+        "**Review verdict:** Approved\n\n"
+        "Looks good to me.\n\n"
+        "<!-- AGENT_STATE: approved -->\n"
+        "-- OpenAI Codex"
+    )
 
 
 def test_format_unresolved_item_label_normalizes_multiline_text_and_preserves_origin_status():
@@ -3705,7 +3785,7 @@ def test_issue_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
     assert ["claude", "--print"] in command_names
     assert ["codex", "exec"] in command_names
     assert len(runner.comments) == 4
-    assert runner.comments[-1].startswith("LGTM.")
+    assert runner.comments[-1].startswith("**Review verdict:** Approved\n\nLGTM.")
     assert list((tmp_path / "logs").glob("*-claude.log"))
     assert list((tmp_path / "logs").glob("*-codex.log"))
     assert (tmp_path / "logs" / ".gitignore").read_text(encoding="utf-8") == "*\n!.gitignore\n"
@@ -4285,7 +4365,7 @@ def test_issue_loop_can_use_codex_as_coder_and_claude_as_reviewer(tmp_path):
         ["claude", "--print"],
     ]
     assert len(runner.comments) == 4
-    assert runner.comments[-1].startswith("LGTM.")
+    assert runner.comments[-1].startswith("**Review verdict:** Approved\n\nLGTM.")
 
 
 def test_issue_loop_runs_pre_review_tests_after_coder_changes(tmp_path):
@@ -4365,7 +4445,7 @@ def test_codex_usage_summary_records_exact_tokens_from_jsonl_and_public_response
 
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
-    assert runner.comments == [public_response]
+    assert runner.comments == [f"**Review verdict:** Approved\n\n{public_response}"]
     summary = read_usage_summary(tmp_path / "logs")
     assert summary["totals"]["exact_calls"] == 1
     assert summary["totals"]["estimated_calls"] == 0
@@ -4518,7 +4598,7 @@ def test_pr_loop_retries_transient_gemini_diagnostic_and_posts_only_valid_respon
 
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
-    assert runner.comments == [valid]
+    assert runner.comments == [f"**Review verdict:** Approved\n\n{valid}"]
     assert diagnostic not in runner.comments[0]
     sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
     assert sleep_commands == [["sleep", "1"]]
@@ -4533,7 +4613,7 @@ def test_pr_loop_retries_plain_agent_state_near_miss_once(tmp_path, terminator):
 
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
-    assert runner.comments == [valid]
+    assert runner.comments == [f"**Review verdict:** Approved\n\n{valid}"]
     sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
     assert sleep_commands == [["sleep", "1"]]
 
@@ -4552,7 +4632,7 @@ def test_plan_loop_retries_plain_agent_plan_state_near_miss_once(tmp_path):
     assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
 
     assert near_miss not in runner.comments
-    assert any(comment == valid for comment in runner.comments)
+    assert any(comment == f"**Review verdict:** Approved\n\n{valid}" for comment in runner.comments)
     sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
     assert sleep_commands == [["sleep", "1"]]
 
@@ -4564,7 +4644,7 @@ def test_gemini_public_response_file_is_inside_git_dir(tmp_path):
 
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
-    assert runner.comments == [valid]
+    assert runner.comments == [f"**Review verdict:** Approved\n\n{valid}"]
     gemini_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["gemini"]]
     assert len(gemini_commands) == 1
     prompt = "\n".join(gemini_commands[0])
@@ -4583,7 +4663,7 @@ def test_gemini_public_response_file_resolves_worktree_git_dir(tmp_path):
 
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
-    assert runner.comments == [valid]
+    assert runner.comments == [f"**Review verdict:** Approved\n\n{valid}"]
     gemini_call = next(cmd for cmd, _cwd in runner.commands if cmd[:1] == ["gemini"])
     assert str(git_dir / "agent-loop" / "responses" / "gemini") in gemini_call[2]
     assert str(config.gemini_dir / ".git" / "agent-loop") not in gemini_call[2]
@@ -5193,6 +5273,7 @@ def test_pr_loop_skips_duplicate_approved_followup_issue_creation_when_marker_ex
 
     assert runner.issues == []
     assert runner.comments == [
+        "**Review verdict:** Approved\n\n"
         "Codex approves.\n\n### Future follow-ups\n- Add cleanup docs.\n"
         "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
     ]
@@ -5493,7 +5574,7 @@ def test_pr_loop_keeps_blocking_review_when_future_followups_are_misclassified(t
 
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
-    assert runner.comments[0].startswith("Still blocked.")
+    assert runner.comments[0].startswith("**Review verdict:** Blocking\n\nStill blocked.")
     assert "Consider a broader cleanup later." not in runner.comments[0]
     followup_prompt = next(
         cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"] and "Address the review below" in cmd[-1]
@@ -5662,6 +5743,7 @@ def test_pr_loop_ignores_approved_followups_by_default(tmp_path):
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
     assert runner.comments == [
+        "**Review verdict:** Approved\n\n"
         "LGTM.\n\n### Future follow-ups\n- Add cleanup docs.\n"
         "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
     ]
@@ -6404,12 +6486,14 @@ def test_pr_loop_posts_human_readable_item_labels_in_new_and_prior_sections(tmp_
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
     assert runner.comments[0] == (
+        "**Review verdict:** Blocking\n\n"
         "### Same-PR follow-ups\n"
         "- Require source issue reference in PR body.\n"
         "<!-- AGENT_STATE: blocking -->\n"
         "-- OpenAI Codex"
     )
     assert runner.comments[2] == (
+        "**Review verdict:** Approved\n\n"
         "Looks good.\n\n"
         "### Prior unresolved item dispositions\n"
         "- [item-1] Same-PR follow-up from OpenAI Codex, round 1: Require source issue reference in PR body. -> resolved\n"
@@ -6438,6 +6522,7 @@ def test_pr_loop_tracks_only_summary_when_blocking_items_phrase_the_issue_differ
     assert "Needs one more regression test before merge." in second_coder_prompt
     assert "Add the mixed-history resume case" not in second_coder_prompt
     assert runner.comments[0] == (
+        "**Review verdict:** Blocking\n\n"
         "Needs one more regression test before merge.\n\n"
         "### Blocking issues\n"
         "- Add the mixed-history resume case to `tests/test_agent_loop.py`.\n"
@@ -7869,7 +7954,7 @@ def test_issue_loop_plan_first_stops_after_approved_plan(tmp_path):
     assert not any(cmd[:3] == ["gh", "pr", "view"] for cmd, _cwd in runner.commands)
     assert len(runner.comments) == 3
     assert runner.comments[0].startswith("Plan:")
-    assert runner.comments[1].startswith("Plan looks sound.")
+    assert runner.comments[1].startswith("**Review verdict:** Approved\n\nPlan looks sound.")
     assert "Outcome: implement" in runner.comments[2]
     assert not any(cmd[:2] == ["git", "fetch"] for cmd, _cwd in runner.commands)
     assert not any(cmd[:2] == ["git", "switch"] for cmd, _cwd in runner.commands)
@@ -8072,6 +8157,7 @@ def test_issue_loop_plan_first_posts_human_readable_item_labels_in_new_and_prior
     assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
 
     assert runner.comments[1] == (
+        "**Review verdict:** Blocking\n\n"
         "### Blocking plan issues\n"
         "- Keep plan-review wording distinct from PR wording.\n"
         "\n"
@@ -8081,6 +8167,7 @@ def test_issue_loop_plan_first_posts_human_readable_item_labels_in_new_and_prior
         "-- OpenAI Codex"
     )
     assert runner.comments[3] == (
+        "**Review verdict:** Approved\n\n"
         "Plan looks sound.\n\n"
         "### Prior unresolved plan item dispositions\n"
         "- [item-1] Blocking issue from OpenAI Codex, round 1: Keep plan-review wording distinct from PR wording. -> resolved\n"
@@ -8459,7 +8546,7 @@ def test_issue_loop_plan_first_keeps_blocking_review_when_future_followups_are_m
     claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
     assert "Add parser coverage for blocking reviews with stray future follow-ups." in claude_calls[1][-1]
     assert "Tighten the plan-review prompt wording." in claude_calls[1][-1]
-    assert runner.comments[1].startswith("Still blocked.")
+    assert runner.comments[1].startswith("**Review verdict:** Blocking\n\nStill blocked.")
     assert "### Future follow-ups" not in runner.comments[1]
 
 
@@ -8498,7 +8585,7 @@ def test_issue_loop_plan_first_can_implement_after_approval(tmp_path):
     assert first_claude_index < fetch_index < switch_index < second_claude_index
     assert len(runner.comments) == 5
     assert runner.comments[3].startswith("Implemented approved plan.")
-    assert runner.comments[4].startswith("LGTM.")
+    assert runner.comments[4].startswith("**Review verdict:** Approved\n\nLGTM.")
 
 
 def test_issue_loop_rejects_pr_without_issue_reference_in_body(tmp_path):
@@ -8593,7 +8680,7 @@ def test_task_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
     assert ["codex", "exec"] in command_names
     assert len(runner.comments) == 4
     assert runner.comments[0].startswith("Implemented.")
-    assert runner.comments[-1].startswith("LGTM.")
+    assert runner.comments[-1].startswith("**Review verdict:** Approved\n\nLGTM.")
 
 
 def test_task_loop_syncs_coder_base_before_first_implementation_attempt(tmp_path):
@@ -8788,7 +8875,7 @@ def test_codex_issue_loop_creates_pr_then_claude_approves(tmp_path):
     assert ["claude", "--print"] in command_names
     assert len(runner.comments) == 2
     assert runner.comments[0].startswith("Fixed issue.")
-    assert runner.comments[1].startswith("Looks good.")
+    assert runner.comments[1].startswith("**Review verdict:** Approved\n\nLooks good.")
 
 
 def test_codex_issue_loop_alternates_until_claude_approval(tmp_path):
@@ -8809,7 +8896,7 @@ def test_codex_issue_loop_alternates_until_claude_approval(tmp_path):
     assert run_issue_loop(runner, issue_number=56, config=config) == 0
 
     assert len(runner.comments) == 4
-    assert runner.comments[-1].startswith("LGTM.")
+    assert runner.comments[-1].startswith("**Review verdict:** Approved\n\nLGTM.")
 
 
 def test_codex_issue_loop_requires_codex_to_report_pr_number(tmp_path):
@@ -8839,7 +8926,7 @@ def test_codex_task_loop_creates_pr_then_claude_approves(tmp_path):
 
     assert len(runner.comments) == 2
     assert runner.comments[0].startswith("Implemented task.")
-    assert runner.comments[1].startswith("Ship it.")
+    assert runner.comments[1].startswith("**Review verdict:** Approved\n\nShip it.")
 
 
 def test_codex_task_loop_picks_up_pr_url_when_marker_missing(tmp_path):
@@ -8874,7 +8961,7 @@ def test_gemini_issue_loop_creates_pr_then_codex_approves(tmp_path):
     assert agent_commands == [["gemini", "--prompt"], ["codex", "exec"]]
     assert len(runner.comments) == 2
     assert runner.comments[0].startswith("Fixed issue.")
-    assert runner.comments[1].startswith("Looks good.")
+    assert runner.comments[1].startswith("**Review verdict:** Approved\n\nLooks good.")
 
 
 def test_gemini_issue_loop_resumes_session_for_followup(tmp_path):
@@ -8930,7 +9017,7 @@ def test_gemini_review_loop_uses_prompt_and_extra_args(tmp_path):
     assert "Only content after that line will be posted to GitHub" in gemini_call[2]
     assert "--output-format" in gemini_call
     assert "--model" in gemini_call
-    assert runner.comments == ["LGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"]
+    assert runner.comments == ["**Review verdict:** Approved\n\nLGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"]
 
 
 def test_gemini_review_loop_prefers_public_response_file_over_stdout(tmp_path):
@@ -8953,7 +9040,7 @@ def test_gemini_review_loop_prefers_public_response_file_over_stdout(tmp_path):
     gemini_call = next(cmd for cmd, _cwd in runner.commands if cmd[:1] == ["gemini"])
     assert "PUBLIC RESPONSE FILE:" in gemini_call[2]
     assert str(config.gemini_dir / ".git" / "agent-loop" / "responses" / "gemini") in gemini_call[2]
-    assert runner.comments == ["LGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"]
+    assert runner.comments == ["**Review verdict:** Approved\n\nLGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"]
 
 
 def test_claude_review_loop_prefers_public_response_file_over_stdout(tmp_path):
@@ -8980,7 +9067,7 @@ def test_claude_review_loop_prefers_public_response_file_over_stdout(tmp_path):
     claude_call = next(cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"])
     assert "PUBLIC RESPONSE FILE:" in claude_call[-1]
     assert "/coding-review-agent-loop/responses/OWNER-REPO/claude/" in claude_call[-1]
-    assert runner.comments == ["LGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude"]
+    assert runner.comments == ["**Review verdict:** Approved\n\nLGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude"]
 
 
 def test_codex_task_loop_rejects_empty_task_text(tmp_path):
