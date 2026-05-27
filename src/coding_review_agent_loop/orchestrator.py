@@ -1256,7 +1256,7 @@ def _render_public_pr_review_comment(
     prior_items: Sequence[UnresolvedReviewItem],
     dispositions: Sequence[ReviewItemDisposition],
 ) -> str:
-    sections: list[str] = []
+    sections: list[str] = [f"**Review verdict:** {parsed_review.state.title()}"]
     if parsed_review.summary:
         sections.append(parsed_review.summary.strip())
     if parsed_review.blocking_items:
