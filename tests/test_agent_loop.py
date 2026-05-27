@@ -2311,6 +2311,34 @@ def test_parse_structured_pr_review_tolerates_omitted_empty_collections():
     ]
 
 
+def test_parse_structured_pr_review_strips_verdict_and_sections_from_json_summary():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "blocking",
+                "summary": (
+                    "**Review verdict:** blocking\n\n"
+                    "Need one more regression test.\n\n"
+                    "### Blocking issues\n"
+                    "- Duplicate line that should not remain in the summary."
+                ),
+                "blocking_items": ["Need one more regression test."],
+                "same_pr_followups": [],
+                "future_followups": [],
+                "prior_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex\n"
+    )
+
+    parsed = parse_structured_pr_review(payload, reviewer="OpenAI Codex")
+
+    assert parsed is not None
+    assert parsed.summary == "Need one more regression test."
+
+
 def test_parse_structured_pr_review_rejects_kind_mismatch():
     payload = (
         json.dumps(
@@ -2609,6 +2637,34 @@ def test_parse_structured_plan_review_tolerates_omitted_empty_collections():
     assert [(item.item_id, item.disposition) for item in parsed.dispositions] == [
         ("item-1", "resolved")
     ]
+
+
+def test_parse_structured_plan_review_strips_verdict_and_sections_from_json_summary():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": "blocking",
+                "summary": (
+                    "**Review verdict:** blocking\n\n"
+                    "Need clearer rollback coverage.\n\n"
+                    "### Same-plan follow-ups\n"
+                    "- Extra duplicate text."
+                ),
+                "blocking_plan_issues": ["Need clearer rollback coverage."],
+                "same_plan_followups": [],
+                "future_followups": [],
+                "prior_plan_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"
+    )
+
+    parsed = parse_structured_plan_review(payload, reviewer="OpenAI Codex")
+
+    assert parsed is not None
+    assert parsed.summary == "Need clearer rollback coverage."
 
 
 def test_parse_structured_plan_review_rejects_blocking_future_followups():
