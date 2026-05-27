@@ -2283,6 +2283,34 @@ def test_parse_structured_pr_review_normalizes_v1_payload_with_footer_contract()
     ]
 
 
+def test_parse_structured_pr_review_tolerates_omitted_empty_collections():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "approved",
+                "summary": "Looks good after the latest fix.",
+                "prior_item_dispositions": [
+                    {"item_id": "item-1", "disposition": "resolved"},
+                ],
+            }
+        )
+        + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex\n"
+    )
+
+    parsed = parse_structured_pr_review(payload, reviewer="OpenAI Codex")
+
+    assert parsed is not None
+    assert parsed.state == "approved"
+    assert parsed.blocking_items == ()
+    assert parsed.followups.same_pr == ()
+    assert parsed.followups.future == ()
+    assert [(item.item_id, item.disposition) for item in parsed.dispositions] == [
+        ("item-1", "resolved")
+    ]
+
+
 def test_parse_structured_pr_review_rejects_kind_mismatch():
     payload = (
         json.dumps(
@@ -2553,6 +2581,31 @@ def test_parse_structured_plan_review_normalizes_v1_payload():
     assert parsed is not None
     assert parsed.summary == "Plan looks good."
     assert [item.text for item in parsed.items.future] == ["Consider a later cleanup pass."]
+    assert [(item.item_id, item.disposition) for item in parsed.dispositions] == [
+        ("item-1", "resolved")
+    ]
+
+
+def test_parse_structured_plan_review_tolerates_omitted_empty_collections():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": "approved",
+                "summary": "Plan looks good.",
+                "prior_plan_item_dispositions": [{"item_id": "item-1", "disposition": "resolved"}],
+            }
+        )
+        + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex"
+    )
+
+    parsed = parse_structured_plan_review(payload, reviewer="OpenAI Codex")
+
+    assert parsed is not None
+    assert parsed.items.blocking == ()
+    assert parsed.items.same_plan == ()
+    assert parsed.items.future == ()
     assert [(item.item_id, item.disposition) for item in parsed.dispositions] == [
         ("item-1", "resolved")
     ]
