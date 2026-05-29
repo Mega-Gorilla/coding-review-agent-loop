@@ -14,7 +14,7 @@ import os
 _logger = logging.getLogger(__name__)
 
 # v7 prompt — tested against all 34 historical format-failure samples (100%).
-# Uses str.replace("{raw_response}", raw) for substitution because the prompt
+# Uses str.replace("{raw_response}", raw, 1) for substitution because the prompt
 # itself contains literal { } characters in the JSON examples.
 _REPAIR_PROMPT = """\
 You are a format-repair assistant. An AI agent produced a code review that failed strict schema validation. Extract its intent and reformat it into one of these two valid formats.
@@ -134,7 +134,7 @@ def attempt_repair(raw: str) -> str | None:
         _logger.debug("No GEMINI_API_KEY or GOOGLE_API_KEY found; skipping repair pass")
         return None
 
-    prompt = _REPAIR_PROMPT.replace("{raw_response}", raw)
+    prompt = _REPAIR_PROMPT.replace("{raw_response}", raw, 1)
     try:
         client = _genai.Client(api_key=api_key)
         response = client.models.generate_content(
@@ -145,6 +145,14 @@ def attempt_repair(raw: str) -> str | None:
         if not isinstance(text, str) or not text.strip():
             _logger.debug("repair model returned empty response")
             return None
+        usage = getattr(response, "usage_metadata", None)
+        if usage is not None:
+            _logger.info(
+                "repair pass token usage: prompt=%s output=%s total=%s",
+                getattr(usage, "prompt_token_count", None),
+                getattr(usage, "candidates_token_count", None),
+                getattr(usage, "total_token_count", None),
+            )
         return text
     except Exception as exc:
         _logger.debug("repair pass call failed: %s", exc)

@@ -9174,7 +9174,7 @@ def test_repair_prompt_contains_raw_response_placeholder():
 
 def test_repair_prompt_substitution_leaves_json_examples_intact():
     raw = "some {curly} braces {in} the review text"
-    substituted = _REPAIR_PROMPT.replace("{raw_response}", raw)
+    substituted = _REPAIR_PROMPT.replace("{raw_response}", raw, 1)
     assert raw in substituted
     assert "{raw_response}" not in substituted
     assert "schema_version" in substituted
