@@ -9125,3 +9125,118 @@ def test_claude_review_loop_rejects_non_open_pr(tmp_path):
     assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
 
     assert not any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
+
+
+# ---------------------------------------------------------------------------
+# Repair pass tests
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock, patch
+
+from coding_review_agent_loop.repair import (
+    REPAIR_MODEL,
+    _build_repair_prompt,
+    repair_review_response,
+)
+
+
+def test_repair_prompt_substitutes_raw_response():
+    raw = "some malformed review content { with braces }"
+    prompt = _build_repair_prompt(raw)
+    assert raw in prompt
+    assert "{raw_response}" not in prompt
+    assert "format-repair assistant" in prompt
+    assert "AGENT_STATE" in prompt
+
+
+def test_repair_prompt_does_not_corrupt_json_examples():
+    prompt = _build_repair_prompt("dummy")
+    assert '"schema_version": 1' in prompt
+    assert '"kind": "pr_review"' in prompt
+
+
+def test_repair_returns_none_when_no_api_key(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    result = repair_review_response("some malformed text")
+    assert result is None
+
+
+def test_repair_returns_repaired_text_on_success(monkeypatch):
+    repaired = (
+        '{"schema_version": 1, "kind": "pr_review", "state": "approved", '
+        '"summary": "LGTM", "blocking_items": [], "same_pr_followups": [], '
+        '"future_followups": [], "prior_item_dispositions": []}\n'
+        "<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    )
+    mock_response = MagicMock()
+    mock_response.text = repaired
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = mock_response
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    with patch("google.genai.Client", return_value=mock_client):
+        result = repair_review_response("malformed")
+
+    assert result == repaired
+    mock_client.models.generate_content.assert_called_once()
+    call_kwargs = mock_client.models.generate_content.call_args
+    assert call_kwargs.kwargs.get("model") == REPAIR_MODEL or call_kwargs.args[0] == REPAIR_MODEL
+
+
+def test_repair_returns_none_when_sdk_raises(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+    mock_client = MagicMock()
+    mock_client.models.generate_content.side_effect = Exception("API error")
+
+    with patch("google.genai.Client", return_value=mock_client):
+        result = repair_review_response("malformed")
+
+    assert result is None
+
+
+def test_pr_loop_uses_repair_when_review_format_fails(tmp_path):
+    """Repair is attempted when a reviewer produces a malformed-but-salvageable response."""
+    malformed = "LGTM — the PR looks great.\nAGENT_STATE: approved\n-- Google Gemini"
+    repaired = (
+        '{"schema_version": 1, "kind": "pr_review", "state": "approved", '
+        '"summary": "LGTM", "blocking_items": [], "same_pr_followups": [], '
+        '"future_followups": [], "prior_item_dispositions": []}\n'
+        "<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    )
+
+    runner = FakeRunner(gemini_outputs=[malformed])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.repair.repair_review_response", return_value=repaired):
+        result = run_pr_loop(runner, pr_number=77, config=config)
+
+    assert result == 0
+    assert any("approved" in comment.lower() for comment in runner.comments)
+
+
+def test_pr_loop_raises_when_repair_also_fails(tmp_path):
+    """When repair returns None (unavailable), the original validation error is surfaced."""
+    malformed = "I reviewed it. Still needs work."
+    runner = FakeRunner(gemini_outputs=[malformed])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.repair.repair_review_response", return_value=None):
+        with pytest.raises(AgentLoopError, match="AGENT_STATE"):
+            run_pr_loop(runner, pr_number=77, config=config)
+
+    assert runner.comments == []
+
+
+def test_pr_loop_raises_when_repaired_output_still_invalid(tmp_path):
+    """When repair returns a still-invalid response, the original error is surfaced."""
+    malformed = "I reviewed it. Still needs work."
+    still_invalid = "This is also not a valid format."
+    runner = FakeRunner(gemini_outputs=[malformed])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.repair.repair_review_response", return_value=still_invalid):
+        with pytest.raises(AgentLoopError, match="No review result was recorded"):
+            run_pr_loop(runner, pr_number=77, config=config)
+
+    assert runner.comments == []

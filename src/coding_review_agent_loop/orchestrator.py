@@ -279,12 +279,14 @@ def _run_validated_agent(
     validate: Callable[[str], object],
     session_id: str | None = None,
     usage_context: RunUsageContext | None = None,
+    enable_repair: bool = False,
 ) -> ValidatedAgentResponse:
     agent_name = agent_display_name(agent)
     log_paths: list[object] = []
     max_attempts = config.agent_max_retries + 1
     last_error = f"{agent_name} produced no output."
     last_result: AgentResult | None = None
+    last_text_for_repair: str | None = None
 
     for attempt in range(1, max_attempts + 1):
         result = run_agent_result(
@@ -325,6 +327,8 @@ def _run_validated_agent(
                 should_retry = _is_transient_agent_output(text) or (
                     attempt == 1 and _is_retryable_marker_near_miss(text)
                 )
+                if not _is_transient_agent_output(text):
+                    last_text_for_repair = text
             else:
                 if usage_record is not None:
                     usage_record.validation_status = "validated"
@@ -345,6 +349,26 @@ def _run_validated_agent(
             runner.run(("sleep", str(delay)), cwd=active_workdir(config))
             continue
         break
+
+    if enable_repair and last_text_for_repair is not None:
+        from .repair import REPAIR_MODEL, repair_review_response
+        log(config, f"{agent_name} response failed validation; attempting format repair via {REPAIR_MODEL}")
+        repaired_text = repair_review_response(last_text_for_repair)
+        if repaired_text is not None and repaired_text.strip():
+            try:
+                marker_value = validate(repaired_text)
+            except AgentLoopError:
+                log(config, f"Format repair of {agent_name} response did not pass validation; treating as blocking")
+            else:
+                log(config, f"Format repair of {agent_name} response succeeded")
+                return ValidatedAgentResponse(
+                    text=repaired_text,
+                    session_id=last_result.session_id if last_result is not None else None,
+                    marker_value=marker_value,
+                    usage=None,
+                )
+        else:
+            log(config, f"Format repair of {agent_name} response was skipped (no API key or repair unavailable)")
 
     raise AgentLoopError(
         _format_invalid_agent_response_error(
@@ -1942,6 +1966,7 @@ def _run_plan_first_loop(
                         unresolved_items=items,
                     ),
                     usage_context=usage_context,
+                    enable_repair=True,
                 )
                 review_output = review_response.text
                 reviewer_session_ids[reviewer] = review_response.session_id
@@ -2526,6 +2551,7 @@ def run_pr_loop(
                             unresolved_items=items,
                         ),
                         usage_context=usage_context,
+                        enable_repair=True,
                     )
                     review_output = review_response.text
                     reviewer_session_ids[reviewer] = review_response.session_id
