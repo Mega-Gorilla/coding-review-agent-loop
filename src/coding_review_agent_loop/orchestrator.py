@@ -85,6 +85,7 @@ from .protocol import (
     validate_structured_plan_revision,
 )
 from .protocol import ApprovedFollowup, parse_review
+from .repair import attempt_repair
 from .runner import Runner
 from .usage import RunUsageContext, UsageMetadata, estimate_usage
 from .workdirs import active_workdir
@@ -279,6 +280,7 @@ def _run_validated_agent(
     validate: Callable[[str], object],
     session_id: str | None = None,
     usage_context: RunUsageContext | None = None,
+    use_repair: bool = False,
 ) -> ValidatedAgentResponse:
     agent_name = agent_display_name(agent)
     log_paths: list[object] = []
@@ -325,6 +327,27 @@ def _run_validated_agent(
                 should_retry = _is_transient_agent_output(text) or (
                     attempt == 1 and _is_retryable_marker_near_miss(text)
                 )
+                if use_repair and not _is_transient_agent_output(text):
+                    log(config, f"{agent_name}: schema validation failed ({exc}); attempting repair pass")
+                    repaired = attempt_repair(text)
+                    if repaired is not None:
+                        try:
+                            marker_value = validate(repaired)
+                        except AgentLoopError as repair_exc:
+                            log(
+                                config,
+                                f"{agent_name}: repair pass produced invalid output ({repair_exc})",
+                            )
+                        else:
+                            log(config, f"{agent_name}: repair pass recovered malformed response")
+                            if usage_record is not None:
+                                usage_record.validation_status = "validated"
+                            return ValidatedAgentResponse(
+                                text=repaired,
+                                session_id=result.session_id,
+                                marker_value=marker_value,
+                                usage=usage,
+                            )
             else:
                 if usage_record is not None:
                     usage_record.validation_status = "validated"
@@ -1942,6 +1965,7 @@ def _run_plan_first_loop(
                         unresolved_items=items,
                     ),
                     usage_context=usage_context,
+                    use_repair=True,
                 )
                 review_output = review_response.text
                 reviewer_session_ids[reviewer] = review_response.session_id
@@ -2526,6 +2550,7 @@ def run_pr_loop(
                             unresolved_items=items,
                         ),
                         usage_context=usage_context,
+                        use_repair=True,
                     )
                     review_output = review_response.text
                     reviewer_session_ids[reviewer] = review_response.session_id
