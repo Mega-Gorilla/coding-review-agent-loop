@@ -9125,3 +9125,124 @@ def test_claude_review_loop_rejects_non_open_pr(tmp_path):
     assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
 
     assert not any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
+
+
+# ---------------------------------------------------------------------------
+# Repair pass tests
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock, patch
+
+from coding_review_agent_loop.repair import attempt_repair, _REPAIR_PROMPT
+
+
+def test_attempt_repair_returns_none_when_no_api_key(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    result = attempt_repair("some malformed review text")
+    assert result is None
+
+
+def test_attempt_repair_calls_sdk_and_returns_text(monkeypatch):
+    repaired = (
+        '{"schema_version":1,"kind":"pr_review","state":"approved","summary":"OK",'
+        '"blocking_items":[],"same_pr_followups":[],"future_followups":[],'
+        '"prior_item_dispositions":[]}\n<!-- AGENT_STATE: approved -->\n-- Gemini'
+    )
+    mock_response = MagicMock()
+    mock_response.text = repaired
+    mock_client = MagicMock()
+    mock_client.models.generate_content.return_value = mock_response
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
+
+    # google-genai is installed; patch the Client class on the real module object
+    from google import genai as real_genai
+    with patch.object(real_genai, "Client", return_value=mock_client):
+        result = attempt_repair("malformed review")
+
+    assert result == repaired
+    mock_client.models.generate_content.assert_called_once()
+    call_kwargs = mock_client.models.generate_content.call_args
+    assert call_kwargs.kwargs.get("model") == "gemini-3.1-flash-lite"
+    assert "malformed review" in call_kwargs.kwargs.get("contents", "")
+
+
+def test_repair_prompt_contains_raw_response_placeholder():
+    assert "{raw_response}" in _REPAIR_PROMPT
+
+
+def test_repair_prompt_substitution_leaves_json_examples_intact():
+    raw = "some {curly} braces {in} the review text"
+    substituted = _REPAIR_PROMPT.replace("{raw_response}", raw, 1)
+    assert raw in substituted
+    assert "{raw_response}" not in substituted
+    assert "schema_version" in substituted
+
+
+def test_run_pr_loop_uses_repair_pass_on_format_failure(tmp_path):
+    """Repair pass is invoked when schema validation fails; repaired output is used."""
+    malformed_review = (
+        "Looks good overall.\n\n"
+        "AGENT_STATE: approved\n"
+        "-- OpenAI Codex"
+    )
+    repaired_review = (
+        '{"schema_version":1,"kind":"pr_review","state":"approved","summary":"Looks good overall.",'
+        '"blocking_items":[],"same_pr_followups":[],"future_followups":[],'
+        '"prior_item_dispositions":[]}'
+        "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+    )
+    runner = FakeRunner(
+        codex_outputs=[malformed_review],
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex", agent_max_retries=0)
+
+    captured_repairs = []
+
+    def fake_attempt_repair(raw: str) -> str | None:
+        captured_repairs.append(raw)
+        return repaired_review
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_attempt_repair):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert len(captured_repairs) == 1
+    assert "AGENT_STATE: approved" in captured_repairs[0]
+
+
+def test_run_pr_loop_falls_back_to_error_when_repair_also_fails(tmp_path):
+    """When repair also produces invalid output, the original error is raised."""
+    malformed_review = (
+        "Something went wrong with the format.\n"
+        "AGENT_STATE: approved\n"
+        "-- OpenAI Codex"
+    )
+    runner = FakeRunner(
+        codex_outputs=[malformed_review],
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex", agent_max_retries=0)
+
+    def fake_attempt_repair_fails(raw: str) -> str | None:
+        return "still broken output without valid schema"
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_attempt_repair_fails):
+        with pytest.raises(AgentLoopError, match="Codex"):
+            run_pr_loop(runner, pr_number=77, config=config)
+
+
+def test_run_pr_loop_skips_repair_when_repair_returns_none(tmp_path):
+    """When attempt_repair returns None (e.g. no API key), normal error is raised."""
+    malformed_review = (
+        "Something went wrong.\n"
+        "AGENT_STATE: approved\n"
+        "-- OpenAI Codex"
+    )
+    runner = FakeRunner(
+        codex_outputs=[malformed_review],
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=None):
+        with pytest.raises(AgentLoopError, match="Codex"):
+            run_pr_loop(runner, pr_number=77, config=config)

@@ -20,6 +20,10 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
 ]
 
+dependencies = [
+  "google-genai>=1.0",
+]
+
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
