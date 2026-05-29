@@ -2853,6 +2853,7 @@ def run_pr_loop(
                     human_requirements=human_requirements,
                 ),
                 usage_context=usage_context,
+                use_repair=True,
             )
             coder_output = coder_response.text
             coder_session_id = coder_response.session_id

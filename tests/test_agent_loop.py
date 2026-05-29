@@ -9246,3 +9246,97 @@ def test_run_pr_loop_skips_repair_when_repair_returns_none(tmp_path):
     with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=None):
         with pytest.raises(AgentLoopError, match="Codex"):
             run_pr_loop(runner, pr_number=77, config=config)
+
+
+def test_run_pr_loop_uses_repair_pass_on_coder_followup_format_failure(tmp_path):
+    """Repair pass is invoked when coder followup schema validation fails; repaired output is used."""
+    malformed_coder_followup = (
+        '{"schema_version":1,"kind":"pr_review","state":"blocking","summary":"Fixed the bug.",'
+        '"blocking_items":[],"same_pr_followups":[],"future_followups":[],'
+        '"prior_item_dispositions":[]}'
+        "\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    repaired_followup = (
+        '{"schema_version":1,"kind":"coder_followup","state":"blocking","summary":"Fixed the bug.",'
+        '"addressed_items":["item-1"],"remaining_items":[],'
+        '"human_requirements":{"addressed_ids":[],"checked_discussion_directly":false}}'
+        "\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    runner = FakeRunner(
+        claude_outputs=[malformed_coder_followup],
+        codex_outputs=[
+            "Need a fix."
+            + blocking_issues("Fix the bug.")
+            + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex", max_rounds=2, agent_max_retries=0)
+
+    captured_repairs = []
+
+    def fake_attempt_repair(raw: str) -> str | None:
+        captured_repairs.append(raw)
+        return repaired_followup
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_attempt_repair):
+        result = run_pr_loop(runner, pr_number=77, config=config)
+
+    assert result == 0
+    assert len(captured_repairs) == 1
+    assert "pr_review" in captured_repairs[0]
+
+
+def test_run_pr_loop_falls_back_to_error_when_coder_followup_repair_also_fails(tmp_path):
+    """When repair also produces invalid output for coder followup, the original error is raised."""
+    malformed_coder_followup = (
+        '{"schema_version":1,"kind":"pr_review","state":"blocking","summary":"Fixed the bug.",'
+        '"blocking_items":[],"same_pr_followups":[],"future_followups":[],'
+        '"prior_item_dispositions":[]}'
+        "\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    runner = FakeRunner(
+        claude_outputs=[malformed_coder_followup],
+        codex_outputs=[
+            "Need a fix."
+            + blocking_issues("Fix the bug.")
+            + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex", max_rounds=2, agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value="still broken output"):
+        with pytest.raises(AgentLoopError, match="Claude"):
+            run_pr_loop(runner, pr_number=77, config=config)
+
+
+def test_run_pr_loop_skips_repair_when_coder_followup_repair_returns_none(tmp_path):
+    """When attempt_repair returns None for coder followup, normal error is raised."""
+    malformed_coder_followup = (
+        '{"schema_version":1,"kind":"pr_review","state":"blocking","summary":"Fixed the bug.",'
+        '"blocking_items":[],"same_pr_followups":[],"future_followups":[],'
+        '"prior_item_dispositions":[]}'
+        "\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    runner = FakeRunner(
+        claude_outputs=[malformed_coder_followup],
+        codex_outputs=[
+            "Need a fix."
+            + blocking_issues("Fix the bug.")
+            + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex", max_rounds=2, agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=None):
+        with pytest.raises(AgentLoopError, match="Claude"):
+            run_pr_loop(runner, pr_number=77, config=config)
+
+
+def test_repair_prompt_contains_coder_followup_format():
+    """Repair prompt must include the coder_followup format so the model knows about it."""
+    assert "coder_followup" in _REPAIR_PROMPT
+    assert "addressed_items" in _REPAIR_PROMPT
+    assert "remaining_items" in _REPAIR_PROMPT
