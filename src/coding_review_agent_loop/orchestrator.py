@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import datetime
 import hashlib
 import json
 import re
@@ -20,7 +21,7 @@ from .config import (
     sync_coder_pr_before_validation,
     sync_reviewer_pr_before_review,
 )
-from .errors import AgentLoopError
+from .errors import AgentLoopError, QuotaResetExceededError
 from .github import (
     IssueContext,
     PullRequestChecks,
@@ -105,12 +106,17 @@ TRANSIENT_AGENT_OUTPUT_RE = re.compile(
     r"Invalid stream|empty response|malformed tool call|"
     r"network (?:reset|timeout)|connection (?:reset|timed out|timeout)|"
     r"\btimed out\b|\btimeout\b|"
-    r"\b5\d\d\b|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout",
+    r"\b5\d\d\b|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout|"
+    r"\b429\b|rate.?limit(?:ed)?|"
+    r"session.?limit.?exceeded|session_limit_exceeded|too many sessions|"
+    r"no capacity available|capacity.*(?:unavailable|exceeded)|"
+    r"resource.?exhausted|overloaded|"
+    r"\bquota\b",
     re.I,
 )
 NON_RETRYABLE_AGENT_OUTPUT_RE = re.compile(
     r"auth(?:entication|orization)?|unauthorized|forbidden|invalid api key|"
-    r"credit|quota|rate limit|billing|dirty (?:checkout|workdir|working tree)",
+    r"credit|billing|dirty (?:checkout|workdir|working tree)",
     re.I,
 )
 NEAR_MISS_AGENT_MARKER_RE = re.compile(
@@ -124,6 +130,47 @@ ALL_RESOLVED_PROSE_RE = re.compile(
     re.I,
 )
 
+# Threshold above which a rate-limit reset time causes an immediate exit
+# rather than a silent wait (5 minutes).
+LONG_RESET_THRESHOLD_SECONDS = 300
+
+# Subset of TRANSIENT_AGENT_OUTPUT_RE patterns that specifically signal quota / rate-limit errors
+# and where a reset time might be present in the error text.
+_QUOTA_RATE_LIMIT_RE = re.compile(
+    r"\b429\b|rate[- ]?limit(?:ed)?|"
+    r"session[- ]?limit|too many sessions|"
+    r"resource[- ]?exhausted|\bquota\b|"
+    r"no capacity available|capacity.*(?:unavailable|exceeded)|"
+    r"overloaded",
+    re.I,
+)
+# Parse "Retry-After: N" (HTTP header) or "retry after N" or "retryDelay: Ns" (gRPC).
+_RETRY_AFTER_SECONDS_RE = re.compile(
+    r"\bretry[- ]after[:\s]+(\d+)\b"
+    r"|\bretry[_-]?delay[:\s]+['\"]?(\d+)s['\"]?",
+    re.I,
+)
+# Parse "try again in Xh Ym Zs".
+_TRY_AGAIN_IN_RE = re.compile(
+    r"\btry\s+again\s+in\s+"
+    r"(?:(?P<h>\d+)\s*h(?:r|ours?)?\s*)?"
+    r"(?:(?P<m>\d+)\s*m(?:in(?:utes?)?)?\s*)?"
+    r"(?:(?P<s>\d+)\s*s(?:ec(?:onds?)?)?)?",
+    re.I,
+)
+# Parse "reset in Xh Ym" / "resets in X hours".
+_RESET_IN_RE = re.compile(
+    r"\brese(?:t|ts)\s+in\s+"
+    r"(?:(?P<h>\d+)\s*h(?:r|ours?)?\s*)?"
+    r"(?:(?P<m>\d+)\s*m(?:in(?:utes?)?)?\s*)?"
+    r"(?:(?P<s>\d+)\s*s(?:ec(?:onds?)?)?)?",
+    re.I,
+)
+# Parse ISO 8601 timestamps (used to compute reset delta from now).
+_ISO_TIMESTAMP_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)"
+)
+
 
 @dataclass(frozen=True)
 class ValidatedAgentResponse:
@@ -131,6 +178,67 @@ class ValidatedAgentResponse:
     session_id: str | None
     marker_value: object
     usage: UsageMetadata | None = None
+
+
+def _parse_rate_limit_reset_seconds(text: str) -> int | None:
+    """Extract the reset wait time in seconds from a rate-limit error message.
+
+    Returns None if the reset time cannot be reliably parsed.
+    """
+    m = _RETRY_AFTER_SECONDS_RE.search(text)
+    if m:
+        val = m.group(1) or m.group(2)
+        if val:
+            return int(val)
+
+    m = _TRY_AGAIN_IN_RE.search(text)
+    if m and any(m.group(g) for g in ("h", "m", "s")):
+        return (
+            int(m.group("h") or 0) * 3600
+            + int(m.group("m") or 0) * 60
+            + int(m.group("s") or 0)
+        )
+
+    m = _RESET_IN_RE.search(text)
+    if m and any(m.group(g) for g in ("h", "m", "s")):
+        return (
+            int(m.group("h") or 0) * 3600
+            + int(m.group("m") or 0) * 60
+            + int(m.group("s") or 0)
+        )
+
+    m = _ISO_TIMESTAMP_RE.search(text)
+    if m:
+        try:
+            ts_str = m.group(1).replace(" ", "T")
+            if not ts_str.endswith("Z"):
+                ts_str += "Z"
+            ts = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            delta = int((ts - datetime.datetime.now(datetime.timezone.utc)).total_seconds())
+            if delta > 0:
+                return delta
+        except (ValueError, OverflowError):
+            pass
+
+    return None
+
+
+def _format_reset_duration(seconds: int) -> str:
+    hours, rem = divmod(seconds, 3600)
+    minutes = rem // 60
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if not parts:
+        parts.append(f"{seconds}s")
+    return " ".join(parts)
+
+
+def _format_reset_at_utc(seconds: int) -> str:
+    reset_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=seconds)
+    return reset_time.strftime("%H:%M UTC")
 
 
 def _normalize_disposition_section_prose(text: str) -> str:
@@ -213,6 +321,17 @@ def _is_retryable_marker_near_miss(text: str) -> bool:
     )
 
 
+def _failure_category(text: str) -> str:
+    """Classify a failure for logging: helps users decide whether to rerun or fix config/code."""
+    if not text.strip():
+        return "empty-response"
+    if NON_RETRYABLE_AGENT_OUTPUT_RE.search(text):
+        return "non-retryable"  # auth/billing — fix configuration
+    if TRANSIENT_AGENT_OUTPUT_RE.search(text):
+        return "transient"  # rate-limit/infra — rerun may help
+    return "deterministic"  # no transient signal — may need code fix
+
+
 def _retry_delay(config: AgentLoopConfig, retry_index: int) -> int:
     delays = config.agent_retry_backoff_seconds
     if not delays:
@@ -227,15 +346,24 @@ def _format_invalid_agent_response_error(
     reason: str,
     result: AgentResult | None,
     log_paths: Sequence[object],
+    category: str | None = None,
 ) -> str:
     exit_context = ""
     if result is not None and result.returncode != 0:
         exit_context = f" Agent exit code: {result.returncode}."
     log_context = _agent_log_context(log_paths)
+    category_hint = ""
+    if category == "transient":
+        category_hint = " Failure category: transient (rerun may succeed)."
+    elif category == "non-retryable":
+        category_hint = " Failure category: non-retryable (check credentials or billing)."
+    elif category == "deterministic":
+        category_hint = " Failure category: deterministic (may require a code fix)."
     return (
         f"{agent_name} failed before producing a valid public response. "
         "No review result was recorded. "
         f"Required marker: {marker_description}. Reason: {reason}.{exit_context}"
+        f"{category_hint}"
         f"{log_context}"
     )
 
@@ -358,15 +486,26 @@ def _run_validated_agent(
                     usage=usage,
                 )
 
-        if should_retry and attempt < max_attempts:
-            delay = _retry_delay(config, attempt)
-            log(
-                config,
-                f"{agent_name} produced a transient invalid response; "
-                f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})",
-            )
-            runner.run(("sleep", str(delay)), cwd=active_workdir(config))
-            continue
+        if should_retry:
+            if _QUOTA_RATE_LIMIT_RE.search(text):
+                reset_secs = _parse_rate_limit_reset_seconds(text)
+                if reset_secs is not None and reset_secs > LONG_RESET_THRESHOLD_SECONDS:
+                    duration_str = _format_reset_duration(reset_secs)
+                    at_str = _format_reset_at_utc(reset_secs)
+                    raise QuotaResetExceededError(
+                        f"{agent_name} quota exhausted. Reset in {duration_str} (at {at_str}). "
+                        "Rerun when quota resets, or switch to a different API key / model."
+                    )
+            if attempt < max_attempts:
+                delay = _retry_delay(config, attempt)
+                category = _failure_category(text)
+                log(
+                    config,
+                    f"{agent_name}: {category} failure ({last_error}); "
+                    f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})",
+                )
+                runner.run(("sleep", str(delay)), cwd=active_workdir(config))
+                continue
         break
 
     raise AgentLoopError(
@@ -376,6 +515,7 @@ def _run_validated_agent(
             reason=last_error,
             result=last_result,
             log_paths=log_paths,
+            category=_failure_category(text),
         )
     )
 

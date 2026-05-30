@@ -20,7 +20,7 @@ from .config import (
     ensure_workdir,
     reviewers,
 )
-from .errors import AgentLoopError
+from .errors import AgentLoopError, QuotaResetExceededError
 from .github import (
     detect_repo,
     get_check_status,
@@ -205,8 +205,10 @@ def build_parser() -> argparse.ArgumentParser:
             nargs="+",
             default=[15, 45],
             help=(
-                "Backoff delays for transient agent retries. The final value is reused "
-                "when retries exceed the number of provided delays (default: 15 45)."
+                "Backoff delays in seconds for transient agent retries. The final value is reused "
+                "when retries exceed the number of provided delays (default: 15 45). "
+                "For session-limit scenarios (e.g. Claude per-project session caps that reset after "
+                "a few minutes), use longer values such as: --agent-retry-backoff-seconds 180 300."
             ),
         )
         memory_group = subparser.add_mutually_exclusive_group()
@@ -351,6 +353,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_clarification_rounds=getattr(args, "max_clarification_rounds", 0),
             )
         parser.error(f"unknown command: {args.command}")
+    except QuotaResetExceededError as exc:
+        print(f"agent-loop: {exc}", file=sys.stderr)
+        return QuotaResetExceededError.EXIT_CODE
     except AgentLoopError as exc:
         print(f"agent-loop: {exc}", file=sys.stderr)
         return 1
