@@ -1,9 +1,9 @@
-"""LLM repair pass for malformed review outputs.
+"""LLM repair pass for malformed review/coder-followup outputs.
 
-When an agent produces a review that fails strict schema validation, this module
-attempts to recover it by calling gemini-3.1-flash-lite as a format-repair
-assistant.  If the repair also fails validation, the caller treats the result
-as blocking per the issue guardrails.
+When an agent produces a review or coder follow-up that fails strict schema
+validation, this module attempts to recover it by calling gemini-3.1-flash-lite
+as a format-repair assistant.  If the repair also fails validation, the caller
+treats the result as blocking per the issue guardrails.
 """
 
 from __future__ import annotations
@@ -15,11 +15,11 @@ from .agents.gemini import _parse_gemini_payload
 
 _logger = logging.getLogger(__name__)
 
-# v7 prompt — tested against all 34 historical format-failure samples (100%).
+# v8 prompt — extends v7 with Format C (coder_followup).
 # Uses str.replace("{raw_response}", raw, 1) for substitution because the prompt
 # itself contains literal { } characters in the JSON examples.
 _REPAIR_PROMPT = """\
-You are a format-repair assistant. An AI agent produced a code review that failed strict schema validation. Extract its intent and reformat it into one of these two valid formats.
+You are a format-repair assistant. An AI agent produced a code review or coder follow-up that failed strict schema validation. Extract its intent and reformat it into one of these three valid formats.
 
 ## Valid Format A — PR Review:
 
@@ -56,14 +56,44 @@ You are a format-repair assistant. An AI agent produced a code review that faile
 <!-- AGENT_PLAN_STATE: approved -->
 -- <Reviewer Name>
 
-## ARRAY FIELD TYPES:
+## Valid Format C — Coder Follow-up:
+
+{
+  "schema_version": 1,
+  "kind": "coder_followup",
+  "state": "approved" | "blocking",
+  "summary": "<short summary>",
+  "addressed_items": ["item-1"],
+  "remaining_items": ["item-2"],
+  "human_requirements": {
+    "addressed_ids": [],
+    "checked_discussion_directly": false
+  }
+}
+<!-- AGENT_STATE: approved -->
+-- <Coder Name>
+
+## ARRAY FIELD TYPES (Format A/B):
 - blocking_items, same_pr_followups, future_followups, blocking_plan_issues, same_plan_followups -> STRINGS
 - prior_item_dispositions, prior_plan_item_dispositions -> OBJECTS {"item_id":..., "disposition":..., "note":...}
 - disposition values: "resolved", "blocking", "same-pr"/"same-plan", or "future" ONLY
 
-## STATE RULES:
+## ARRAY FIELD TYPES (Format C):
+- addressed_items, remaining_items -> STRINGS (item IDs like "item-1", "item-2")
+- Every reviewer item ID from the original must appear in EITHER addressed_items OR remaining_items, not both.
+
+## STATE RULES (Format A/B):
 ### APPROVED: blocking_items=[], same_pr_followups=[], prior dispositions only "resolved"/"future"
 ### BLOCKING: future_followups=[], prior dispositions MUST NOT use "future"
+
+## STATE RULES (Format C):
+### APPROVED: remaining_items=[]
+### BLOCKING: remaining_items is non-empty
+
+## FORMAT SELECTION:
+- Use Format C if the original contains "coder_followup" or "addressed_items" or "remaining_items".
+- Use Format B if the original contains AGENT_PLAN_STATE / blocking_plan_issues / same_plan_followups / prior_plan_item_dispositions.
+- Otherwise use Format A.
 
 ## WORKED EXAMPLE 1 — approved + same-PR items (change to blocking, DISCARD futures):
 
@@ -103,11 +133,28 @@ CORRECT repair: OMIT item-1 from prior_item_dispositions entirely. Do not includ
 
 item-1 is omitted because it was already "future" — it stays future without needing to be re-dispositioned.
 
+## WORKED EXAMPLE 3 — malformed coder follow-up (wrong item classification):
+
+Original (malformed): coder_followup, addressed_items has a typo in item ID.
+
+CORRECT repair: fix item IDs to match the expected values from context.
+{
+  "schema_version": 1, "kind": "coder_followup", "state": "blocking",
+  "summary": "Addressed the CSS issue; one item remains.",
+  "addressed_items": ["item-1"],
+  "remaining_items": ["item-2"],
+  "human_requirements": {
+    "addressed_ids": [],
+    "checked_discussion_directly": false
+  }
+}
+<!-- AGENT_STATE: blocking -->
+-- Coder
+
 ## FORMAT:
 1. Start DIRECTLY with { — no prose, no markdown fences.
-2. After }: <!-- AGENT_STATE: X --> (pr_review) OR <!-- AGENT_PLAN_STATE: X --> (plan_review). DIFFERENT MARKERS.
-3. JSON "state" matches X. Then: -- Reviewer Name. STOP.
-4. plan_review if original has AGENT_PLAN_STATE / blocking_plan_issues / same_plan_followups / prior_plan_item_dispositions.
+2. After }: <!-- AGENT_STATE: X --> (pr_review or coder_followup) OR <!-- AGENT_PLAN_STATE: X --> (plan_review). DIFFERENT MARKERS.
+3. JSON "state" matches X. Then: -- Agent Name. STOP.
 
 Output ONLY the repaired response. No explanations.
 
