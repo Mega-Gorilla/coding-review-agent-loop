@@ -9,7 +9,9 @@ as blocking per the issue guardrails.
 from __future__ import annotations
 
 import logging
-import os
+import subprocess
+
+from .agents.gemini import _strip_gemini_preamble
 
 _logger = logging.getLogger(__name__)
 
@@ -116,44 +118,26 @@ Output ONLY the repaired response. No explanations.
 _REPAIR_MODEL = "gemini-3.1-flash-lite"
 
 
-def attempt_repair(raw: str) -> str | None:
-    """Call gemini-3.1-flash-lite to reformat a malformed review response.
+def attempt_repair(raw: str, gemini_cmd: str) -> str | None:
+    """Call gemini-3.1-flash-lite via the Gemini CLI to reformat a malformed review response.
 
-    Returns the repaired text on success, or None when the repair service is
-    unavailable (missing SDK, missing API key) or returns an error.
+    Uses the same CLI invocation path as the reviewer so no extra auth is needed.
+    Returns the repaired text on success, or None when the CLI fails or returns empty output.
     The caller is responsible for re-validating the returned text.
     """
-    try:
-        from google import genai as _genai  # type: ignore[import-untyped]
-    except ImportError:
-        _logger.debug("google-genai SDK not available; skipping repair pass")
-        return None
-
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        _logger.debug("No GEMINI_API_KEY or GOOGLE_API_KEY found; skipping repair pass")
-        return None
-
     prompt = _REPAIR_PROMPT.replace("{raw_response}", raw, 1)
     try:
-        client = _genai.Client(api_key=api_key)
-        response = client.models.generate_content(
-            model=_REPAIR_MODEL,
-            contents=prompt,
+        result = subprocess.run(
+            [gemini_cmd, "--model", _REPAIR_MODEL, "--prompt", prompt],
+            capture_output=True,
+            text=True,
+            timeout=120,
         )
-        text = response.text
-        if not isinstance(text, str) or not text.strip():
-            _logger.debug("repair model returned empty response")
-            return None
-        usage = getattr(response, "usage_metadata", None)
-        if usage is not None:
-            _logger.info(
-                "repair pass token usage: prompt=%s output=%s total=%s",
-                getattr(usage, "prompt_token_count", None),
-                getattr(usage, "candidates_token_count", None),
-                getattr(usage, "total_token_count", None),
-            )
-        return text
     except Exception as exc:
-        _logger.debug("repair pass call failed: %s", exc)
+        _logger.debug("repair pass CLI invocation failed: %s", exc)
         return None
+    if result.returncode != 0:
+        _logger.debug("repair pass CLI exited with code %d", result.returncode)
+        return None
+    text = _strip_gemini_preamble(result.stdout.strip())
+    return text or None

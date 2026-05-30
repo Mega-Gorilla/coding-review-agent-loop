@@ -9136,36 +9136,44 @@ from unittest.mock import MagicMock, patch
 from coding_review_agent_loop.repair import attempt_repair, _REPAIR_PROMPT
 
 
-def test_attempt_repair_returns_none_when_no_api_key(monkeypatch):
-    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    result = attempt_repair("some malformed review text")
+def test_attempt_repair_returns_none_when_subprocess_fails(monkeypatch):
+    mock_result = MagicMock()
+    mock_result.returncode = 1
+    mock_result.stdout = ""
+    with patch("coding_review_agent_loop.repair.subprocess.run", return_value=mock_result):
+        result = attempt_repair("some malformed review text", "gemini")
     assert result is None
 
 
-def test_attempt_repair_calls_sdk_and_returns_text(monkeypatch):
+def test_attempt_repair_returns_none_when_subprocess_raises(monkeypatch):
+    with patch("coding_review_agent_loop.repair.subprocess.run", side_effect=FileNotFoundError("gemini not found")):
+        result = attempt_repair("some malformed review text", "gemini")
+    assert result is None
+
+
+def test_attempt_repair_calls_cli_and_returns_text():
     repaired = (
         '{"schema_version":1,"kind":"pr_review","state":"approved","summary":"OK",'
         '"blocking_items":[],"same_pr_followups":[],"future_followups":[],'
         '"prior_item_dispositions":[]}\n<!-- AGENT_STATE: approved -->\n-- Gemini'
     )
-    mock_response = MagicMock()
-    mock_response.text = repaired
-    mock_client = MagicMock()
-    mock_client.models.generate_content.return_value = mock_response
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = repaired
 
-    monkeypatch.setenv("GEMINI_API_KEY", "test-key")
-
-    # google-genai is installed; patch the Client class on the real module object
-    from google import genai as real_genai
-    with patch.object(real_genai, "Client", return_value=mock_client):
-        result = attempt_repair("malformed review")
+    with patch("coding_review_agent_loop.repair.subprocess.run", return_value=mock_result) as mock_run:
+        result = attempt_repair("malformed review", "gemini")
 
     assert result == repaired
-    mock_client.models.generate_content.assert_called_once()
-    call_kwargs = mock_client.models.generate_content.call_args
-    assert call_kwargs.kwargs.get("model") == "gemini-3.1-flash-lite"
-    assert "malformed review" in call_kwargs.kwargs.get("contents", "")
+    mock_run.assert_called_once()
+    call_args = mock_run.call_args
+    cmd = call_args.args[0]
+    assert cmd[0] == "gemini"
+    assert "--model" in cmd
+    assert "gemini-3.1-flash-lite" in cmd
+    assert "--prompt" in cmd
+    prompt_idx = cmd.index("--prompt")
+    assert "malformed review" in cmd[prompt_idx + 1]
 
 
 def test_repair_prompt_contains_raw_response_placeholder():
@@ -9200,7 +9208,7 @@ def test_run_pr_loop_uses_repair_pass_on_format_failure(tmp_path):
 
     captured_repairs = []
 
-    def fake_attempt_repair(raw: str) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str) -> str | None:
         captured_repairs.append(raw)
         return repaired_review
 
@@ -9223,7 +9231,7 @@ def test_run_pr_loop_falls_back_to_error_when_repair_also_fails(tmp_path):
     )
     config = make_config(tmp_path, coder="claude", reviewer="codex", agent_max_retries=0)
 
-    def fake_attempt_repair_fails(raw: str) -> str | None:
+    def fake_attempt_repair_fails(raw: str, gemini_cmd: str) -> str | None:
         return "still broken output without valid schema"
 
     with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_attempt_repair_fails):
