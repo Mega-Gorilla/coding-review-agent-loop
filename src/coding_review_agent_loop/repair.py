@@ -65,8 +65,8 @@ You are a format-repair assistant. An AI agent produced a code review or coder f
   "kind": "coder_followup",
   "state": "approved" | "blocking",
   "summary": "<short summary>",
-  "addressed_items": ["item-1", "item-human-requirements-acknowledgement"],
-  "remaining_items": [],
+  "addressed_items": ["item-1"],
+  "remaining_items": ["item-2"],
   "human_requirements": {
     "addressed_ids": ["Requirement 1"],
     "checked_discussion_directly": false
@@ -82,7 +82,7 @@ You are a format-repair assistant. An AI agent produced a code review or coder f
 
 ## ARRAY FIELD TYPES (Format C) — TWO DIFFERENT ID TYPES, DO NOT CONFUSE THEM:
 - addressed_items, remaining_items -> reviewer ITEM IDs only: short slugs matching [A-Za-z0-9][A-Za-z0-9._-]*
-  Examples: "item-1", "item-2", "item-human-requirements-acknowledgement"
+  Examples: "item-1", "item-2"
   NEVER put human requirement labels ("Requirement 1") here — they contain spaces and will fail.
 - human_requirements.addressed_ids -> human REQUIREMENT LABELS like "Requirement 1", "Requirement 2"
   These are different from item IDs and may contain spaces.
@@ -151,7 +151,7 @@ section and missing <!-- HUMAN_REQUIREMENTS_ADDRESSED --> marker.
   "kind": "coder_followup",
   "state": "blocking",
   "summary": "Implemented the quota exit policy.",
-  "addressed_items": ["item-human-requirements-acknowledgement"],
+  "addressed_items": ["item-1"],
   "remaining_items": [],
   "human_requirements": {
     "addressed_ids": ["Requirement 1"],
@@ -174,7 +174,7 @@ CORRECT repair — strip the fences, remove the prose, output bare JSON + footer
   "kind": "coder_followup",
   "state": "blocking",
   "summary": "Implemented the quota exit policy.",
-  "addressed_items": ["item-human-requirements-acknowledgement"],
+  "addressed_items": ["item-1"],
   "remaining_items": [],
   "human_requirements": {
     "addressed_ids": ["Requirement 1"],
@@ -185,8 +185,8 @@ CORRECT repair — strip the fences, remove the prose, output bare JSON + footer
 -- Anthropic Claude
 
 Notes:
-- "item-human-requirements-acknowledgement" stays in addressed_items (it is a reviewer item ID)
-- "Requirement 1" stays in human_requirements.addressed_ids (it is a human requirement label)
+- addressed_items contains real reviewer item IDs (like "item-1"), never the human-requirements ack pseudo-item
+- "Requirement 1" stays in human_requirements.addressed_ids (it is a human requirement label, not an item ID)
 - <!-- HUMAN_REQUIREMENTS_ADDRESSED --> is NOT needed in the structured path
 - No prose, no ### sections after the JSON
 

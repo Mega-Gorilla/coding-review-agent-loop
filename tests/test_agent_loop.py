@@ -9672,3 +9672,19 @@ def test_repair_prompt_coder_followup_fenced_json_example():
     assert "HUMAN_REQUIREMENTS_ADDRESSED" in _REPAIR_PROMPT
     # The prompt explains the marker is not needed in structured path
     assert "NOT needed" in _REPAIR_PROMPT or "not needed" in _REPAIR_PROMPT.lower()
+
+
+def test_repair_prompt_does_not_suggest_ack_pseudo_item_in_addressed_items():
+    """The ack pseudo-item must never be suggested as a value for addressed_items.
+
+    The orchestrator's _validate_structured_coder_followup_items explicitly excludes
+    HUMAN_REQUIREMENTS_ACK_ITEM_ID from expected_ids, so any response that puts
+    'item-human-requirements-acknowledgement' in addressed_items will be rejected
+    as an unknown item ID.
+    """
+    from coding_review_agent_loop.orchestrator import HUMAN_REQUIREMENTS_ACK_ITEM_ID
+
+    # The ack pseudo-item must not appear in the repair prompt at all, because
+    # any mention of it in an addressed_items context will teach Gemini to produce
+    # responses that the validator rejects.
+    assert HUMAN_REQUIREMENTS_ACK_ITEM_ID not in _REPAIR_PROMPT
