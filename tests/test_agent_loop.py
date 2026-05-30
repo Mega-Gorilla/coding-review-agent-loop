@@ -117,6 +117,21 @@ from coding_review_agent_loop.protocol import (
     validate_structured_plan_revision,
 )
 
+from unittest.mock import MagicMock, patch
+
+
+@pytest.fixture(autouse=True)
+def _no_real_repair(request):
+    """Prevent attempt_repair from calling the real Gemini CLI in all tests.
+
+    Tests that explicitly test repair behaviour patch the orchestrator-level
+    import themselves, which takes precedence over this fixture.  Unit tests
+    for attempt_repair itself patch subprocess.run directly, so they are
+    unaffected here.
+    """
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=None):
+        yield
+
 
 class FakeRunner(Runner):
     def __init__(
@@ -9152,8 +9167,6 @@ def test_claude_review_loop_rejects_non_open_pr(tmp_path):
 # ---------------------------------------------------------------------------
 # Repair pass tests
 # ---------------------------------------------------------------------------
-
-from unittest.mock import MagicMock, patch
 
 from coding_review_agent_loop.repair import attempt_repair, _REPAIR_PROMPT
 
