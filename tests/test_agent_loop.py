@@ -4758,6 +4758,95 @@ def test_pr_loop_does_not_retry_normal_missing_marker_response(tmp_path):
     assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
 
 
+def test_pr_loop_retries_rate_limit_429(tmp_path):
+    rate_limit_output = "HTTP 429 Too Many Requests: rate limit exceeded."
+    valid = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    runner = FakeRunner(gemini_outputs=[(rate_limit_output, 1), valid])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert runner.comments == [f"**Review verdict:** Approved\n\n{valid}"]
+    sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
+    assert len(sleep_commands) == 1
+
+
+def test_pr_loop_retries_claude_session_limit(tmp_path):
+    session_limit_output = "Error: session_limit_exceeded — too many sessions for this project."
+    valid = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    runner = FakeRunner(gemini_outputs=[(session_limit_output, 1), valid])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert runner.comments == [f"**Review verdict:** Approved\n\n{valid}"]
+    sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
+    assert len(sleep_commands) == 1
+
+
+def test_pr_loop_retries_gemini_no_capacity(tmp_path):
+    no_capacity_output = "No capacity available for model gemini-flash on the server."
+    valid = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    runner = FakeRunner(gemini_outputs=[(no_capacity_output, 1), valid])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert runner.comments == [f"**Review verdict:** Approved\n\n{valid}"]
+    sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
+    assert len(sleep_commands) == 1
+
+
+def test_pr_loop_does_not_retry_billing_credit_exhaustion(tmp_path):
+    output = "Quota exceeded: billing credits are exhausted."
+    runner = FakeRunner(gemini_outputs=[output])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    with pytest.raises(AgentLoopError, match="No review result was recorded"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert runner.comments == []
+    assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
+
+
+def test_pr_loop_does_not_retry_auth_failure(tmp_path):
+    output = "Unauthorized: invalid api key provided."
+    runner = FakeRunner(gemini_outputs=[output])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    with pytest.raises(AgentLoopError, match="No review result was recorded"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert runner.comments == []
+    assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
+
+
+def test_pr_loop_failure_log_distinguishes_transient_failure(tmp_path):
+    rate_limit_output = "HTTP 429: rate limit exceeded."
+    runner = FakeRunner(gemini_outputs=[(rate_limit_output, 1)] * 3)
+    config = make_config(tmp_path, reviewer="gemini")
+
+    with pytest.raises(AgentLoopError) as exc_info:
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    message = str(exc_info.value)
+    assert "transient" in message
+    assert "rerun may succeed" in message
+
+
+def test_pr_loop_failure_log_identifies_non_retryable(tmp_path):
+    billing_output = "Your billing account has no credits remaining."
+    runner = FakeRunner(gemini_outputs=[billing_output])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    with pytest.raises(AgentLoopError) as exc_info:
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    message = str(exc_info.value)
+    assert "non-retryable" in message
+    assert "credentials or billing" in message
+
+
 def test_pr_loop_reinjects_blocking_item_when_human_requirement_marker_missing(tmp_path):
     # Reviewer approves without HUMAN_REQUIREMENTS_RESOLVED → synthetic blocking item,
     # loop hits max_rounds (set to 1) instead of a terminal deadlock.
