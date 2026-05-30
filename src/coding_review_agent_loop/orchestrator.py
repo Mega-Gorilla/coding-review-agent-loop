@@ -2719,12 +2719,30 @@ def run_pr_loop(
                         if not human_requirements_resolved(review_output)
                     ]
                     if missing_acknowledgements:
-                        raise AgentLoopError(
-                            "Signed human reviewer requirements remain unresolved or "
-                            "unacknowledged by approved reviewer response(s): "
-                            f"{', '.join(missing_acknowledgements)}. "
-                            "Human intervention is required."
+                        log(
+                            config,
+                            f"Round {round_number}: reviewer(s) {', '.join(missing_acknowledgements)} "
+                            "approved without acknowledging signed human requirements; "
+                            "re-injecting as blocking item",
                         )
+                        unresolved_items.append(
+                            _next_unresolved_item(
+                                item_number=next_unresolved_item_number,
+                                reviewer="Orchestrator",
+                                source_round=round_number,
+                                text=(
+                                    f"Reviewer(s) {', '.join(missing_acknowledgements)} approved without "
+                                    "acknowledging the signed human requirements. Coder must address the "
+                                    "human requirements and ensure the reviewer explicitly resolves them "
+                                    "before approval."
+                                ),
+                                status="blocking",
+                            )
+                        )
+                        next_unresolved_item_number += 1
+                        must_fix_items = [
+                            item for item in unresolved_items if item.status in {"blocking", "same-pr"}
+                        ]
                 sync_coder_pr_before_validation(config, runner, pr_number, pr_metadata)
                 migration_validation = validate_pr_migration_topology(
                     runner,
