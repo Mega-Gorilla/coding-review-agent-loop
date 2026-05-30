@@ -329,7 +329,7 @@ def _run_validated_agent(
                 )
                 if use_repair and not _is_transient_agent_output(text):
                     log(config, f"{agent_name}: schema validation failed ({exc}); attempting repair pass")
-                    repaired = attempt_repair(text)
+                    repaired = attempt_repair(text, config.gemini_cmd)
                     if repaired is not None:
                         try:
                             marker_value = validate(repaired)
