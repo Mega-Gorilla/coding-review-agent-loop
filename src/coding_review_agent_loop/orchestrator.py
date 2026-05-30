@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import datetime
 import hashlib
 import json
 import re
@@ -20,7 +21,7 @@ from .config import (
     sync_coder_pr_before_validation,
     sync_reviewer_pr_before_review,
 )
-from .errors import AgentLoopError
+from .errors import AgentLoopError, QuotaExhaustedError
 from .github import (
     IssueContext,
     PullRequestChecks,
@@ -128,6 +129,10 @@ ALL_RESOLVED_PROSE_RE = re.compile(
     r"|^all prior unresolved items have been resolved\.?$",
     re.I,
 )
+_ISO_TIMESTAMP_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?",
+)
+QUOTA_RESET_LONG_THRESHOLD_SECONDS = 300  # 5 minutes
 
 
 @dataclass(frozen=True)
@@ -215,6 +220,47 @@ def _is_transient_agent_output(text: str) -> bool:
 def _is_retryable_marker_near_miss(text: str) -> bool:
     return bool(NEAR_MISS_AGENT_MARKER_RE.search(text)) and not bool(
         NON_RETRYABLE_AGENT_OUTPUT_RE.search(text)
+    )
+
+
+def _parse_rate_limit_reset_seconds(text: str) -> int | None:
+    """Return seconds until the first future ISO timestamp found in the error message.
+
+    Iterates all timestamps so that a past event timestamp before a future reset
+    timestamp does not cause the reset to be missed.
+    """
+    now = datetime.datetime.now(tz=datetime.timezone.utc)
+    for match in _ISO_TIMESTAMP_RE.finditer(text):
+        ts_str = match.group()
+        try:
+            if ts_str.endswith("Z"):
+                ts = datetime.datetime.fromisoformat(ts_str[:-1] + "+00:00")
+            else:
+                ts = datetime.datetime.fromisoformat(ts_str)
+                if ts.tzinfo is None:
+                    ts = ts.replace(tzinfo=datetime.timezone.utc)
+        except ValueError:
+            continue
+        delta = (ts - now).total_seconds()
+        if delta > 0:
+            return int(delta)
+    return None
+
+
+def _format_quota_reset_message(agent_name: str, reset_seconds: int) -> str:
+    reset_dt = datetime.datetime.now(tz=datetime.timezone.utc) + datetime.timedelta(seconds=reset_seconds)
+    h, remainder = divmod(reset_seconds, 3600)
+    m, s = divmod(remainder, 60)
+    if h > 0:
+        reset_in = f"{h}h {m}m"
+    elif m > 0:
+        reset_in = f"{m}m"
+    else:
+        reset_in = f"{s}s"
+    reset_at = reset_dt.strftime("%H:%M UTC")
+    return (
+        f"{agent_name} quota exhausted. Reset in {reset_in} (at {reset_at}).\n"
+        "Rerun when quota resets, or switch to a different API key / model."
     )
 
 
@@ -386,6 +432,12 @@ def _run_validated_agent(
         if should_retry and attempt < max_attempts:
             delay = _retry_delay(config, attempt)
             category = _failure_category(text)
+            reset_seconds = _parse_rate_limit_reset_seconds(text)
+            if reset_seconds is not None and reset_seconds > QUOTA_RESET_LONG_THRESHOLD_SECONDS:
+                raise QuotaExhaustedError(
+                    _format_quota_reset_message(agent_name, reset_seconds),
+                    reset_seconds=reset_seconds,
+                )
             log(
                 config,
                 f"{agent_name}: {category} failure ({last_error}); "
@@ -395,6 +447,13 @@ def _run_validated_agent(
             continue
         break
 
+    final_category = _failure_category(text)
+    reset_seconds = _parse_rate_limit_reset_seconds(text) if final_category == "transient" else None
+    if reset_seconds is not None and reset_seconds > QUOTA_RESET_LONG_THRESHOLD_SECONDS:
+        raise QuotaExhaustedError(
+            _format_quota_reset_message(agent_name, reset_seconds),
+            reset_seconds=reset_seconds,
+        )
     raise AgentLoopError(
         _format_invalid_agent_response_error(
             agent_name=agent_name,
@@ -402,7 +461,7 @@ def _run_validated_agent(
             reason=last_error,
             result=last_result,
             log_paths=log_paths,
-            category=_failure_category(text),
+            category=final_category,
         )
     )
 

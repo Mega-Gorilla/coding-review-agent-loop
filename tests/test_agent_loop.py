@@ -1,4 +1,5 @@
 import base64
+import datetime
 import json
 import re
 import subprocess
@@ -37,6 +38,7 @@ from coding_review_agent_loop.cli import (
     run_pr_loop,
     run_task_loop,
 )
+from coding_review_agent_loop.errors import QuotaExhaustedError
 from coding_review_agent_loop.config import (
     default_agent_memory_dir,
     default_agent_workdir,
@@ -55,12 +57,14 @@ from coding_review_agent_loop.migrations import MigrationValidationResult, valid
 from coding_review_agent_loop.orchestrator import (
     ITEM_SUMMARY_LIMIT,
     HUMAN_REQUIREMENTS_ACK_ITEM_ID,
+    QUOTA_RESET_LONG_THRESHOLD_SECONDS,
     PostedRoundMetadata,
     _apply_unresolved_item_dispositions,
     _attach_round_metadata,
     _decode_round_metadata,
     _encode_round_metadata,
     _format_unresolved_item_label,
+    _parse_rate_limit_reset_seconds,
     _plan_subject,
     _render_public_plan_review_comment,
     _render_public_plan_revision_comment,
@@ -4846,6 +4850,64 @@ def test_pr_loop_failure_log_identifies_non_retryable(tmp_path):
     message = str(exc_info.value)
     assert "non-retryable" in message
     assert "credentials or billing" in message
+
+
+def test_parse_rate_limit_reset_seconds_no_timestamp():
+    assert _parse_rate_limit_reset_seconds("quota exceeded, try again later") is None
+
+
+def test_parse_rate_limit_reset_seconds_past_timestamp():
+    assert _parse_rate_limit_reset_seconds("error at 2000-01-01T00:00:00Z") is None
+
+
+def test_parse_rate_limit_reset_seconds_future_timestamp():
+    future = datetime.datetime.now(tz=datetime.timezone.utc) + datetime.timedelta(seconds=3600)
+    ts = future.strftime("%Y-%m-%dT%H:%M:%SZ")
+    result = _parse_rate_limit_reset_seconds(f"quota resets at {ts}")
+    assert result is not None
+    assert 3590 <= result <= 3610
+
+
+def test_parse_rate_limit_reset_seconds_skips_past_finds_future():
+    past = "2000-01-01T00:00:00Z"
+    future = datetime.datetime.now(tz=datetime.timezone.utc) + datetime.timedelta(seconds=1800)
+    future_ts = future.strftime("%Y-%m-%dT%H:%M:%SZ")
+    text = f"event at {past}, quota resets at {future_ts}"
+    result = _parse_rate_limit_reset_seconds(text)
+    assert result is not None
+    assert 1790 <= result <= 1810
+
+
+def test_pr_loop_long_reset_raises_quota_exhausted_error(tmp_path):
+    future = datetime.datetime.now(tz=datetime.timezone.utc) + datetime.timedelta(hours=3, minutes=12)
+    future_ts = future.strftime("%Y-%m-%dT%H:%M:%SZ")
+    quota_output = f"Quota exceeded. Resets at {future_ts}."
+    runner = FakeRunner(gemini_outputs=[(quota_output, 1)])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    with pytest.raises(QuotaExhaustedError) as exc_info:
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    message = str(exc_info.value)
+    assert "quota exhausted" in message.lower()
+    assert "Rerun when quota resets" in message
+    assert exc_info.value.reset_seconds is not None
+    assert exc_info.value.reset_seconds > QUOTA_RESET_LONG_THRESHOLD_SECONDS
+    assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
+
+
+def test_pr_loop_short_reset_retries_automatically(tmp_path):
+    future = datetime.datetime.now(tz=datetime.timezone.utc) + datetime.timedelta(seconds=60)
+    future_ts = future.strftime("%Y-%m-%dT%H:%M:%SZ")
+    quota_output = f"Rate limited. Try again at {future_ts}."
+    valid = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    runner = FakeRunner(gemini_outputs=[(quota_output, 1), valid])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
+    assert len(sleep_commands) == 1
 
 
 def test_pr_loop_reinjects_blocking_item_when_human_requirement_marker_missing(tmp_path):

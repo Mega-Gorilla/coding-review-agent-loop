@@ -20,7 +20,7 @@ from .config import (
     ensure_workdir,
     reviewers,
 )
-from .errors import AgentLoopError
+from .errors import AgentLoopError, QuotaExhaustedError
 from .github import (
     detect_repo,
     get_check_status,
@@ -353,6 +353,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 max_clarification_rounds=getattr(args, "max_clarification_rounds", 0),
             )
         parser.error(f"unknown command: {args.command}")
+    except QuotaExhaustedError as exc:
+        print(f"agent-loop: {exc}", file=sys.stderr)
+        return 3
     except AgentLoopError as exc:
         print(f"agent-loop: {exc}", file=sys.stderr)
         return 1
