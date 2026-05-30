@@ -563,85 +563,11 @@ def _merge_human_requirements(
     return tuple(sorted(combined, key=lambda requirement: requirement.created_at or ""))
 
 
-
-
-
-
-
-
-
-
-
-
 def _validate_plan_revision_response(text: str) -> StructuredPlanRevision | str:
     parsed = validate_structured_plan_revision(text)
     if parsed is not None:
         return parsed
     return parse_plan_state(text)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _should_record_new_blocking_item(summary: str, *, had_prior_items: bool, had_dispositions: bool) -> bool:
@@ -653,36 +579,6 @@ def _should_record_new_blocking_item(summary: str, *, had_prior_items: bool, had
     if len(non_empty_lines) > 1:
         return True
     return len(non_empty_lines[0]) >= 80
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _describe_pr_review_outcome(parsed_review: ParsedReview, *, has_blocking_summary: bool) -> str:
@@ -706,18 +602,6 @@ def _describe_plan_review_outcome(parsed_review: ParsedPlanReview) -> str:
     if has_same_plan:
         return "blocking with same-plan follow-ups"
     return "blocking with blocking plan issues"
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def _run_plan_first_loop(
