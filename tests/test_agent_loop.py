@@ -4734,16 +4734,17 @@ def test_pr_loop_exhausted_transient_retry_reports_attempt_logs(tmp_path):
     assert runner.comments == []
 
 
-def test_pr_loop_does_not_retry_quota_failure(tmp_path):
-    output = "Quota exceeded: billing credits are exhausted."
-    runner = FakeRunner(gemini_outputs=[output])
+def test_pr_loop_retries_quota_error(tmp_path):
+    quota_output = "Quota exceeded for this project."
+    valid = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    runner = FakeRunner(gemini_outputs=[(quota_output, 1), valid])
     config = make_config(tmp_path, reviewer="gemini")
 
-    with pytest.raises(AgentLoopError, match="No review result was recorded"):
-        run_pr_loop(runner, pr_number=77, config=config)
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
-    assert runner.comments == []
-    assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
+    assert runner.comments == [f"**Review verdict:** Approved\n\n{valid}"]
+    sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
+    assert len(sleep_commands) == 1
 
 
 def test_pr_loop_does_not_retry_normal_missing_marker_response(tmp_path):

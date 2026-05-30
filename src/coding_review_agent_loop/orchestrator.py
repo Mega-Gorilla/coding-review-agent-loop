@@ -109,7 +109,8 @@ TRANSIENT_AGENT_OUTPUT_RE = re.compile(
     r"\b429\b|rate.?limit(?:ed)?|"
     r"session.?limit.?exceeded|session_limit_exceeded|too many sessions|"
     r"no capacity available|capacity.*(?:unavailable|exceeded)|"
-    r"resource.?exhausted|overloaded",
+    r"resource.?exhausted|overloaded|"
+    r"\bquota\b",
     re.I,
 )
 NON_RETRYABLE_AGENT_OUTPUT_RE = re.compile(
