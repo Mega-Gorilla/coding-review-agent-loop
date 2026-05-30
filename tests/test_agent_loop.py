@@ -4758,7 +4758,9 @@ def test_pr_loop_does_not_retry_normal_missing_marker_response(tmp_path):
     assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
 
 
-def test_pr_loop_blocks_approval_without_human_requirement_resolution_marker(tmp_path):
+def test_pr_loop_reinjects_blocking_item_when_human_requirement_marker_missing(tmp_path):
+    # Reviewer approves without HUMAN_REQUIREMENTS_RESOLVED → synthetic blocking item,
+    # loop hits max_rounds (set to 1) instead of a terminal deadlock.
     runner = FakeRunner(
         codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
         pr_payload={
@@ -4785,15 +4787,62 @@ def test_pr_loop_blocks_approval_without_human_requirement_resolution_marker(tmp
         auto_merge=True,
         test_command=("pytest", "tests/test_agent_loop.py"),
         approved_followups="summarize",
+        max_rounds=1,
     )
 
-    with pytest.raises(AgentLoopError, match="Signed human reviewer requirements"):
+    # The old behaviour was a terminal deadlock; now the loop continues and hits max_rounds.
+    with pytest.raises(AgentLoopError, match="blocking issues after round 1"):
         run_pr_loop(runner, pr_number=77, config=config)
 
     commands = [cmd for cmd, _cwd in runner.commands]
     assert ["pytest", "tests/test_agent_loop.py"] not in commands
     assert ["gh", "pr", "merge", "77", "--repo", "OWNER/REPO", "--merge"] not in commands
     assert not any(comment.startswith("Approved-review future follow-ups") for comment in runner.comments)
+
+
+def test_pr_loop_recovers_when_second_reviewer_includes_human_requirement_marker(tmp_path):
+    # Round 1: reviewer approves without HUMAN_REQUIREMENTS_RESOLVED → blocking item injected.
+    # Round 2: coder addresses it; reviewer approves with the marker → success.
+    pr_payload = {
+        "number": 77,
+        "state": "OPEN",
+        "url": "https://github.com/OWNER/REPO/pull/77",
+        "title": "Improve review prompt context",
+        "headRefName": "feature/review-context",
+        "baseRefName": "main",
+        "headRefOid": "abc123",
+        "comments": [
+            {
+                "author": {"login": "maintainer"},
+                "createdAt": "2026-05-18T10:00:00Z",
+                "url": "https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                "body": "Please use the absolute URL.\n\n-- Human Reviewer",
+            }
+        ],
+        "reviews": [],
+    }
+    runner = FakeRunner(
+        claude_outputs=[
+            # Round 2: coder addresses the re-injected blocking item and acknowledges human requirements
+            "Addressed human requirements.\n"
+            f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+            "### Human requirements\n"
+            "- Requirement 1: used the absolute URL.\n"
+            "<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            # Round 1: approves but forgets the marker
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            # Round 2: resolves the synthetic blocking item and acknowledges human requirements
+            "LGTM."
+            + prior_item_dispositions("[item-1] resolved")
+            + "\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        pr_payload=pr_payload,
+    )
+    config = make_config(tmp_path, max_rounds=2)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
 
 def test_pr_loop_allows_approval_with_human_requirement_resolution_marker(tmp_path):
