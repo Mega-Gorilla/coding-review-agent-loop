@@ -9638,3 +9638,53 @@ def test_repair_prompt_contains_coder_followup_format():
     assert "coder_followup" in _REPAIR_PROMPT
     assert "addressed_items" in _REPAIR_PROMPT
     assert "remaining_items" in _REPAIR_PROMPT
+
+
+def test_repair_prompt_distinguishes_item_ids_from_requirement_labels():
+    """Repair prompt must warn that addressed_items uses item IDs, not requirement labels."""
+    assert "Requirement 1" in _REPAIR_PROMPT
+    assert "addressed_ids" in _REPAIR_PROMPT
+    # The prompt must explicitly state item IDs cannot contain spaces
+    assert "spaces" in _REPAIR_PROMPT or "DO NOT CONFUSE" in _REPAIR_PROMPT or "NEVER put" in _REPAIR_PROMPT
+
+
+def test_repair_prompt_includes_skip_trust_in_cli_invocation():
+    """The CLI invocation must include --skip-trust so repair works outside trusted dirs."""
+    repaired = (
+        '{"schema_version":1,"kind":"pr_review","state":"approved","summary":"OK",'
+        '"blocking_items":[],"same_pr_followups":[],"future_followups":[],'
+        '"prior_item_dispositions":[]}\n<!-- AGENT_STATE: approved -->\n-- Gemini'
+    )
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = repaired
+
+    with patch("coding_review_agent_loop.repair.subprocess.run", return_value=mock_result) as mock_run:
+        attempt_repair("malformed review", "gemini")
+
+    cmd = mock_run.call_args.args[0]
+    assert "--skip-trust" in cmd
+
+
+def test_repair_prompt_coder_followup_fenced_json_example():
+    """Repair prompt must include a worked example showing fenced JSON being stripped."""
+    assert "```json" in _REPAIR_PROMPT
+    assert "HUMAN_REQUIREMENTS_ADDRESSED" in _REPAIR_PROMPT
+    # The prompt explains the marker is not needed in structured path
+    assert "NOT needed" in _REPAIR_PROMPT or "not needed" in _REPAIR_PROMPT.lower()
+
+
+def test_repair_prompt_does_not_suggest_ack_pseudo_item_in_addressed_items():
+    """The ack pseudo-item must never be suggested as a value for addressed_items.
+
+    The orchestrator's _validate_structured_coder_followup_items explicitly excludes
+    HUMAN_REQUIREMENTS_ACK_ITEM_ID from expected_ids, so any response that puts
+    'item-human-requirements-acknowledgement' in addressed_items will be rejected
+    as an unknown item ID.
+    """
+    from coding_review_agent_loop.orchestrator import HUMAN_REQUIREMENTS_ACK_ITEM_ID
+
+    # The ack pseudo-item must not appear in the repair prompt at all, because
+    # any mention of it in an addressed_items context will teach Gemini to produce
+    # responses that the validator rejects.
+    assert HUMAN_REQUIREMENTS_ACK_ITEM_ID not in _REPAIR_PROMPT
