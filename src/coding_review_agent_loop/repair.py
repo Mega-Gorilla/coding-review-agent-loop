@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import subprocess
 
-from .agents.gemini import _strip_gemini_preamble
+from .agents.gemini import _parse_gemini_payload
 
 _logger = logging.getLogger(__name__)
 
@@ -139,5 +139,5 @@ def attempt_repair(raw: str, gemini_cmd: str) -> str | None:
     if result.returncode != 0:
         _logger.debug("repair pass CLI exited with code %d", result.returncode)
         return None
-    text = _strip_gemini_preamble(result.stdout.strip())
+    text, _, _, _ = _parse_gemini_payload(result.stdout.strip())
     return text or None

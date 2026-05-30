@@ -14,7 +14,7 @@ from .base import (
     with_public_response_file_instruction,
 )
 from ..logging import agent_log_path, log
-from ..protocol import CLARIFY_RE, STATE_RE
+from ..protocol import CLARIFY_RE, PLAN_STATE_RE, STATE_RE
 from ..runner import Runner
 from ..usage import UsageMetadata, coerce_int, first_present
 
@@ -55,7 +55,7 @@ def _strip_gemini_preamble(raw: str) -> str:
     if marker_stripped != raw:
         return marker_stripped
 
-    marker_matches = [*STATE_RE.finditer(raw), *CLARIFY_RE.finditer(raw)]
+    marker_matches = [*STATE_RE.finditer(raw), *PLAN_STATE_RE.finditer(raw), *CLARIFY_RE.finditer(raw)]
     if not marker_matches:
         return raw
 

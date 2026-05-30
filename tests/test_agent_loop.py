@@ -869,6 +869,28 @@ Looks good.
     assert raw_usage is None
 
 
+def test_parse_gemini_output_strips_cli_preamble_before_plan_state_marker():
+    raw = """Warning: True color (24-bit) support not detected.
+YOLO mode is enabled.
+I will now review the plan.
+
+---
+
+## Plan Review
+
+Looks like a solid approach.
+
+<!-- AGENT_PLAN_STATE: approved -->
+
+-- Google Gemini
+"""
+    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
+    assert text.startswith("## Plan Review")
+    assert "YOLO mode" not in text
+    assert "<!-- AGENT_PLAN_STATE: approved -->" in text
+    assert sid is None
+
+
 def test_parse_gemini_output_preserves_markdown_rules_after_preamble():
     raw = """Warning: True color (24-bit) support not detected.
 YOLO mode is enabled.
@@ -9174,6 +9196,23 @@ def test_attempt_repair_calls_cli_and_returns_text():
     assert "--prompt" in cmd
     prompt_idx = cmd.index("--prompt")
     assert "malformed review" in cmd[prompt_idx + 1]
+
+
+def test_attempt_repair_handles_json_wrapped_cli_output():
+    repaired_text = (
+        '{"schema_version":1,"kind":"pr_review","state":"approved","summary":"OK",'
+        '"blocking_items":[],"same_pr_followups":[],"future_followups":[],'
+        '"prior_item_dispositions":[]}\n<!-- AGENT_STATE: approved -->\n-- Gemini'
+    )
+    json_wrapped = json.dumps({"response": repaired_text, "session_id": "s1"})
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = json_wrapped
+
+    with patch("coding_review_agent_loop.repair.subprocess.run", return_value=mock_result):
+        result = attempt_repair("malformed review", "gemini")
+
+    assert result == repaired_text
 
 
 def test_repair_prompt_contains_raw_response_placeholder():
