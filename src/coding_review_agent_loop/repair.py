@@ -15,7 +15,9 @@ from .agents.gemini import _parse_gemini_payload
 
 _logger = logging.getLogger(__name__)
 
-# v8 prompt — extends v7 with Format C (coder_followup).
+# v9 prompt — fixes coder_followup repair bugs:
+#   - fenced JSON (```json ... ```) now explicitly handled
+#   - addressed_items vs human_requirements.addressed_ids distinction clarified
 # Uses str.replace("{raw_response}", raw, 1) for substitution because the prompt
 # itself contains literal { } characters in the JSON examples.
 _REPAIR_PROMPT = """\
@@ -63,10 +65,10 @@ You are a format-repair assistant. An AI agent produced a code review or coder f
   "kind": "coder_followup",
   "state": "approved" | "blocking",
   "summary": "<short summary>",
-  "addressed_items": ["item-1"],
-  "remaining_items": ["item-2"],
+  "addressed_items": ["item-1", "item-human-requirements-acknowledgement"],
+  "remaining_items": [],
   "human_requirements": {
-    "addressed_ids": [],
+    "addressed_ids": ["Requirement 1"],
     "checked_discussion_directly": false
   }
 }
@@ -78,9 +80,14 @@ You are a format-repair assistant. An AI agent produced a code review or coder f
 - prior_item_dispositions, prior_plan_item_dispositions -> OBJECTS {"item_id":..., "disposition":..., "note":...}
 - disposition values: "resolved", "blocking", "same-pr"/"same-plan", or "future" ONLY
 
-## ARRAY FIELD TYPES (Format C):
-- addressed_items, remaining_items -> STRINGS (item IDs like "item-1", "item-2")
+## ARRAY FIELD TYPES (Format C) — TWO DIFFERENT ID TYPES, DO NOT CONFUSE THEM:
+- addressed_items, remaining_items -> reviewer ITEM IDs only: short slugs matching [A-Za-z0-9][A-Za-z0-9._-]*
+  Examples: "item-1", "item-2", "item-human-requirements-acknowledgement"
+  NEVER put human requirement labels ("Requirement 1") here — they contain spaces and will fail.
+- human_requirements.addressed_ids -> human REQUIREMENT LABELS like "Requirement 1", "Requirement 2"
+  These are different from item IDs and may contain spaces.
 - Every reviewer item ID from the original must appear in EITHER addressed_items OR remaining_items, not both.
+- Do NOT include human requirement labels in addressed_items or remaining_items.
 
 ## STATE RULES (Format A/B):
 ### APPROVED: blocking_items=[], same_pr_followups=[], prior dispositions only "resolved"/"future"
@@ -133,28 +140,60 @@ CORRECT repair: OMIT item-1 from prior_item_dispositions entirely. Do not includ
 
 item-1 is omitted because it was already "future" — it stays future without needing to be re-dispositioned.
 
-## WORKED EXAMPLE 3 — malformed coder follow-up (wrong item classification):
+## WORKED EXAMPLE 3 — coder follow-up with JSON wrapped in fences and human requirements:
 
-Original (malformed): coder_followup, addressed_items has a typo in item ID.
+Original (malformed): coder_followup JSON wrapped in ```json fences, with a ### Human requirements
+section and missing <!-- HUMAN_REQUIREMENTS_ADDRESSED --> marker.
 
-CORRECT repair: fix item IDs to match the expected values from context.
+```json
 {
-  "schema_version": 1, "kind": "coder_followup", "state": "blocking",
-  "summary": "Addressed the CSS issue; one item remains.",
-  "addressed_items": ["item-1"],
-  "remaining_items": ["item-2"],
+  "schema_version": 1,
+  "kind": "coder_followup",
+  "state": "blocking",
+  "summary": "Implemented the quota exit policy.",
+  "addressed_items": ["item-human-requirements-acknowledgement"],
+  "remaining_items": [],
   "human_requirements": {
-    "addressed_ids": [],
+    "addressed_ids": ["Requirement 1"],
+    "checked_discussion_directly": false
+  }
+}
+```
+
+<!-- AGENT_STATE: blocking -->
+
+### Human requirements
+
+- **Requirement 1**: Implemented.
+
+-- Anthropic Claude
+
+CORRECT repair — strip the fences, remove the prose, output bare JSON + footer + signature:
+{
+  "schema_version": 1,
+  "kind": "coder_followup",
+  "state": "blocking",
+  "summary": "Implemented the quota exit policy.",
+  "addressed_items": ["item-human-requirements-acknowledgement"],
+  "remaining_items": [],
+  "human_requirements": {
+    "addressed_ids": ["Requirement 1"],
     "checked_discussion_directly": false
   }
 }
 <!-- AGENT_STATE: blocking -->
--- Coder
+-- Anthropic Claude
+
+Notes:
+- "item-human-requirements-acknowledgement" stays in addressed_items (it is a reviewer item ID)
+- "Requirement 1" stays in human_requirements.addressed_ids (it is a human requirement label)
+- <!-- HUMAN_REQUIREMENTS_ADDRESSED --> is NOT needed in the structured path
+- No prose, no ### sections after the JSON
 
 ## FORMAT:
 1. Start DIRECTLY with { — no prose, no markdown fences.
 2. After }: <!-- AGENT_STATE: X --> (pr_review or coder_followup) OR <!-- AGENT_PLAN_STATE: X --> (plan_review). DIFFERENT MARKERS.
-3. JSON "state" matches X. Then: -- Agent Name. STOP.
+3. JSON "state" matches X. Then: -- Agent Name. STOP. Nothing else.
 
 Output ONLY the repaired response. No explanations.
 
@@ -175,7 +214,7 @@ def attempt_repair(raw: str, gemini_cmd: str) -> str | None:
     prompt = _REPAIR_PROMPT.replace("{raw_response}", raw, 1)
     try:
         result = subprocess.run(
-            [gemini_cmd, "--model", _REPAIR_MODEL, "--prompt", prompt],
+            [gemini_cmd, "--model", _REPAIR_MODEL, "--skip-trust", "--prompt", prompt],
             capture_output=True,
             text=True,
             timeout=120,
