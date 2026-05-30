@@ -37,6 +37,11 @@ from coding_review_agent_loop.cli import (
     run_pr_loop,
     run_task_loop,
 )
+from coding_review_agent_loop.errors import QuotaResetExceededError
+from coding_review_agent_loop.orchestrator import (
+    _format_reset_duration,
+    _parse_rate_limit_reset_seconds,
+)
 from coding_review_agent_loop.config import (
     default_agent_memory_dir,
     default_agent_workdir,
@@ -4846,6 +4851,87 @@ def test_pr_loop_failure_log_identifies_non_retryable(tmp_path):
     message = str(exc_info.value)
     assert "non-retryable" in message
     assert "credentials or billing" in message
+
+
+def test_pr_loop_exits_immediately_on_long_reset_rate_limit(tmp_path):
+    # "Retry-After: 3600" → 3600 s reset > 300 s threshold → must exit, not retry.
+    rate_limit_output = "HTTP 429: rate limit exceeded. Retry-After: 3600"
+    runner = FakeRunner(gemini_outputs=[(rate_limit_output, 1)])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    with pytest.raises(QuotaResetExceededError) as exc_info:
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    message = str(exc_info.value)
+    assert "quota exhausted" in message.lower()
+    assert "1h" in message  # 3600 s = 1h
+    assert "Rerun when quota resets" in message
+    # Must not have slept / retried.
+    assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
+
+
+def test_pr_loop_retries_on_short_reset_rate_limit(tmp_path):
+    # "Retry-After: 60" → 60 s reset ≤ 300 s threshold → retry automatically.
+    rate_limit_output = "HTTP 429: rate limit exceeded. Retry-After: 60"
+    valid = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    runner = FakeRunner(gemini_outputs=[(rate_limit_output, 1), valid])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
+    assert len(sleep_commands) == 1
+
+
+def test_pr_loop_retries_on_rate_limit_without_reset_time(tmp_path):
+    # No parseable reset time → fall back to normal retry behavior.
+    rate_limit_output = "HTTP 429: rate limit exceeded."
+    valid = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    runner = FakeRunner(gemini_outputs=[(rate_limit_output, 1), valid])
+    config = make_config(tmp_path, reviewer="gemini")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
+    assert len(sleep_commands) == 1
+
+
+@pytest.mark.parametrize("text,expected_secs", [
+    ("Retry-After: 3600", 3600),
+    ("retry after 1800", 1800),
+    ("retryDelay: '7200s'", 7200),
+    ("try again in 2h 30m", 9000),
+    ("try again in 45m", 2700),
+    ("resets in 1h", 3600),
+    ("reset in 5m", 300),
+])
+def test_parse_rate_limit_reset_seconds(text, expected_secs):
+    assert _parse_rate_limit_reset_seconds(text) == expected_secs
+
+
+@pytest.mark.parametrize("text", [
+    "HTTP 429: rate limit exceeded.",
+    "Too many requests.",
+    "quota exceeded",
+])
+def test_parse_rate_limit_reset_seconds_returns_none_when_unparseable(text):
+    assert _parse_rate_limit_reset_seconds(text) is None
+
+
+@pytest.mark.parametrize("seconds,expected", [
+    (3600, "1h"),
+    (7200, "2h"),
+    (9000, "2h 30m"),
+    (300, "5m"),
+    (45, "45s"),
+    (3660, "1h 1m"),
+])
+def test_format_reset_duration(seconds, expected):
+    assert _format_reset_duration(seconds) == expected
+
+
+def test_quota_reset_exceeded_error_exit_code():
+    assert QuotaResetExceededError.EXIT_CODE == 3
 
 
 def test_pr_loop_reinjects_blocking_item_when_human_requirement_marker_missing(tmp_path):

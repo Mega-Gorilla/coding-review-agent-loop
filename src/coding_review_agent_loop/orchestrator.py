@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import datetime
 import hashlib
 import json
 import re
@@ -20,7 +21,7 @@ from .config import (
     sync_coder_pr_before_validation,
     sync_reviewer_pr_before_review,
 )
-from .errors import AgentLoopError
+from .errors import AgentLoopError, QuotaResetExceededError
 from .github import (
     IssueContext,
     PullRequestChecks,
@@ -129,6 +130,47 @@ ALL_RESOLVED_PROSE_RE = re.compile(
     re.I,
 )
 
+# Threshold above which a rate-limit reset time causes an immediate exit
+# rather than a silent wait (5 minutes).
+LONG_RESET_THRESHOLD_SECONDS = 300
+
+# Subset of TRANSIENT_AGENT_OUTPUT_RE patterns that specifically signal quota / rate-limit errors
+# and where a reset time might be present in the error text.
+_QUOTA_RATE_LIMIT_RE = re.compile(
+    r"\b429\b|rate[- ]?limit(?:ed)?|"
+    r"session[- ]?limit|too many sessions|"
+    r"resource[- ]?exhausted|\bquota\b|"
+    r"no capacity available|capacity.*(?:unavailable|exceeded)|"
+    r"overloaded",
+    re.I,
+)
+# Parse "Retry-After: N" (HTTP header) or "retry after N" or "retryDelay: Ns" (gRPC).
+_RETRY_AFTER_SECONDS_RE = re.compile(
+    r"\bretry[- ]after[:\s]+(\d+)\b"
+    r"|\bretry[_-]?delay[:\s]+['\"]?(\d+)s['\"]?",
+    re.I,
+)
+# Parse "try again in Xh Ym Zs".
+_TRY_AGAIN_IN_RE = re.compile(
+    r"\btry\s+again\s+in\s+"
+    r"(?:(?P<h>\d+)\s*h(?:r|ours?)?\s*)?"
+    r"(?:(?P<m>\d+)\s*m(?:in(?:utes?)?)?\s*)?"
+    r"(?:(?P<s>\d+)\s*s(?:ec(?:onds?)?)?)?",
+    re.I,
+)
+# Parse "reset in Xh Ym" / "resets in X hours".
+_RESET_IN_RE = re.compile(
+    r"\brese(?:t|ts)\s+in\s+"
+    r"(?:(?P<h>\d+)\s*h(?:r|ours?)?\s*)?"
+    r"(?:(?P<m>\d+)\s*m(?:in(?:utes?)?)?\s*)?"
+    r"(?:(?P<s>\d+)\s*s(?:ec(?:onds?)?)?)?",
+    re.I,
+)
+# Parse ISO 8601 timestamps (used to compute reset delta from now).
+_ISO_TIMESTAMP_RE = re.compile(
+    r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)"
+)
+
 
 @dataclass(frozen=True)
 class ValidatedAgentResponse:
@@ -136,6 +178,67 @@ class ValidatedAgentResponse:
     session_id: str | None
     marker_value: object
     usage: UsageMetadata | None = None
+
+
+def _parse_rate_limit_reset_seconds(text: str) -> int | None:
+    """Extract the reset wait time in seconds from a rate-limit error message.
+
+    Returns None if the reset time cannot be reliably parsed.
+    """
+    m = _RETRY_AFTER_SECONDS_RE.search(text)
+    if m:
+        val = m.group(1) or m.group(2)
+        if val:
+            return int(val)
+
+    m = _TRY_AGAIN_IN_RE.search(text)
+    if m and any(m.group(g) for g in ("h", "m", "s")):
+        return (
+            int(m.group("h") or 0) * 3600
+            + int(m.group("m") or 0) * 60
+            + int(m.group("s") or 0)
+        )
+
+    m = _RESET_IN_RE.search(text)
+    if m and any(m.group(g) for g in ("h", "m", "s")):
+        return (
+            int(m.group("h") or 0) * 3600
+            + int(m.group("m") or 0) * 60
+            + int(m.group("s") or 0)
+        )
+
+    m = _ISO_TIMESTAMP_RE.search(text)
+    if m:
+        try:
+            ts_str = m.group(1).replace(" ", "T")
+            if not ts_str.endswith("Z"):
+                ts_str += "Z"
+            ts = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+            delta = int((ts - datetime.datetime.now(datetime.timezone.utc)).total_seconds())
+            if delta > 0:
+                return delta
+        except (ValueError, OverflowError):
+            pass
+
+    return None
+
+
+def _format_reset_duration(seconds: int) -> str:
+    hours, rem = divmod(seconds, 3600)
+    minutes = rem // 60
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if minutes:
+        parts.append(f"{minutes}m")
+    if not parts:
+        parts.append(f"{seconds}s")
+    return " ".join(parts)
+
+
+def _format_reset_at_utc(seconds: int) -> str:
+    reset_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=seconds)
+    return reset_time.strftime("%H:%M UTC")
 
 
 def _normalize_disposition_section_prose(text: str) -> str:
@@ -383,16 +486,26 @@ def _run_validated_agent(
                     usage=usage,
                 )
 
-        if should_retry and attempt < max_attempts:
-            delay = _retry_delay(config, attempt)
-            category = _failure_category(text)
-            log(
-                config,
-                f"{agent_name}: {category} failure ({last_error}); "
-                f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})",
-            )
-            runner.run(("sleep", str(delay)), cwd=active_workdir(config))
-            continue
+        if should_retry:
+            if _QUOTA_RATE_LIMIT_RE.search(text):
+                reset_secs = _parse_rate_limit_reset_seconds(text)
+                if reset_secs is not None and reset_secs > LONG_RESET_THRESHOLD_SECONDS:
+                    duration_str = _format_reset_duration(reset_secs)
+                    at_str = _format_reset_at_utc(reset_secs)
+                    raise QuotaResetExceededError(
+                        f"{agent_name} quota exhausted. Reset in {duration_str} (at {at_str}). "
+                        "Rerun when quota resets, or switch to a different API key / model."
+                    )
+            if attempt < max_attempts:
+                delay = _retry_delay(config, attempt)
+                category = _failure_category(text)
+                log(
+                    config,
+                    f"{agent_name}: {category} failure ({last_error}); "
+                    f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})",
+                )
+                runner.run(("sleep", str(delay)), cwd=active_workdir(config))
+                continue
         break
 
     raise AgentLoopError(
