@@ -228,7 +228,7 @@ def _render_public_pr_review_comment(
     dispositions: Sequence[ReviewItemDisposition],
 ) -> str:
     sections: list[str] = [f"**Review verdict:** {parsed_review.state.title()}"]
-    if parsed_review.summary:
+    if parsed_review.summary and parsed_review.summary.strip() != "Review complete.":
         sections.append(parsed_review.summary.strip())
     if parsed_review.blocking_items:
         sections.append(
@@ -283,7 +283,7 @@ def _render_public_plan_review_comment(
     dispositions: Sequence[ReviewItemDisposition],
 ) -> str:
     sections: list[str] = [f"**Review verdict:** {parsed_review.state.title()}"]
-    if parsed_review.summary:
+    if parsed_review.summary and parsed_review.summary.strip() != "Plan review complete.":
         sections.append(parsed_review.summary.strip())
     if parsed_review.items.blocking:
         sections.append(
