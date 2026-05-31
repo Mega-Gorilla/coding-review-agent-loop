@@ -10,6 +10,7 @@ from typing import Sequence
 from .agents.base import AgentName
 from .agents.registry import agent_display_name, agent_signature
 from .config import AgentLoopConfig, reviewers
+from .decomposition import MAX_DECOMPOSITION_PHASES
 from .github import HumanReviewRequirement, IssueContext, PullRequestChecks, PullRequestMetadata
 from .memory import AgentMemoryContext, format_agent_memory_context
 from .protocol import (
@@ -733,6 +734,70 @@ the `AGENT_PLAN_STATE` footer immediately after that payload, and end with only
 your standalone signature. If you fall back to markdown, keep the exact section
 headings above. Always sign your response:
 -- {reviewer_signature}
+"""
+
+
+def build_plan_decomposition_prompt(
+    issue_number: int,
+    approved_plan: str,
+    config: AgentLoopConfig,
+    memory: AgentMemoryContext | None = None,
+    issue_context: IssueContext | None = None,
+) -> str:
+    coder_signature = agent_signature(config.coder)
+    return f"""Decompose the approved implementation plan for GitHub issue #{issue_number} in {config.repo}.
+
+Use this local checkout only to inspect context. Do not edit files, create a
+branch, commit, push, or open a pull request during this decomposition stage.
+{_scratch_file_guidance()}
+{_issue_context_block(issue_context)}
+{_memory_block(memory)}
+
+Approved implementation plan:
+
+{approved_plan}
+
+Return exactly one JSON object. The orchestrator will validate it and create one
+GitHub child issue for every phase. A parent checklist or table is only summary
+text and cannot replace child issues.
+
+Schema:
+{{
+  "schema_version": 1,
+  "kind": "plan_decomposition",
+  "phases": [
+    {{
+      "title": "Short phase title",
+      "scope": "What this phase implements.",
+      "non_goals": "What this phase explicitly does not do.",
+      "dependency_notes": "Ordering and dependency notes.",
+      "rollout_risk": "low|medium|high plus a short reason.",
+      "validation": "Expected validation and soak/checkpoint before the next phase.",
+      "parent_context": "Self-contained excerpt of the approved parent-plan slice and constraints needed to run this child issue independently.",
+      "automation": "agent-pr",
+      "depends_on": []
+    }}
+  ]
+}}
+
+Rules:
+- Use between 1 and {MAX_DECOMPOSITION_PHASES} phases. If the plan seems larger,
+  consolidate related steps; do not exceed the cap.
+- Preserve dependency ordering. `depends_on` must reference earlier phase titles.
+- Every child issue must be self-contained enough for `agent-loop issue <N>` to
+  run without rediscovering the full parent thread.
+- Classify automation as exactly one of: `agent-pr`, `human-action`, or
+  `manual-close`.
+- Most implementation phases should be `agent-pr`: each one should be automatable
+  through a child issue and later PR.
+- Use `human-action` or `manual-close` only when a human must perform extra work,
+  add a remark/update, and close that child issue manually.
+- Include explicit scope boundaries, risk, validation/soak requirements, parent
+  constraints/invariants, and non-goals for every phase.
+
+Do not wrap the JSON in markdown fences. Signatures and AGENT markers are not
+needed for this response.
+-- {coder_signature}
 """
 
 

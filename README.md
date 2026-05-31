@@ -132,6 +132,33 @@ default the loop posts the approved plan summary and stops; add
 agent-loop issue 123 --repo OWNER/REPO --plan-first --implement-after-approval
 ```
 
+`--plan-first` also supports explicit post-approval modes:
+
+```bash
+agent-loop issue 123 --repo OWNER/REPO --plan-first --plan-execution-mode plan-only
+agent-loop issue 123 --repo OWNER/REPO --plan-first --plan-execution-mode decompose-only
+agent-loop issue 123 --repo OWNER/REPO --plan-first --plan-execution-mode implement-one-shot
+agent-loop issue 123 --repo OWNER/REPO --plan-first --plan-execution-mode implement-by-phase
+```
+
+`plan-only` is the default. `implement-one-shot` is the same behavior selected
+by the backward-compatible `--implement-after-approval` flag. `decompose-only`
+asks the coder to turn the approved plan into ordered phases, always creates
+one GitHub child issue per phase, posts a parent summary table, and stops.
+`implement-by-phase` creates every child issue, then implements only the first
+`agent-pr` phase and stops after that PR review loop. If the first phase is
+`human-action` or `manual-close`, the loop creates and reports all child issues
+but stops so a human can do the required work, add a remark/update, and close
+that child issue.
+
+Each generated child issue copies the relevant parent-plan slice, constraints
+and invariants, dependency notes, scope and non-goals, rollout risk,
+validation/soak requirements, automation classification, and instructions for
+agent execution or human closure. Decomposition is capped at 8 phases; an
+over-cap response is rejected and must be consolidated, not truncated. This cap
+is separate from the approved-review follow-up issue cap used by
+`--approved-followups`.
+
 Provide a one-off task directly when there is no issue yet:
 
 ```bash

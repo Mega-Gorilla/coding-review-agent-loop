@@ -174,6 +174,48 @@ normal implementation and PR review loop using the approved plan:
 agent-loop issue 56 --repo OWNER/REPO --plan-first --implement-after-approval
 ```
 
+For larger plans, choose the post-approval behavior explicitly with
+`--plan-execution-mode`:
+
+```bash
+agent-loop issue 56 --repo OWNER/REPO --plan-first --plan-execution-mode plan-only
+agent-loop issue 56 --repo OWNER/REPO --plan-first --plan-execution-mode decompose-only
+agent-loop issue 56 --repo OWNER/REPO --plan-first --plan-execution-mode implement-one-shot
+agent-loop issue 56 --repo OWNER/REPO --plan-first --plan-execution-mode implement-by-phase
+```
+
+The modes are:
+
+- `plan-only`: post the approved plan summary and stop. This is the default.
+- `decompose-only`: ask the coder to decompose the approved plan, validate the
+  structured JSON response, create one GitHub child issue per phase, post a
+  parent summary, and stop. The summary table is not a substitute for child
+  issues.
+- `implement-one-shot`: keep the existing post-approval implementation handoff.
+  This is also what `--implement-after-approval` selects for compatibility.
+- `implement-by-phase`: create/link every phase issue, implement only the first
+  `agent-pr` child issue, then stop after that PR review loop.
+
+Generated child issues are self-contained: each body includes the parent issue
+link, the relevant approved parent-plan slice, constraints/invariants,
+dependency notes, scope and non-goals, rollout risk, validation/soak
+requirements, automation classification, and explicit instructions for either
+`agent-loop issue <N>` execution or human remark/closure. Dependency links are
+filled in after earlier child issue numbers or URLs are known.
+
+Automation classification is required for every phase. `agent-pr` means the
+phase is expected to be implemented through a child issue and PR.
+`human-action` and `manual-close` phases are still created as child issues, but
+their titles, bodies, and parent summary call out that a human must perform the
+work or checkpoint, add the required remark/update, and close the issue. If
+`implement-by-phase` sees a human-only first phase, it stops instead of
+pretending the agent can implement it.
+
+Plan decomposition allows at most 8 phases. Over-cap responses are validation
+failures and must be consolidated; phases are never silently truncated. This
+limit is independent of `--approved-followups`, whose issue mode still caps
+approved-review future follow-up issues separately.
+
 Implement a free-form task:
 
 ```bash

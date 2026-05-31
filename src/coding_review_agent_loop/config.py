@@ -54,6 +54,7 @@ class AgentLoopConfig:
     agent_memory_dir: Path
     refresh_test_profile: bool
     approved_followups: str = "ignore"
+    plan_execution_mode: str = "plan-only"
     auto_agent_dirs: tuple[AgentName, ...] = ()
 
     def __post_init__(self) -> None:
@@ -512,5 +513,6 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
         ),
         refresh_test_profile=args.refresh_test_profile,
         approved_followups=args.approved_followups,
+        plan_execution_mode=getattr(args, "plan_execution_mode", None) or "plan-only",
         auto_agent_dirs=auto_agent_dirs,
     )
