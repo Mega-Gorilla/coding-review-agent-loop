@@ -63,6 +63,7 @@ from .protocol import (
     ParsedPlanReview,
     ParsedReview,
     ReviewItemDisposition,
+    StructuredCoderFollowup,
     StructuredPlanRevision,
     UnresolvedReviewItem,
     human_requirements_resolved,
@@ -96,6 +97,7 @@ from .comment_rendering import (
     _item_label_status,
     _normalize_item_summary,
     _public_reviewer_name,
+    _render_public_coder_followup_comment,
     _render_disposition_status,
     _render_prior_dispositions_section,
     _render_public_plan_review_comment,
@@ -1791,6 +1793,14 @@ def run_pr_loop(
             coder_output = coder_response.text
             coder_session_id = coder_response.session_id
             latest_coder_output = coder_output
+            public_comment = coder_output
+            raw_structured_coder_response: str | None = None
+            if isinstance(coder_response.marker_value, StructuredCoderFollowup):
+                raw_structured_coder_response = coder_output
+                public_comment = _render_public_coder_followup_comment(
+                    coder_response.marker_value,
+                    signature=agent_signature(config.coder),
+                )
 
             unresolved_items = _reconcile_human_requirements_ack_item(
                 unresolved_items,
@@ -1805,7 +1815,7 @@ def run_pr_loop(
                 config=config,
                 pr_number=pr_number,
                 body=_attach_round_metadata(
-                    coder_output,
+                    public_comment,
                     PostedRoundMetadata(
                         flow="pr",
                         role="coder",
@@ -1813,6 +1823,7 @@ def run_pr_loop(
                         round_number=round_number + 1,
                         subject=str(updated_pr_context.metadata.head_sha or "unknown"),
                         prior_items=tuple(unresolved_items),
+                        raw_structured_coder_response=raw_structured_coder_response,
                     ),
                 ),
             )

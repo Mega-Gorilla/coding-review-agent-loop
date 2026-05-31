@@ -73,6 +73,7 @@ from coding_review_agent_loop.orchestrator import (
     _encode_round_metadata,
     _format_unresolved_item_label,
     _plan_subject,
+    _render_public_coder_followup_comment,
     _render_public_plan_review_comment,
     _render_public_plan_revision_comment,
     _render_public_pr_review_comment,
@@ -3306,14 +3307,88 @@ def test_render_canonical_plan_revision_and_public_comment():
 
     assert canonical == (
         "Revised the plan to cover rollback behavior.\n\n"
-        "### Prior plan review item dispositions\n"
+        "### Prior plan item dispositions\n"
         "- [item-4] Blocking issue from OpenAI Codex, round 2: Add a resume-path step. -> "
         "resolved: Added a resume-path step.\n\n"
         "### Plan steps\n"
         "1. Update protocol.py.\n"
         "2. Add orchestrator resume tests."
     )
-    assert public == canonical + "\n\n<!-- AGENT_PLAN_STATE: blocking -->\n\n-- OpenAI Codex"
+    assert public == (
+        "## Revised plan\n\n"
+        + canonical
+        + "\n\n<!-- AGENT_PLAN_STATE: blocking -->\n\n-- OpenAI Codex"
+    )
+    assert '"kind": "plan_revision"' not in public
+
+
+def test_render_public_coder_followup_comment():
+    parsed = validate_structured_coder_followup(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "blocking",
+                "summary": "Added the requested regression test.",
+                "addressed_items": ["item-1", "item-2"],
+                "remaining_items": [],
+                "human_requirements": {
+                    "addressed_ids": ["Requirement 1"],
+                    "checked_discussion_directly": False,
+                },
+                "tests_run": [
+                    "python -m pytest tests/test_agent_loop.py -k coder_followup"
+                ],
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    assert parsed is not None
+
+    rendered = _render_public_coder_followup_comment(parsed, signature="Anthropic Claude")
+
+    assert rendered == (
+        "## Coder follow-up\n\n"
+        "Added the requested regression test.\n\n"
+        "### Addressed items\n"
+        "- item-1\n"
+        "- item-2\n\n"
+        "### Remaining items\n"
+        "- None.\n\n"
+        "### Tests run\n"
+        "- python -m pytest tests/test_agent_loop.py -k coder_followup\n\n"
+        "<!-- AGENT_STATE: blocking -->\n\n"
+        "-- Anthropic Claude"
+    )
+    assert "```json" not in rendered
+    assert '"kind": "coder_followup"' not in rendered
+
+    without_tests = validate_structured_coder_followup(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "blocking",
+                "summary": "Still working through the review.",
+                "addressed_items": [],
+                "remaining_items": ["item-3"],
+                "human_requirements": {
+                    "addressed_ids": [],
+                    "checked_discussion_directly": False,
+                },
+                "tests_run": [],
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    assert without_tests is not None
+    rendered_without_tests = _render_public_coder_followup_comment(
+        without_tests,
+        signature="Anthropic Claude",
+    )
+    assert "### Tests run" not in rendered_without_tests
+    assert "### Addressed items\n- None." in rendered_without_tests
+    assert "### Remaining items\n- item-3" in rendered_without_tests
 
 
 def test_render_public_plan_review_comment_normalizes_sections():
@@ -5116,7 +5191,17 @@ def test_pr_loop_accepts_structured_coder_followup_in_pr_round(tmp_path):
 
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
-    assert any('"kind": "coder_followup"' in comment for comment in runner.comments)
+    followup_comments = [comment for comment in runner.comments if "## Coder follow-up" in comment]
+    assert len(followup_comments) == 1
+    visible_followup = _strip_round_metadata(followup_comments[0])
+    assert "Added the requested regression test." in visible_followup
+    assert "### Addressed items\n- item-1" in visible_followup
+    assert "### Remaining items\n- None." in visible_followup
+    assert (
+        "### Tests run\n- pytest tests/test_agent_loop.py -k structured_coder_followup"
+        in visible_followup
+    )
+    assert '"kind": "coder_followup"' not in visible_followup
 
 
 def test_pr_loop_rejects_malformed_structured_coder_followup_before_re_review(tmp_path):
@@ -6898,6 +6983,62 @@ def test_resume_pr_round_reparses_orchestrator_rendered_blocking_issues_comment(
         "Exercise the structured-resume path."
     ]
     assert resumed_review.summary == "Need one more regression test before merge."
+
+
+def test_resume_pr_round_prefers_structured_coder_followup_metadata():
+    carried_item = UnresolvedReviewItem(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Need one more regression test before merge.",
+        status="blocking",
+        source_status="blocking",
+    )
+    raw_structured_followup = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "blocking",
+                "summary": "Added the requested regression test.",
+                "addressed_items": ["item-1"],
+                "remaining_items": [],
+                "human_requirements": {
+                    "addressed_ids": ["Requirement 1"],
+                    "checked_discussion_directly": False,
+                },
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    parsed = validate_structured_coder_followup(raw_structured_followup)
+    assert parsed is not None
+    public_comment = _render_public_coder_followup_comment(parsed, signature="Anthropic Claude")
+    coder_comment = _attach_round_metadata(
+        public_comment,
+        PostedRoundMetadata(
+            flow="pr",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject="abc123",
+            prior_items=(carried_item,),
+            raw_structured_coder_response=raw_structured_followup,
+        ),
+    )
+
+    resumed = _resume_pr_round(
+        [IssueComment(author="bot", created_at="2026-05-25T00:00:00Z", body=coder_comment)],
+        head_sha="abc123",
+        configured_reviewers=("codex",),
+    )
+
+    assert resumed is not None
+    assert resumed.coder_output == raw_structured_followup
+    resumed_followup = validate_structured_coder_followup(resumed.coder_output)
+    assert resumed_followup is not None
+    assert resumed_followup.human_requirements.addressed_ids == ("Requirement 1",)
+    assert '"kind": "coder_followup"' not in _strip_round_metadata(coder_comment)
 
 
 def test_resume_pr_round_prefers_latest_metadata_ledger_for_same_head_replay():
