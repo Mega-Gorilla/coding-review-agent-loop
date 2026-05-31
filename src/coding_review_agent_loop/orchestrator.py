@@ -70,7 +70,9 @@ from .protocol import (
     is_clarification_request,
     parse_agent_state,
     parse_plan_review,
+    parse_plan_review_items,
     parse_plan_state,
+    parse_structured_plan_review,
     parse_pr_number,
     review_freeform_summary_text,
     validate_human_requirements_acknowledgement,
@@ -578,11 +580,13 @@ def _validate_plan_revision_response(text: str) -> StructuredPlanRevision | str:
     parsed = validate_structured_plan_revision(text)
     if parsed is not None:
         return parsed
-    return parse_plan_state(text)
+    raise AgentLoopError("Plan revision did not use the required structured format.")
 
 
 def _should_record_new_blocking_item(summary: str, *, had_prior_items: bool, had_dispositions: bool) -> bool:
     if not summary:
+        return False
+    if summary.strip() in {"Review complete.", "Plan review complete."}:
         return False
     if not had_prior_items or not had_dispositions:
         return True
@@ -846,10 +850,18 @@ def _run_plan_first_loop(
             resumed_record = resumed_by_name.get(reviewer_name)
             if resumed_record is not None:
                 review_output = resumed_record.body
+                structured_review = parse_structured_plan_review(
+                    review_output,
+                    reviewer=reviewer_name,
+                )
                 parsed_review = ParsedPlanReview(
                     state=resumed_record.metadata.state or parse_plan_state(review_output),
                     summary=review_freeform_summary_text(review_output),
-                    items=parse_plan_review(review_output, reviewer=reviewer_name).items,
+                    items=(
+                        structured_review.items
+                        if structured_review is not None
+                        else parse_plan_review_items(review_output, reviewer=reviewer_name)
+                    ),
                     dispositions=resumed_record.metadata.dispositions,
                 )
                 review_state = parsed_review.state
@@ -1099,6 +1111,7 @@ def _run_plan_first_loop(
                 full_omission_fallback="Fetch the issue discussion directly before revising the plan.",
             ),
             usage_context=usage_context,
+            use_repair=True,
         )
         canonical_plan: str | None = None
         public_comment = plan_response.text

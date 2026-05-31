@@ -13,7 +13,6 @@ from .protocol import (
     ReviewItemDisposition,
     StructuredCoderFollowup,
     UnresolvedReviewItem,
-    parse_agent_state,
     parse_plan_review,
     parse_pr_review,
     validate_human_requirements_acknowledgement,
@@ -229,13 +228,7 @@ def _validate_coder_followup_response(
         )
         return structured_followup
 
-    state = parse_agent_state(text)
-    validate_human_requirements_acknowledgement(
-        text,
-        surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
-        requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
-    )
-    return state
+    raise AgentLoopError("Coder response did not use the required structured format.")
 
 
 def _apply_unresolved_item_dispositions(

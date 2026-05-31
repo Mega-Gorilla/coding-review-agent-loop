@@ -1429,7 +1429,7 @@ def parse_pr_review(text: str, *, reviewer: str) -> ParsedReview:
     parsed = parse_structured_pr_review(text, reviewer=reviewer)
     if parsed is not None:
         return parsed
-    return parse_review(text, reviewer=reviewer)
+    raise AgentLoopError("Agent response did not use the required structured format.")
 
 
 def parse_plan_review(text: str, *, reviewer: str) -> ParsedPlanReview:
@@ -1437,19 +1437,7 @@ def parse_plan_review(text: str, *, reviewer: str) -> ParsedPlanReview:
     parsed = parse_structured_plan_review(text, reviewer=reviewer)
     if parsed is not None:
         return parsed
-    state = parse_plan_state(text)
-    summary = review_freeform_summary_text(text)
-    items = parse_plan_review_items(text, reviewer=reviewer)
-    dispositions = parse_plan_item_dispositions(text, reviewer=reviewer)
-    return _finalize_parsed_plan_review(
-        state=state,
-        summary=summary,
-        items=items,
-        dispositions=dispositions,
-        raw_dispositions_text=_extract_section_text(
-            text, heading_re=PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE
-        ),
-    )
+    raise AgentLoopError("Agent response did not use the required structured format.")
 
 
 def parse_non_blocking_followups(text: str, *, reviewer: str) -> list[ApprovedFollowup]:

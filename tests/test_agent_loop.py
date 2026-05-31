@@ -84,6 +84,7 @@ from coding_review_agent_loop.orchestrator import (
     _resume_plan_round,
     _strip_round_metadata,
     _validate_coder_followup_response,
+    _validate_plan_revision_response,
     _validate_review_response,
     _validate_plan_review_response,
     render_canonical_plan_revision,
@@ -247,6 +248,111 @@ class FakeRunner(Runner):
         self.issue_urls = list(issue_urls) if issue_urls is not None else None
         self.public_response_outputs = list(public_response_outputs or [])
 
+    def _normalize_legacy_agent_output(self, output: str, prompt: str) -> str:
+        stripped = output.lstrip()
+        if stripped.startswith("{"):
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict):
+                for key in ("response", "result"):
+                    value = payload.get(key)
+                    if isinstance(value, str):
+                        normalized_value = self._normalize_legacy_agent_output(value, prompt)
+                        if normalized_value != value:
+                            payload[key] = normalized_value
+                            return json.dumps(payload)
+            return output
+        signature_matches = re.findall(r"-- (OpenAI Codex|Google Gemini|Anthropic Claude)", prompt)
+        signature = signature_matches[-1] if signature_matches else "OpenAI Codex"
+        if (
+            '"kind": "pr_review"' in prompt
+            and '"kind": "coder_followup"' not in prompt
+            and "<!-- AGENT_STATE:" in output
+        ):
+            parsed = parse_review(output, reviewer="OpenAI Codex")
+            return structured_pr_review(
+                state=parsed.state,
+                summary=parsed.summary or "Review complete.",
+                blocking_items=[item.text for item in parsed.blocking_items],
+                same_pr_followups=[item.text for item in parsed.followups.same_pr],
+                future_followups=[item.text for item in parsed.followups.future],
+                prior_item_dispositions=[
+                    {
+                        key: value
+                        for key, value in {
+                            "item_id": item.item_id,
+                            "disposition": item.disposition,
+                            "note": item.note,
+                        }.items()
+                        if value is not None
+                    }
+                    for item in parsed.dispositions
+                ],
+                reviewer=signature,
+                human_requirements_resolved="<!-- HUMAN_REQUIREMENTS_RESOLVED -->" in output,
+            )
+        if (
+            '"kind": "plan_review"' in prompt
+            and '"kind": "plan_revision"' not in prompt
+            and "<!-- AGENT_PLAN_STATE:" in output
+        ):
+            state = parse_plan_state(output)
+            items = parse_plan_review_items(output, reviewer="OpenAI Codex")
+            future = [item.text for item in items.future] if state == "approved" else []
+            blocking = [item.text for item in items.blocking]
+            return structured_plan_review(
+                state=state,
+                summary=_review_freeform_summary_text(output) or "Plan review complete.",
+                blocking_plan_issues=blocking,
+                same_plan_followups=[item.text for item in items.same_plan],
+                future_followups=future,
+                prior_plan_item_dispositions=[
+                    {
+                        key: value
+                        for key, value in {
+                            "item_id": item.item_id,
+                            "disposition": item.disposition,
+                            "note": item.note,
+                        }.items()
+                        if value is not None
+                    }
+                    for item in parse_plan_item_dispositions(output, reviewer="OpenAI Codex")
+                ],
+                reviewer=signature,
+            )
+        if '"kind": "plan_revision"' in prompt and "<!-- AGENT_PLAN_STATE:" in output:
+            return structured_plan_revision(
+                summary=_review_freeform_summary_text(output) or "Revised the plan.",
+                plan_steps=[
+                    line.strip("- ").strip()
+                    for line in output.splitlines()
+                    if line.strip().startswith("- ")
+                    and "Requirement " not in line
+                    and not line.strip().startswith("--")
+                ]
+                or [_review_freeform_summary_text(output) or "Revised the plan."],
+                human_requirements=(
+                    "\n" + HUMAN_REQUIREMENTS_ADDRESSED_MARKER
+                    if HUMAN_REQUIREMENTS_ADDRESSED_MARKER in output
+                    else ""
+                ),
+            )
+        if '"kind": "coder_followup"' in prompt and "<!-- AGENT_STATE:" in output:
+            item_ids = sorted(set(re.findall(r"\[(item-[A-Za-z0-9._-]+)\]", prompt)))
+            item_ids = [item_id for item_id in item_ids if item_id != HUMAN_REQUIREMENTS_ACK_ITEM_ID]
+            human_ids = sorted(set(re.findall(r"`(Requirement \d+)`|(?:^|\s)(Requirement \d+):", output)))
+            flattened_human_ids = [first or second for first, second in human_ids]
+            return structured_coder_followup(
+                state=parse_agent_state(output),
+                summary=_review_freeform_summary_text(output) or "Updated the PR.",
+                addressed_items=item_ids,
+                remaining_items=[],
+                human_requirement_ids=flattened_human_ids,
+            )
+        return output
+
     def _next_agent_output(self, outputs):
         output = outputs.pop(0)
         if isinstance(output, dict):
@@ -272,7 +378,10 @@ class FakeRunner(Runner):
             return
         response_path = Path(match.group(1))
         response_path.parent.mkdir(parents=True, exist_ok=True)
-        response_path.write_text(self.public_response_outputs.pop(0), encoding="utf-8")
+        response = self.public_response_outputs.pop(0)
+        if isinstance(response, str):
+            response = self._normalize_legacy_agent_output(response, prompt)
+        response_path.write_text(response, encoding="utf-8")
 
     def run_with_log(
         self,
@@ -290,6 +399,8 @@ class FakeRunner(Runner):
 
         if cmd[:1] == ["claude"]:
             output, returncode = self._next_agent_output(self.claude_outputs)
+            if isinstance(output, str):
+                output = self._normalize_legacy_agent_output(output, "\n".join(cmd))
             self._maybe_write_public_response_file(cmd)
             log_path.write_text(f"$ {' '.join(cmd)}\n\n{output}", encoding="utf-8")
             return CommandResult(cmd, cwd_path, output, "", returncode)
@@ -303,6 +414,10 @@ class FakeRunner(Runner):
             else:
                 public_response, returncode = output
                 stdout = public_response
+            if isinstance(public_response, str):
+                normalized = self._normalize_legacy_agent_output(public_response, "\n".join(cmd))
+                if normalized != public_response:
+                    public_response = normalized
             self._maybe_write_public_response_file(cmd)
             if "--output-last-message" in cmd:
                 out_path = Path(cmd[cmd.index("--output-last-message") + 1])
@@ -312,6 +427,8 @@ class FakeRunner(Runner):
 
         if cmd[:1] == ["gemini"]:
             output, returncode = self._next_agent_output(self.gemini_outputs)
+            if isinstance(output, str):
+                output = self._normalize_legacy_agent_output(output, "\n".join(cmd))
             self._maybe_write_public_response_file(cmd)
             log_path.write_text(f"$ {' '.join(cmd)}\n\n{output}", encoding="utf-8")
             return CommandResult(cmd, cwd_path, output, "", returncode)
@@ -323,6 +440,8 @@ class FakeRunner(Runner):
 
         if cmd[:1] == ["claude"]:
             output, returncode = self._next_agent_output(self.claude_outputs)
+            if isinstance(output, str):
+                output = self._normalize_legacy_agent_output(output, "\n".join(cmd))
             return CommandResult(cmd, cwd_path, output, "", returncode)
 
         if cmd[:2] == ["codex", "exec"]:
@@ -334,6 +453,10 @@ class FakeRunner(Runner):
             else:
                 public_response, returncode = output
                 stdout = public_response
+            if isinstance(public_response, str):
+                normalized = self._normalize_legacy_agent_output(public_response, "\n".join(cmd))
+                if normalized != public_response:
+                    public_response = normalized
             if "--output-last-message" in cmd:
                 out_path = Path(cmd[cmd.index("--output-last-message") + 1])
                 out_path.write_text(public_response, encoding="utf-8")
@@ -520,6 +643,116 @@ def prior_plan_item_dispositions(*lines: str) -> str:
         return ""
     return "\n\n### Prior unresolved plan item dispositions\n" + "\n".join(
         f"- {line}" for line in lines
+    )
+
+
+def structured_pr_review(
+    *,
+    state: str = "approved",
+    summary: str = "Review complete.",
+    blocking_items: list[str] | None = None,
+    same_pr_followups: list[str] | None = None,
+    future_followups: list[str] | None = None,
+    prior_item_dispositions: list[dict[str, str]] | None = None,
+    reviewer: str = "OpenAI Codex",
+    human_requirements_resolved: bool = False,
+) -> str:
+    return (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": state,
+                "summary": summary,
+                "blocking_items": blocking_items or [],
+                "same_pr_followups": same_pr_followups or [],
+                "future_followups": future_followups or [],
+                "prior_item_dispositions": prior_item_dispositions or [],
+            }
+        )
+        + ("\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->" if human_requirements_resolved else "")
+        + f"\n<!-- AGENT_STATE: {state} -->\n-- {reviewer}"
+    )
+
+
+def structured_plan_review(
+    *,
+    state: str = "approved",
+    summary: str = "Plan review complete.",
+    blocking_plan_issues: list[str] | None = None,
+    same_plan_followups: list[str] | None = None,
+    future_followups: list[str] | None = None,
+    prior_plan_item_dispositions: list[dict[str, str]] | None = None,
+    reviewer: str = "OpenAI Codex",
+) -> str:
+    return (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": state,
+                "summary": summary,
+                "blocking_plan_issues": blocking_plan_issues or [],
+                "same_plan_followups": same_plan_followups or [],
+                "future_followups": future_followups or [],
+                "prior_plan_item_dispositions": prior_plan_item_dispositions or [],
+            }
+        )
+        + f"\n<!-- AGENT_PLAN_STATE: {state} -->\n-- {reviewer}"
+    )
+
+
+def structured_plan_revision(
+    *,
+    summary: str = "Revised the plan.",
+    prior_plan_item_dispositions: list[dict[str, str]] | None = None,
+    plan_steps: list[str] | None = None,
+    reviewer: str = "Anthropic Claude",
+    human_requirements: str = "",
+) -> str:
+    return (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_revision",
+                "state": "blocking",
+                "summary": summary,
+                "prior_plan_item_dispositions": prior_plan_item_dispositions or [],
+                "plan_steps": plan_steps or ["Update the plan.", "Run the relevant tests."],
+            }
+        )
+        + human_requirements
+        + "\n<!-- AGENT_PLAN_STATE: blocking -->\n"
+        + f"-- {reviewer}"
+    )
+
+
+def structured_coder_followup(
+    *,
+    state: str = "blocking",
+    summary: str = "Updated the PR.",
+    addressed_items: list[str] | None = None,
+    remaining_items: list[str] | None = None,
+    human_requirement_ids: list[str] | None = None,
+    checked_discussion_directly: bool = False,
+    reviewer: str = "Anthropic Claude",
+) -> str:
+    return (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": state,
+                "summary": summary,
+                "addressed_items": addressed_items or [],
+                "remaining_items": remaining_items or [],
+                "human_requirements": {
+                    "addressed_ids": human_requirement_ids or [],
+                    "checked_discussion_directly": checked_discussion_directly,
+                },
+            }
+        )
+        + f"\n<!-- AGENT_STATE: {state} -->\n-- {reviewer}"
     )
 
 
@@ -1832,54 +2065,48 @@ def test_parse_plan_item_dispositions_ignores_parenthesized_empty_placeholders()
 
 
 def test_parse_plan_review_drops_future_followups_in_blocking_reviews():
-    review = """
-    Still blocked.
+    review = structured_plan_review(
+        state="blocking",
+        summary="Still blocked.",
+        future_followups=["Do this later."],
+    )
 
-    ### Future follow-ups
-    - Do this later.
-
-    <!-- AGENT_PLAN_STATE: blocking -->
-    -- OpenAI Codex
-    """
-
-    parsed = parse_plan_review(review, reviewer="OpenAI Codex")
-
-    assert parsed.state == "blocking"
-    assert parsed.items.future == ()
-    assert parsed.items.blocking == ()
-    assert parsed.items.same_plan == ()
+    with pytest.raises(AgentLoopError, match="Blocking structured plan reviews may not include future"):
+        parse_plan_review(review, reviewer="OpenAI Codex")
 
 
 def test_parse_plan_review_rejects_future_disposition_in_blocking_reviews():
-    review = """
-    Still blocked.
-    """
-    review += prior_plan_item_dispositions("[item-1] future follow-up: maybe later")
-    review += "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"
+    review = structured_plan_review(
+        state="blocking",
+        summary="Still blocked.",
+        prior_plan_item_dispositions=[
+            {"item_id": "item-1", "disposition": "future", "note": "maybe later"}
+        ],
+    )
 
     with pytest.raises(AgentLoopError, match="Blocking plan reviews may not downgrade"):
         parse_plan_review(review, reviewer="OpenAI Codex")
 
 
 def test_parse_plan_review_rejects_contradictory_prior_plan_item_disposition():
-    review = """
-    Looks good now.
-    """
-    review += prior_plan_item_dispositions("[item-1] same-plan: none")
-    review += "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex"
+    review = structured_plan_review(
+        state="approved",
+        summary="Looks good now.",
+        prior_plan_item_dispositions=[
+            {"item_id": "item-1", "disposition": "same-plan", "note": "none"}
+        ],
+    )
 
-    with pytest.raises(AgentLoopError, match="use `resolved` when nothing remains"):
+    with pytest.raises(AgentLoopError, match="empty placeholder"):
         parse_plan_review(review, reviewer="OpenAI Codex")
 
 
 def test_parse_plan_review_rejects_approved_state_with_active_items():
-    plan_review = """
-    ### Same-plan follow-ups
-    - Add one more orchestration test.
-
-    <!-- AGENT_PLAN_STATE: approved -->
-    -- OpenAI Codex
-    """
+    plan_review = structured_plan_review(
+        state="approved",
+        summary="Needs work.",
+        same_plan_followups=["Add one more orchestration test."],
+    )
 
     with pytest.raises(AgentLoopError, match="Approved plan reviews must be fully complete"):
         parse_plan_review(plan_review, reviewer="OpenAI Codex")
@@ -1889,13 +2116,11 @@ def test_parse_plan_review_rejects_approved_state_with_active_items():
 
 
 def test_parse_plan_review_rejects_approved_state_with_blocking_items():
-    review = """
-    ### Blocking plan issues
-    - Add one more orchestration test.
-
-    <!-- AGENT_PLAN_STATE: approved -->
-    -- OpenAI Codex
-    """
+    review = structured_plan_review(
+        state="approved",
+        summary="Needs work.",
+        blocking_plan_issues=["Add one more orchestration test."],
+    )
 
     with pytest.raises(AgentLoopError, match="Approved plan reviews must be fully complete"):
         parse_plan_review(review, reviewer="OpenAI Codex")
@@ -1903,22 +2128,26 @@ def test_parse_plan_review_rejects_approved_state_with_blocking_items():
 
 @pytest.mark.parametrize("line", ["[item-1] still blocking", "[item-1] same-plan"])
 def test_parse_plan_review_rejects_approved_state_with_active_prior_disposition(line):
-    review = "Looks good now." + prior_plan_item_dispositions(line)
-    review += "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex"
+    item_id, disposition = ("item-1", "blocking") if "blocking" in line else ("item-1", "same-plan")
+    review = structured_plan_review(
+        state="approved",
+        summary="Looks good now.",
+        prior_plan_item_dispositions=[{"item_id": item_id, "disposition": disposition}],
+    )
 
     with pytest.raises(AgentLoopError, match="Approved plan reviews must be fully complete"):
         parse_plan_review(review, reviewer="OpenAI Codex")
 
 
 def test_validate_plan_review_response_rejects_duplicate_item_ids():
-    review = """
-    Still refining the plan.
-    """
-    review += prior_plan_item_dispositions(
-        "[item-1] same-plan: keep the extra regression coverage",
-        "[item-1] resolved",
+    review = structured_plan_review(
+        state="blocking",
+        summary="Still refining the plan.",
+        prior_plan_item_dispositions=[
+            {"item_id": "item-1", "disposition": "same-plan", "note": "keep the extra regression coverage"},
+            {"item_id": "item-1", "disposition": "resolved"},
+        ],
     )
-    review += "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"
 
     with pytest.raises(AgentLoopError, match="more than once: item-1"):
         _validate_plan_review_response(
@@ -1937,11 +2166,11 @@ def test_validate_plan_review_response_rejects_duplicate_item_ids():
 
 
 def test_validate_plan_review_response_rejects_unknown_item_ids():
-    review = """
-    Looks good now.
-    """
-    review += prior_plan_item_dispositions("[item-9] resolved")
-    review += "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex"
+    review = structured_plan_review(
+        state="approved",
+        summary="Looks good now.",
+        prior_plan_item_dispositions=[{"item_id": "item-9", "disposition": "resolved"}],
+    )
 
     with pytest.raises(AgentLoopError, match="unknown prior unresolved plan item IDs: item-9"):
         _validate_plan_review_response(
@@ -1959,16 +2188,15 @@ def test_validate_plan_review_response_rejects_unknown_item_ids():
         )
 
 
-def test_validate_plan_review_response_accepts_blanket_resolved_prose():
-    review = """
-    Looks good now.
-
-    ### Prior unresolved plan item dispositions
-    All carried-forward items are resolved.
-
-    <!-- AGENT_PLAN_STATE: approved -->
-    -- OpenAI Codex
-    """
+def test_validate_plan_review_response_accepts_structured_resolved_dispositions():
+    review = structured_plan_review(
+        state="approved",
+        summary="Looks good now.",
+        prior_plan_item_dispositions=[
+            {"item_id": "item-1", "disposition": "resolved"},
+            {"item_id": "item-2", "disposition": "resolved"},
+        ],
+    )
 
     parsed = _validate_plan_review_response(
         review,
@@ -1997,17 +2225,12 @@ def test_validate_plan_review_response_accepts_blanket_resolved_prose():
     ]
 
 
-def test_validate_plan_review_response_rejects_mixed_bullets_and_blanket_prose():
-    review = """
-    Looks good now.
-
-    ### Prior unresolved plan item dispositions
-    - [item-1] resolved
-    All carried-forward items are resolved.
-
-    <!-- AGENT_PLAN_STATE: approved -->
-    -- OpenAI Codex
-    """
+def test_validate_plan_review_response_rejects_missing_structured_dispositions():
+    review = structured_plan_review(
+        state="approved",
+        summary="Looks good now.",
+        prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+    )
 
     with pytest.raises(
         AgentLoopError, match="did not evaluate all prior unresolved plan items: item-2"
@@ -2163,16 +2386,15 @@ def test_parse_unresolved_item_dispositions_ignores_non_bullet_prose():
     ]
 
 
-def test_validate_review_response_accepts_blanket_resolved_prose():
-    review = """
-    LGTM.
-
-    ### Prior unresolved item dispositions
-    All prior unresolved items have been resolved.
-
-    <!-- AGENT_STATE: approved -->
-    -- OpenAI Codex
-    """
+def test_validate_review_response_accepts_structured_resolved_dispositions():
+    review = structured_pr_review(
+        state="approved",
+        summary="LGTM.",
+        prior_item_dispositions=[
+            {"item_id": "item-1", "disposition": "resolved"},
+            {"item_id": "item-2", "disposition": "resolved"},
+        ],
+    )
 
     parsed = _validate_review_response(
         review,
@@ -2212,7 +2434,7 @@ def test_validate_review_response_rejects_ambiguous_blanket_prose():
     -- OpenAI Codex
     """
 
-    with pytest.raises(AgentLoopError, match="did not evaluate all prior unresolved items: item-1"):
+    with pytest.raises(AgentLoopError, match="required structured format"):
         _validate_review_response(
             review,
             reviewer="OpenAI Codex",
@@ -2316,7 +2538,7 @@ def test_parse_review_round_trips_blocking_issues_section_without_polluting_summ
     ]
 
 
-def test_parse_plan_review_populates_summary_from_legacy_markdown():
+def test_legacy_plan_review_helpers_populate_summary_from_markdown():
     review = """
     Plan needs one more regression test.
 
@@ -2327,9 +2549,10 @@ def test_parse_plan_review_populates_summary_from_legacy_markdown():
     -- OpenAI Codex
     """
 
-    parsed = parse_plan_review(review, reviewer="OpenAI Codex")
+    items = parse_plan_review_items(review, reviewer="OpenAI Codex")
 
-    assert parsed.summary == "Plan needs one more regression test."
+    assert _review_freeform_summary_text(review) == "Plan needs one more regression test."
+    assert [item.text for item in items.same_plan] == ["Add a regression test matrix."]
 
 
 def test_parse_structured_pr_review_normalizes_v1_payload_with_footer_contract():
@@ -2467,10 +2690,17 @@ def test_parse_structured_pr_review_hard_fails_on_unsupported_schema_version():
         parse_structured_pr_review(payload, reviewer="OpenAI Codex")
 
 
-def test_parse_pr_review_falls_back_to_markdown_when_no_structured_candidate_exists():
+def test_parse_pr_review_rejects_markdown_when_no_structured_candidate_exists():
     review = "Looks good in markdown.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
 
-    parsed = parse_pr_review(review, reviewer="OpenAI Codex")
+    with pytest.raises(AgentLoopError, match="required structured format"):
+        parse_pr_review(review, reviewer="OpenAI Codex")
+
+
+def test_legacy_parse_review_still_parses_markdown_for_historical_display():
+    review = "Looks good in markdown.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+
+    parsed = parse_review(review, reviewer="OpenAI Codex")
 
     assert parsed.state == "approved"
     assert parsed.summary == "Looks good in markdown."
@@ -2957,6 +3187,13 @@ def test_validate_structured_plan_revision_accepts_v1_payload():
     assert parsed.plan_steps == ("Update protocol.py.", "Add regression tests.")
 
 
+def test_validate_plan_revision_response_rejects_marker_only_markdown():
+    with pytest.raises(AgentLoopError, match="Plan revision did not use the required structured format"):
+        _validate_plan_revision_response(
+            "Revised plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"
+        )
+
+
 @pytest.mark.parametrize(
     ("payload", "pattern"),
     [
@@ -3156,7 +3393,8 @@ def test_review_prompt_includes_prior_unresolved_items_and_disposition_instructi
     assert "no blocking issues, no Same-PR follow-ups, and no" in prompt
     assert '"kind": "pr_review"' in prompt
     assert "After the JSON object, include only:" in prompt
-    assert "`### Blocking issues`" in prompt
+    assert "Use this mandatory structured PR review format" in prompt
+    assert "Markdown fallback" not in prompt
 
 
 def test_review_prompt_indents_multiline_prior_unresolved_item_text(tmp_path):
@@ -3216,9 +3454,6 @@ def test_plan_review_prompt_includes_structured_sections_and_prior_items(tmp_pat
         ),
     )
 
-    assert "### Blocking plan issues" in prompt
-    assert "### Same-plan follow-ups" in prompt
-    assert "### Future follow-ups" in prompt
     assert "### Prior unresolved plan item dispositions" in prompt
     assert "[item-1] blocking from Anthropic Claude in round 1" in prompt
     assert "[item-2] same-plan from Google Gemini in round 1" in prompt
@@ -3231,7 +3466,8 @@ def test_plan_review_prompt_includes_structured_sections_and_prior_items(tmp_pat
     assert "no blocking plan issues, no Same-plan\nfollow-ups, and no carried-forward plan items left active" in prompt
     assert '"kind": "plan_review"' in prompt
     assert '"prior_plan_item_dispositions"' in prompt
-    assert "If you do not use the structured JSON format, use this exact markdown compatibility format instead" in prompt
+    assert "Use this mandatory structured JSON response format" in prompt
+    assert "markdown compatibility" not in prompt.lower()
 
 
 def test_plan_revision_prompt_includes_unresolved_ledger_and_required_dispositions(tmp_path):
@@ -3261,7 +3497,8 @@ def test_plan_revision_prompt_includes_unresolved_ledger_and_required_dispositio
     assert '"kind": "plan_revision"' in prompt
     assert '"plan_steps"' in prompt
     assert "normalize structured plan revisions into canonical\nmarkdown for stored plan state" in prompt
-    assert "If you do not use the structured JSON format, fall back to markdown\ncompatibility" in prompt
+    assert "Use this mandatory structured JSON response format" in prompt
+    assert "fall back to markdown" not in prompt.lower()
 
 
 def test_render_canonical_plan_steps_numbers_items():
@@ -3602,8 +3839,17 @@ def test_validate_coder_followup_response_rejects_invalid_structured_item_partit
         )
 
 
+def test_validate_coder_followup_response_rejects_marker_only_markdown():
+    with pytest.raises(AgentLoopError, match="Coder response did not use the required structured format"):
+        _validate_coder_followup_response(
+            "Updated the PR.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+            unresolved_items=(),
+            human_requirements=(),
+        )
+
+
 def test_render_public_pr_review_comment_uses_normalized_sections_and_footer():
-    parsed = parse_pr_review(
+    parsed = parse_review(
         (
             "Need one more regression test."
             + blocking_issues("Exercise the structured-resume path.")
@@ -3680,11 +3926,11 @@ def test_render_public_pr_review_comment_normalizes_markdown_and_structured_revi
     )
 
     markdown_rendered = _render_public_pr_review_comment(
-        parse_pr_review(markdown_review, reviewer="OpenAI Codex"),
+        parse_review(markdown_review, reviewer="OpenAI Codex"),
         reviewer="Codex",
         human_requirements_resolved_flag=False,
         prior_items=prior_items,
-        dispositions=parse_pr_review(markdown_review, reviewer="OpenAI Codex").dispositions,
+        dispositions=parse_review(markdown_review, reviewer="OpenAI Codex").dispositions,
     )
     structured_parsed = parse_pr_review(structured_review, reviewer="OpenAI Codex")
     structured_rendered = _render_public_pr_review_comment(
@@ -3700,7 +3946,7 @@ def test_render_public_pr_review_comment_normalizes_markdown_and_structured_revi
 
 def test_render_public_pr_review_comment_includes_visible_approved_verdict():
     rendered = _render_public_pr_review_comment(
-        parse_pr_review(
+        parse_review(
             "Looks good to me.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
             reviewer="OpenAI Codex",
         ),
@@ -4397,7 +4643,7 @@ def test_coder_followup_prompts_accept_precomputed_human_requirements_context(tm
 
 
 @pytest.mark.parametrize("builder", [build_followup_prompt, build_same_pr_followup_prompt])
-def test_coder_followup_prompts_prefer_structured_json_but_keep_markdown_fallback(tmp_path, builder):
+def test_coder_followup_prompts_require_structured_json(tmp_path, builder):
     config = make_config(tmp_path)
 
     prompt = builder(77, 2, "Fix the bug.", config)
@@ -4407,8 +4653,9 @@ def test_coder_followup_prompts_prefer_structured_json_but_keep_markdown_fallbac
     assert '"remaining_items": ["item-2"]' in prompt
     assert '"human_requirements": {' in prompt
     assert "The JSON `state` must match the `AGENT_STATE` footer exactly." in prompt
-    assert "Markdown follow-up output remains a compatibility fallback during migration" in prompt
-    assert "Legacy markdown replies must still include" in prompt
+    assert "Use this mandatory structured JSON follow-up format" in prompt
+    assert "compatibility fallback" not in prompt
+    assert "Legacy markdown replies" not in prompt
 
 
 def test_validate_human_requirements_acknowledgement_accepts_multiple_bullet_styles():
@@ -4630,7 +4877,7 @@ def test_usage_summary_estimates_tokens_when_backend_exposes_none(tmp_path):
     assert call["usage"]["mode"] == "estimated"
     assert call["usage"]["input_tokens"] == max(1, (call["usage"]["input_bytes"] + 3) // 4)
     assert call["usage"]["output_tokens"] == max(1, (call["usage"]["output_bytes"] + 3) // 4)
-    assert call["usage"]["output_chars"] == len(public_response)
+    assert call["usage"]["output_chars"] > len(public_response)
 
 
 def test_usage_summary_keeps_retry_attempts_and_marks_only_validated_call_successful(tmp_path):
@@ -6931,7 +7178,7 @@ def test_resume_pr_round_reparses_orchestrator_rendered_blocking_issues_comment(
         source_status="blocking",
     )
     rendered_review = _render_public_pr_review_comment(
-        parse_pr_review(
+        parse_review(
             "Need one more regression test before merge."
             + blocking_issues("Exercise the structured-resume path.")
             + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
@@ -8549,7 +8796,7 @@ def test_issue_loop_plan_first_accepts_initial_plan_human_requirements_acknowled
             "- Requirement 1: the plan keeps the public API unchanged.\n"
             "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
         ],
-        codex_outputs=["Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex"],
+        codex_outputs=[structured_plan_review(summary="Plan looks sound.")],
     )
     config = make_config(tmp_path)
 
@@ -8560,11 +8807,18 @@ def test_issue_loop_plan_first_revises_until_all_reviewers_approve(tmp_path):
     runner = FakeRunner(
         claude_outputs=[
             "Initial plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
-            "Revised plan with tests.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            structured_plan_revision(summary="Revised plan with tests."),
         ],
         codex_outputs=[
-            "Missing test strategy.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
-            "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+            structured_plan_review(
+                state="blocking",
+                summary="Missing test strategy.",
+                blocking_plan_issues=["Missing test strategy."],
+            ),
+            structured_plan_review(
+                summary="Plan looks sound.",
+                prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+            ),
         ],
     )
     config = make_config(tmp_path)
@@ -8594,10 +8848,15 @@ def test_issue_loop_plan_revision_stores_raw_structured_metadata(tmp_path):
             raw_structured_revision,
         ],
         codex_outputs=[
-            "### Blocking plan issues\n- Missing test strategy.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
-            "Plan looks sound."
-            + prior_plan_item_dispositions("[item-1] resolved")
-            + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+            structured_plan_review(
+                state="blocking",
+                summary="Missing test strategy.",
+                blocking_plan_issues=["Missing test strategy."],
+            ),
+            structured_plan_review(
+                summary="Plan looks sound.",
+                prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+            ),
         ],
     )
     config = make_config(tmp_path, reviewer="codex")
@@ -8626,14 +8885,20 @@ def test_issue_loop_plan_revision_rejects_missing_human_requirements_acknowledge
             "### Human requirements\n"
             "- Requirement 1: the plan preserves backward compatibility.\n"
             "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
-            "Revised plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            structured_plan_revision(summary="Revised plan."),
             "Revised plan.\n"
             f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
             "### Human requirements\n"
             "- Requirement 1: the revised plan still preserves backward compatibility.\n"
             "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
         ],
-        codex_outputs=["Missing a regression test.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"],
+        codex_outputs=[
+            structured_plan_review(
+                state="blocking",
+                summary="Missing a regression test.",
+                blocking_plan_issues=["Missing a regression test."],
+            )
+        ],
     )
     config = make_config(tmp_path)
 
@@ -8654,15 +8919,25 @@ def test_issue_loop_plan_revision_accepts_human_requirements_acknowledgement(tmp
             "### Human requirements\n"
             "- Requirement 1: the plan preserves backward compatibility.\n"
             "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
-            "Revised plan.\n"
-            f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
-            "### Human requirements\n"
-            "- Requirement 1: the revised plan still preserves backward compatibility.\n"
-            "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            structured_plan_revision(
+                summary="Revised plan.",
+                human_requirements=(
+                    f"\n{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+                    "### Human requirements\n"
+                    "- Requirement 1: the revised plan still preserves backward compatibility.\n"
+                ),
+            ),
         ],
         codex_outputs=[
-            "Missing a regression test.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
-            "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+            structured_plan_review(
+                state="blocking",
+                summary="Missing a regression test.",
+                blocking_plan_issues=["Missing a regression test."],
+            ),
+            structured_plan_review(
+                summary="Plan looks sound.",
+                prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+            ),
         ],
     )
     config = make_config(tmp_path)
@@ -8673,7 +8948,7 @@ def test_issue_loop_plan_revision_accepts_human_requirements_acknowledgement(tmp
     assert len(claude_calls) == 2
     assert "Missing a regression test." in claude_calls[1][-1]
     assert len(runner.comments) == 5
-    assert runner.comments[2].startswith("Revised plan")
+    assert runner.comments[2].startswith("## Revised plan")
 
 
 def test_issue_loop_plan_first_requires_reviewers_to_disposition_prior_items(tmp_path):

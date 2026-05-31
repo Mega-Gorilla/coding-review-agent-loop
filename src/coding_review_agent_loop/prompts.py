@@ -359,9 +359,8 @@ def _structured_coder_followup_guidance(
     human_requirements_context: CoderHumanRequirementsPromptContext,
 ) -> str:
     lines = [
-        f"Prefer this structured JSON follow-up format first so {reviewer_name} and the orchestrator can validate your response deterministically:",
+        f"Use this mandatory structured JSON follow-up format so {reviewer_name} and the orchestrator can validate your response deterministically:",
         "",
-        "```json",
         "{",
         '  "schema_version": 1,',
         '  "kind": "coder_followup",',
@@ -375,11 +374,10 @@ def _structured_coder_followup_guidance(
         "  },",
         '  "tests_run": ["python -m pytest tests/test_agent_loop.py -k followup"]',
         "}",
-        "```",
         "",
         "Required structured fields: `schema_version`, `kind`, `state`, `summary`, `addressed_items`, `remaining_items`, and `human_requirements`. `tests_run` is optional.",
-        "The response must begin with exactly one top-level JSON object and must not include prose before or between the JSON and footer.",
-        "After the JSON object, add exactly one footer `<!-- AGENT_STATE: approved|blocking -->` and your signature. The JSON `state` must match the `AGENT_STATE` footer exactly.",
+        "Your response must begin with exactly one top-level JSON object and must not include prose or code fences before or between the JSON and footer.",
+        "After the JSON object, add exactly one footer `<!-- AGENT_STATE: approved|blocking -->`, then only your standalone signature. The JSON `state` must match the `AGENT_STATE` footer exactly.",
         "Use `addressed_items` and `remaining_items` to classify the unresolved reviewer item IDs shown in this prompt. Do not omit any listed reviewer item ID and do not list any item ID more than once.",
     ]
     if human_requirements_context.block:
@@ -393,13 +391,6 @@ def _structured_coder_followup_guidance(
             lines.append(
                 "If the prompt omitted detailed signed human requirements, set `human_requirements.addressed_ids` to `[]` and `human_requirements.checked_discussion_directly` to `true` only after checking the GitHub discussion directly."
             )
-    lines.extend(
-        [
-            "",
-            "Markdown follow-up output remains a compatibility fallback during migration when you are not using the structured JSON format.",
-            f"Legacy markdown replies must still include `{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}` and a `### Human requirements` section when signed human reviewer requirements are present.",
-        ]
-    )
     return "\n".join(lines) + "\n"
 
 
@@ -668,9 +659,8 @@ Plan from {coder_name}:
 {plan}
 
 Review the plan for correctness, architecture fit, missing edge cases, test
-strategy, and ambiguity. Prefer this structured JSON response format first:
+strategy, and ambiguity. Use this mandatory structured JSON response format:
 
-```json
 {{
   "schema_version": 1,
   "kind": "plan_review",
@@ -685,18 +675,6 @@ strategy, and ambiguity. Prefer this structured JSON response format first:
 }}
 <!-- AGENT_PLAN_STATE: approved -->
 -- {reviewer_signature}
-```
-
-If you do not use the structured JSON format, use this exact markdown compatibility format instead:
-
-### Blocking plan issues
-- Required corrections that must be resolved before the plan can be approved.
-
-### Same-plan follow-ups
-- Required current-plan refinements that should be folded into the next plan revision before approval.
-
-### Future follow-ups
-- Ideas worth tracking separately that are not required for the current implementation plan.
 
 Blocking plan issues and Same-plan follow-ups both prevent approval. Same-plan
 follow-ups may appear only in blocking plan reviews. Future follow-ups are
@@ -731,8 +709,8 @@ Use approved only if there are no blocking plan issues, no Same-plan
 follow-ups, and no carried-forward plan items left active for this planning
 round. Structured responses must start with one top-level JSON object, place
 the `AGENT_PLAN_STATE` footer immediately after that payload, and end with only
-your standalone signature. If you fall back to markdown, keep the exact section
-headings above. Always sign your response:
+your standalone signature. Do not include prose or code fences before the JSON
+object. Always sign your response:
 -- {reviewer_signature}
 """
 
@@ -856,9 +834,8 @@ Then provide the revised implementation plan with concrete file areas, edge
 cases, and tests. Use `same-plan`, never `same-pr`, when describing plan-only
 current-round refinements.
 
-Prefer this structured JSON response format first:
+Use this mandatory structured JSON response format:
 
-```json
 {{
   "schema_version": 1,
   "kind": "plan_revision",
@@ -875,13 +852,13 @@ Prefer this structured JSON response format first:
 }}
 <!-- AGENT_PLAN_STATE: blocking -->
 -- {coder_signature}
-```
 
 The orchestrator will normalize structured plan revisions into canonical
 markdown for stored plan state, reviewer prompts, subject hashing, and resume.
-If you do not use the structured JSON format, fall back to markdown
-compatibility by keeping the `### Prior plan review item dispositions` section
-and then providing the full revised plan in markdown prose.
+Your response must start with exactly one top-level JSON object, with no prose
+or code fences before it. Put the `AGENT_PLAN_STATE` footer immediately after
+the JSON, make the footer state match the JSON state, and include only your
+standalone signature after the footer.
 
 This is planning round {round_number}. End your final response with exactly one
 planning marker:
@@ -1112,12 +1089,6 @@ instead when small or local cleanup should be fixed before merge.
 The legacy heading `### Non-blocking follow-ups` is still accepted as future
 follow-ups for compatibility, but prefer `### Future follow-ups`.
 """
-    markdown_fallback_sections = ["- summary paragraph", "- `### Blocking issues`"]
-    if config.approved_followups.startswith("fix-and-"):
-        markdown_fallback_sections.append("- `### Same-PR follow-ups`")
-    if config.approved_followups != "ignore":
-        markdown_fallback_sections.append("- `### Future follow-ups`")
-    markdown_fallback_sections.append("- `### Prior unresolved item dispositions`")
     return f"""Review pull request #{pr_number} in {config.repo} (round {round_number}).
 
 PR metadata:
@@ -1168,10 +1139,9 @@ Use blocking only for issues that should prevent merge.
 All configured reviewers ({reviewer_group}) must approve in the same round for
 the pull request to be considered approved.
 
-Prefer this structured PR review format. Start your response with exactly one
-top-level JSON object and no prose before it:
+Use this mandatory structured PR review format. Start your response with
+exactly one top-level JSON object and no prose or code fences before it:
 
-```json
 {{
   "schema_version": 1,
   "kind": "pr_review",
@@ -1185,7 +1155,6 @@ top-level JSON object and no prose before it:
     {{"item_id": "item-2", "disposition": "future", "note": "brief reason"}}
   ]
 }}
-```
 
 After the JSON object, include only:
 1. optional `<!-- HUMAN_REQUIREMENTS_RESOLVED -->`
@@ -1195,10 +1164,6 @@ After the JSON object, include only:
 Do not include any extra prose, headings, bullets, or fenced blocks before or
 after that structured response. The footer AGENT_STATE must match the JSON
 `state`.
-
-Markdown fallback remains available for compatibility when you do not use the
-structured format. In markdown reviews, use this section order:
-{chr(10).join(markdown_fallback_sections)}
 
 End your final response with exactly one marker:
 

@@ -15,13 +15,14 @@ from .agents.gemini import _parse_gemini_payload
 
 _logger = logging.getLogger(__name__)
 
-# v9 prompt — fixes coder_followup repair bugs:
+# v10 prompt — adds plan_revision repair and keeps coder_followup repair bugs fixed:
 #   - fenced JSON (```json ... ```) now explicitly handled
 #   - addressed_items vs human_requirements.addressed_ids distinction clarified
+#   - plan_revision / plan_steps inputs choose the plan revision schema
 # Uses str.replace("{raw_response}", raw, 1) for substitution because the prompt
 # itself contains literal { } characters in the JSON examples.
 _REPAIR_PROMPT = """\
-You are a format-repair assistant. An AI agent produced a code review or coder follow-up that failed strict schema validation. Extract its intent and reformat it into one of these three valid formats.
+You are a format-repair assistant. An AI agent produced a code review, plan review, plan revision, or coder follow-up that failed strict schema validation. Extract its intent and reformat it into one of these four valid formats.
 
 ## Valid Format A — PR Review:
 
@@ -75,8 +76,23 @@ You are a format-repair assistant. An AI agent produced a code review or coder f
 <!-- AGENT_STATE: approved -->
 -- <Coder Name>
 
-## ARRAY FIELD TYPES (Format A/B):
-- blocking_items, same_pr_followups, future_followups, blocking_plan_issues, same_plan_followups -> STRINGS
+## Valid Format D — Plan Revision:
+
+{
+  "schema_version": 1,
+  "kind": "plan_revision",
+  "state": "blocking",
+  "summary": "<short summary>",
+  "prior_plan_item_dispositions": [
+    {"item_id": "item-1", "disposition": "resolved", "note": "covered by the revised plan"}
+  ],
+  "plan_steps": ["Update the parser.", "Add regression tests."]
+}
+<!-- AGENT_PLAN_STATE: blocking -->
+-- <Coder Name>
+
+## ARRAY FIELD TYPES (Format A/B/D):
+- blocking_items, same_pr_followups, future_followups, blocking_plan_issues, same_plan_followups, plan_steps -> STRINGS
 - prior_item_dispositions, prior_plan_item_dispositions -> OBJECTS {"item_id":..., "disposition":..., "note":...}
 - disposition values: "resolved", "blocking", "same-pr"/"same-plan", or "future" ONLY
 
@@ -97,8 +113,12 @@ You are a format-repair assistant. An AI agent produced a code review or coder f
 ### APPROVED: remaining_items=[]
 ### BLOCKING: remaining_items is non-empty
 
+## STATE RULES (Format D):
+### BLOCKING only. plan_revision.state must be "blocking" and must include at least one plan_steps string.
+
 ## FORMAT SELECTION:
 - Use Format C if the original contains "coder_followup" or "addressed_items" or "remaining_items".
+- Use Format D if the original contains "plan_revision" or "plan_steps".
 - Use Format B if the original contains AGENT_PLAN_STATE / blocking_plan_issues / same_plan_followups / prior_plan_item_dispositions.
 - Otherwise use Format A.
 
@@ -192,7 +212,7 @@ Notes:
 
 ## FORMAT:
 1. Start DIRECTLY with { — no prose, no markdown fences.
-2. After }: <!-- AGENT_STATE: X --> (pr_review or coder_followup) OR <!-- AGENT_PLAN_STATE: X --> (plan_review). DIFFERENT MARKERS.
+2. After }: <!-- AGENT_STATE: X --> (pr_review or coder_followup) OR <!-- AGENT_PLAN_STATE: X --> (plan_review or plan_revision). DIFFERENT MARKERS.
 3. JSON "state" matches X. Then: -- Agent Name. STOP. Nothing else.
 
 Output ONLY the repaired response. No explanations.
