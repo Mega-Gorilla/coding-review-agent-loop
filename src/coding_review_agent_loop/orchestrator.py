@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import base64
 import datetime
-import hashlib
-import json
 import re
 import sys
 from collections.abc import Callable, Sequence
@@ -24,9 +21,7 @@ from .config import (
 from .errors import AgentLoopError, QuotaResetExceededError
 from .github import (
     IssueContext,
-    PullRequestChecks,
     PullRequestReviewContext,
-    create_issue,
     get_issue_context,
     get_pr_checks,
     get_pr_review_context,
@@ -56,33 +51,19 @@ from .prompts import (
     render_coder_human_requirements_prompt_context,
 )
 from .protocol import (
-    ANY_HEADING_RE,
-    FUTURE_FOLLOWUP_HEADING_RE,
-    HUMAN_REQUIREMENTS_HEADING_RE,
-    LEGACY_FOLLOWUP_HEADING_RE,
-    PLAN_STATE_RE,
     ParsedPlanReview,
-    HTML_COMMENT_RE,
-    PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE,
-    PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE,
-    SAME_PR_FOLLOWUP_HEADING_RE,
-    SIGNATURE_RE,
     ParsedReview,
     ReviewItemDisposition,
-    StructuredCoderFollowup,
     StructuredPlanRevision,
     UnresolvedReviewItem,
     human_requirements_resolved,
     is_clarification_request,
     parse_agent_state,
-    parse_pr_review,
     parse_plan_review,
     parse_plan_state,
     parse_pr_number,
     review_freeform_summary_text,
     validate_human_requirements_acknowledgement,
-    validate_structured_coder_followup,
-    validate_structured_human_requirements_acknowledgement,
     validate_structured_plan_revision,
 )
 from .protocol import ApprovedFollowup, parse_review
@@ -90,17 +71,94 @@ from .repair import attempt_repair
 from .runner import Runner
 from .usage import RunUsageContext, UsageMetadata, estimate_usage
 from .workdirs import active_workdir
-
-MAX_APPROVED_FOLLOWUP_ISSUES = 3
-HUMAN_REQUIREMENTS_ACK_ITEM_ID = "item-human-requirements-acknowledgement"
-APPROVED_FOLLOWUP_MARKER_RE = re.compile(
-    r"<!--\s*AGENT_APPROVED_FOLLOWUPS:\s*pr=(?P<pr>\d+)\s+head=(?P<head>\S+)\s+mode=(?P<mode>[a-z-]+)\s*-->",
-    re.I,
+from .checks import (
+    _format_pr_checks_comment,
+    _pr_check_blocking_review,
+    _pr_check_details,
+    run_optional_tests,
+    run_pre_review_tests,
 )
-ITEM_SUMMARY_LIMIT = 100
-PUBLIC_REVIEWER_NAME_BY_DISPLAY = {
-    agent_display_name(agent): agent_signature(agent) for agent in ("claude", "codex", "gemini")
-}
+from .comment_rendering import (
+    ITEM_SUMMARY_LIMIT,
+    PUBLIC_REVIEWER_NAME_BY_DISPLAY,
+    _append_before_trailing_metadata,
+    _format_unresolved_item_label,
+    _extract_plan_revision_human_requirements_block,
+    _item_label_status,
+    _normalize_item_summary,
+    _public_reviewer_name,
+    _render_disposition_status,
+    _render_prior_dispositions_section,
+    _render_public_plan_review_comment,
+    _render_public_plan_revision_comment,
+    _render_public_pr_review_comment,
+    _render_public_review_comment,
+    _replace_structured_section,
+    _review_freeform_summary_text,
+    render_canonical_plan_revision,
+    render_canonical_plan_steps,
+)
+from .followups import (
+    APPROVED_FOLLOWUP_MARKER_RE,
+    GroupedApprovedFollowup,
+    MAX_APPROVED_FOLLOWUP_ISSUES,
+    _append_approved_followups_marker,
+    _approved_followup_from_unresolved_item,
+    _approved_followups_marker,
+    _create_approved_followup_issues,
+    _dedupe_approved_followups,
+    _followup_heading_key,
+    _followup_issue_body,
+    _followup_issue_title,
+    _format_approved_followup_summary,
+    _format_created_followup_issue_summary,
+    _format_plan_approval_summary_with_followups,
+    _format_same_pr_followups,
+    _has_approved_followups_marker,
+    _normalize_followup_key,
+    _publish_approved_followups,
+)
+from .round_state import (
+    PostedRoundMetadata,
+    PostedRoundRecord,
+    ROUND_RESUME_MARKER_RE,
+    ResumedRoundSelection,
+    ResumedReviewRound,
+    _attach_round_metadata,
+    _decode_round_metadata,
+    _deserialize_disposition,
+    _deserialize_unresolved_item,
+    _encode_round_metadata,
+    _extract_round_metadata_records,
+    _max_unresolved_item_number_from_records,
+    _plan_subject,
+    _prior_item_ledger_signature,
+    _resume_plan_round,
+    _resume_pr_round,
+    _select_current_round_records,
+    _serialize_disposition,
+    _serialize_unresolved_item,
+    _strip_round_metadata,
+)
+from .unresolved_items import (
+    ALL_RESOLVED_PROSE_RE,
+    HUMAN_REQUIREMENTS_ACK_ITEM_ID,
+    _apply_unresolved_item_dispositions,
+    _clear_human_requirements_ack_item,
+    _format_same_pr_unresolved_items,
+    _format_unresolved_items_for_coder,
+    _maybe_fill_resolved_dispositions_from_prose,
+    _next_unresolved_item,
+    _normalize_disposition_section_prose,
+    _record_prior_item_disposition,
+    _reconcile_human_requirements_ack_item,
+    _upsert_human_requirements_ack_item,
+    _validate_coder_followup_response,
+    _validate_plan_review_response,
+    _validate_review_response,
+    _validate_structured_coder_followup_items,
+)
+
 
 TRANSIENT_AGENT_OUTPUT_RE = re.compile(
     r"Invalid stream|empty response|malformed tool call|"
@@ -121,12 +179,6 @@ NON_RETRYABLE_AGENT_OUTPUT_RE = re.compile(
 )
 NEAR_MISS_AGENT_MARKER_RE = re.compile(
     r"(?m)^[ \t]*AGENT_(?:PLAN_)?STATE:[ \t]*(?:approved|blocking)[ \t.]*$",
-    re.I,
-)
-ROUND_RESUME_MARKER_RE = re.compile(r"<!--\s*AGENT_LOOP_META:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->", re.I)
-ALL_RESOLVED_PROSE_RE = re.compile(
-    r"^all (?:prior items|listed items|carried-forward items) are resolved\.?$"
-    r"|^all prior unresolved items have been resolved\.?$",
     re.I,
 )
 
@@ -239,68 +291,6 @@ def _format_reset_duration(seconds: int) -> str:
 def _format_reset_at_utc(seconds: int) -> str:
     reset_time = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=seconds)
     return reset_time.strftime("%H:%M UTC")
-
-
-def _normalize_disposition_section_prose(text: str) -> str:
-    return " ".join(text.strip().split())
-
-
-def _maybe_fill_resolved_dispositions_from_prose(
-    parsed: ParsedReview | ParsedPlanReview,
-    *,
-    reviewer: str,
-    unresolved_items: Sequence[UnresolvedReviewItem],
-) -> tuple[ReviewItemDisposition, ...]:
-    if not unresolved_items or parsed.dispositions:
-        return parsed.dispositions
-    normalized = _normalize_disposition_section_prose(parsed.raw_dispositions_text)
-    if not normalized or not ALL_RESOLVED_PROSE_RE.fullmatch(normalized):
-        return parsed.dispositions
-    return tuple(
-        ReviewItemDisposition(
-            item_id=item.item_id,
-            reviewer=reviewer,
-            disposition="resolved",
-        )
-        for item in unresolved_items
-    )
-
-
-@dataclass(frozen=True)
-class PostedRoundMetadata:
-    flow: str
-    role: str
-    agent: str
-    round_number: int
-    subject: str
-    prior_items: tuple[UnresolvedReviewItem, ...] = ()
-    dispositions: tuple[ReviewItemDisposition, ...] = ()
-    new_items: tuple[UnresolvedReviewItem, ...] = ()
-    state: str | None = None
-    canonical_plan: str | None = None
-
-
-@dataclass(frozen=True)
-class PostedRoundRecord:
-    index: int
-    metadata: PostedRoundMetadata
-    body: str
-
-
-@dataclass(frozen=True)
-class ResumedRoundSelection:
-    anchor_record: PostedRoundRecord
-    current_round_records: tuple[PostedRoundRecord, ...]
-
-
-@dataclass(frozen=True)
-class ResumedReviewRound:
-    round_number: int
-    prior_items: tuple[UnresolvedReviewItem, ...]
-    coder_output: str | None
-    completed_reviews: tuple[PostedRoundRecord, ...]
-    next_unresolved_item_number: int
-
 
 def _agent_log_context(log_paths: Sequence[object]) -> str:
     paths = [str(path) for path in log_paths if path is not None]
@@ -542,147 +532,6 @@ def _require_plan_state_or_clarification(text: str) -> str:
     if is_clarification_request(text):
         return "clarification"
     return parse_plan_state(text)
-
-
-@dataclass(frozen=True)
-class GroupedApprovedFollowup:
-    text: str
-    items: tuple[ApprovedFollowup, ...]
-
-    @property
-    def reviewers(self) -> tuple[str, ...]:
-        reviewers: list[str] = []
-        for item in self.items:
-            if item.reviewer not in reviewers:
-                reviewers.append(item.reviewer)
-        return tuple(reviewers)
-
-
-def _next_unresolved_item(
-    *,
-    item_number: int,
-    reviewer: str,
-    source_round: int,
-    text: str,
-    status: str,
-    notes: Sequence[str] = (),
-) -> UnresolvedReviewItem:
-    return UnresolvedReviewItem(
-        item_id=f"item-{item_number}",
-        reviewer=reviewer,
-        source_round=source_round,
-        text=text,
-        status=status,
-        source_status=status,
-        notes=tuple(notes),
-    )
-
-
-def _validate_review_response(
-    text: str,
-    *,
-    reviewer: str,
-    unresolved_items: Sequence[UnresolvedReviewItem],
-) -> ParsedReview:
-    parsed = parse_pr_review(text, reviewer=reviewer)
-    if not unresolved_items:
-        return parsed
-
-    unresolved_by_id = {item.item_id: item for item in unresolved_items}
-    dispositions = _maybe_fill_resolved_dispositions_from_prose(
-        parsed,
-        reviewer=reviewer,
-        unresolved_items=unresolved_items,
-    )
-    disposition_ids = [item.item_id for item in dispositions]
-    duplicates = sorted({item_id for item_id in disposition_ids if disposition_ids.count(item_id) > 1})
-    if duplicates:
-        raise AgentLoopError(
-            "Review listed prior unresolved items more than once: " + ", ".join(duplicates)
-        )
-    unknown = sorted(set(disposition_ids) - set(unresolved_by_id))
-    if unknown:
-        raise AgentLoopError(
-            "Review referenced unknown prior unresolved item IDs: " + ", ".join(unknown)
-        )
-    missing = sorted(set(unresolved_by_id) - set(disposition_ids))
-    if missing:
-        raise AgentLoopError(
-            "Review did not evaluate all prior unresolved items: " + ", ".join(missing)
-        )
-    return ParsedReview(
-        state=parsed.state,
-        summary=parsed.summary,
-        blocking_items=parsed.blocking_items,
-        followups=parsed.followups,
-        dispositions=dispositions,
-        raw_dispositions_text=parsed.raw_dispositions_text,
-    )
-
-
-def _upsert_human_requirements_ack_item(
-    unresolved_items: Sequence[UnresolvedReviewItem],
-    *,
-    source_round: int,
-    text: str,
-) -> list[UnresolvedReviewItem]:
-    retained = [
-        item for item in unresolved_items if item.item_id != HUMAN_REQUIREMENTS_ACK_ITEM_ID
-    ]
-    retained.append(
-        UnresolvedReviewItem(
-            item_id=HUMAN_REQUIREMENTS_ACK_ITEM_ID,
-            reviewer="Orchestrator",
-            source_round=source_round,
-            text=text,
-            status="blocking",
-            source_status="blocking",
-        )
-    )
-    return retained
-
-
-def _clear_human_requirements_ack_item(
-    unresolved_items: Sequence[UnresolvedReviewItem],
-) -> list[UnresolvedReviewItem]:
-    return [item for item in unresolved_items if item.item_id != HUMAN_REQUIREMENTS_ACK_ITEM_ID]
-
-
-def _reconcile_human_requirements_ack_item(
-    unresolved_items: Sequence[UnresolvedReviewItem],
-    *,
-    coder_output: str | None,
-    human_requirements,
-    source_round: int,
-) -> list[UnresolvedReviewItem]:
-    if coder_output is None:
-        return list(unresolved_items)
-
-    prompt_context = render_coder_human_requirements_prompt_context(human_requirements)
-    try:
-        structured_followup = validate_structured_coder_followup(coder_output)
-        if structured_followup is not None:
-            validate_structured_human_requirements_acknowledgement(
-                structured_followup.human_requirements.addressed_ids,
-                checked_discussion_directly=structured_followup.human_requirements.checked_discussion_directly,
-                surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
-                requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
-            )
-        else:
-            validate_human_requirements_acknowledgement(
-                coder_output,
-                surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
-                requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
-            )
-    except AgentLoopError as exc:
-        return _upsert_human_requirements_ack_item(
-            unresolved_items,
-            source_round=source_round,
-            text=str(exc),
-        )
-    return _clear_human_requirements_ack_item(unresolved_items)
-
-
 def _validate_response_with_human_requirements(
     text: str,
     *,
@@ -714,842 +563,11 @@ def _merge_human_requirements(
     return tuple(sorted(combined, key=lambda requirement: requirement.created_at or ""))
 
 
-def _validate_structured_coder_followup_items(
-    parsed: StructuredCoderFollowup,
-    *,
-    unresolved_items: Sequence[UnresolvedReviewItem],
-) -> None:
-    expected_ids = [
-        item.item_id for item in unresolved_items if item.item_id != HUMAN_REQUIREMENTS_ACK_ITEM_ID
-    ]
-    listed_ids = [*parsed.addressed_items, *parsed.remaining_items]
-    duplicates = sorted({item_id for item_id in listed_ids if listed_ids.count(item_id) > 1})
-    if duplicates:
-        raise AgentLoopError(
-            "Coder follow-up listed unresolved reviewer item IDs more than once: "
-            + ", ".join(duplicates)
-        )
-    unknown = sorted(set(listed_ids) - set(expected_ids))
-    if unknown:
-        raise AgentLoopError(
-            "Coder follow-up referenced unknown unresolved reviewer item IDs: "
-            + ", ".join(unknown)
-        )
-    missing = sorted(set(expected_ids) - set(listed_ids))
-    if missing:
-        raise AgentLoopError(
-            "Coder follow-up did not classify all unresolved reviewer items into addressed or remaining: "
-            + ", ".join(missing)
-        )
-
-
-def _validate_coder_followup_response(
-    text: str,
-    *,
-    unresolved_items: Sequence[UnresolvedReviewItem],
-    human_requirements,
-) -> StructuredCoderFollowup | str:
-    prompt_context = render_coder_human_requirements_prompt_context(human_requirements)
-    structured_followup = validate_structured_coder_followup(text)
-    if structured_followup is not None:
-        _validate_structured_coder_followup_items(
-            structured_followup,
-            unresolved_items=unresolved_items,
-        )
-        validate_structured_human_requirements_acknowledgement(
-            structured_followup.human_requirements.addressed_ids,
-            checked_discussion_directly=structured_followup.human_requirements.checked_discussion_directly,
-            surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
-            requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
-        )
-        return structured_followup
-
-    state = parse_agent_state(text)
-    validate_human_requirements_acknowledgement(
-        text,
-        surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
-        requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
-    )
-    return state
-
-
-def _apply_unresolved_item_dispositions(
-    unresolved_items: Sequence[UnresolvedReviewItem],
-    dispositions_by_item: dict[str, list[ReviewItemDisposition]],
-    *,
-    same_status: str = "same-pr",
-    retain_future: bool = True,
-) -> tuple[list[UnresolvedReviewItem], list[UnresolvedReviewItem]]:
-    next_unresolved: list[UnresolvedReviewItem] = []
-    future_items: list[UnresolvedReviewItem] = []
-    for item in unresolved_items:
-        dispositions = dispositions_by_item.get(item.item_id, [])
-        if not dispositions:
-            next_unresolved.append(item)
-            continue
-        text = item.text
-        notes = list(item.notes)
-        outcomes = {disposition.disposition for disposition in dispositions}
-        preserve_note_in_text = bool({"blocking", same_status} & outcomes) or (
-            "future" in outcomes and not retain_future
-        )
-        for disposition in dispositions:
-            if disposition.note:
-                note_text = f"{disposition.reviewer}: {disposition.note}"
-                if preserve_note_in_text:
-                    update_line = f"Update from {note_text}"
-                    if update_line not in text:
-                        text = f"{text.rstrip()}\n\n{update_line}"
-                if note_text not in notes:
-                    notes.append(note_text)
-        if "blocking" in outcomes:
-            next_unresolved.append(
-                UnresolvedReviewItem(
-                    item_id=item.item_id,
-                    reviewer=item.reviewer,
-                    source_round=item.source_round,
-                    text=text,
-                    status="blocking",
-                    source_status=item.source_status,
-                    notes=tuple(notes),
-                )
-            )
-            continue
-        if same_status in outcomes:
-            next_unresolved.append(
-                UnresolvedReviewItem(
-                    item_id=item.item_id,
-                    reviewer=item.reviewer,
-                    source_round=item.source_round,
-                    text=text,
-                    status=same_status,
-                    source_status=item.source_status,
-                    notes=tuple(notes),
-                )
-            )
-            continue
-        if "future" in outcomes:
-            future_item = UnresolvedReviewItem(
-                item_id=item.item_id,
-                reviewer=item.reviewer,
-                source_round=item.source_round,
-                text=text,
-                status="future",
-                source_status=item.source_status,
-                notes=tuple(notes),
-            )
-            if retain_future:
-                next_unresolved.append(future_item)
-            else:
-                future_items.append(future_item)
-    return next_unresolved, future_items
-
-
-def _approved_followup_from_unresolved_item(item: UnresolvedReviewItem) -> ApprovedFollowup:
-    text = item.text
-    for note in item.notes:
-        update_line = f"Update from {note}"
-        if update_line not in text:
-            text = f"{text.rstrip()}\n\n{update_line}"
-    return ApprovedFollowup(reviewer=item.reviewer, text=text)
-
-
-def _validate_plan_review_response(
-    text: str,
-    *,
-    reviewer: str,
-    unresolved_items: Sequence[UnresolvedReviewItem],
-) -> ParsedPlanReview:
-    parsed = parse_plan_review(text, reviewer=reviewer)
-    if not unresolved_items:
-        return parsed
-
-    unresolved_by_id = {item.item_id: item for item in unresolved_items}
-    dispositions = _maybe_fill_resolved_dispositions_from_prose(
-        parsed,
-        reviewer=reviewer,
-        unresolved_items=unresolved_items,
-    )
-    disposition_ids = [item.item_id for item in dispositions]
-    duplicates = sorted({item_id for item_id in disposition_ids if disposition_ids.count(item_id) > 1})
-    if duplicates:
-        raise AgentLoopError(
-            "Plan review listed prior unresolved plan items more than once: "
-            + ", ".join(duplicates)
-        )
-    unknown = sorted(set(disposition_ids) - set(unresolved_by_id))
-    if unknown:
-        raise AgentLoopError(
-            "Plan review referenced unknown prior unresolved plan item IDs: "
-            + ", ".join(unknown)
-        )
-    missing = sorted(set(unresolved_by_id) - set(disposition_ids))
-    if missing:
-        raise AgentLoopError(
-            "Plan review did not evaluate all prior unresolved plan items: "
-            + ", ".join(missing)
-        )
-    return ParsedPlanReview(
-        state=parsed.state,
-        summary=parsed.summary,
-        items=parsed.items,
-        dispositions=dispositions,
-        raw_dispositions_text=parsed.raw_dispositions_text,
-    )
-
-
 def _validate_plan_revision_response(text: str) -> StructuredPlanRevision | str:
     parsed = validate_structured_plan_revision(text)
     if parsed is not None:
         return parsed
     return parse_plan_state(text)
-
-
-def _review_freeform_summary_text(text: str) -> str:
-    return review_freeform_summary_text(text)
-
-
-def _normalize_item_summary(text: str, *, limit: int = ITEM_SUMMARY_LIMIT) -> str:
-    for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            continue
-        stripped = re.sub(r"^(?:[-*+]\s+|\d+[.)]\s+)+", "", stripped)
-        stripped = " ".join(stripped.split())
-        if len(stripped) <= limit:
-            return stripped
-        if limit <= 3:
-            return stripped[:limit]
-        return stripped[: limit - 3].rstrip() + "..."
-    return "No summary provided."
-
-
-def _item_label_status(item: UnresolvedReviewItem) -> str:
-    return item.source_status or item.status
-
-
-def _public_reviewer_name(name: str) -> str:
-    return PUBLIC_REVIEWER_NAME_BY_DISPLAY.get(name, name)
-
-
-def _format_unresolved_item_label(item: UnresolvedReviewItem) -> str:
-    summary = _normalize_item_summary(item.text)
-    status = _item_label_status(item)
-    if item.item_id == HUMAN_REQUIREMENTS_ACK_ITEM_ID:
-        return f"Human-requirements acknowledgement item, round {item.source_round}: {summary}"
-    phrases = {
-        "blocking": "Blocking issue",
-        "same-pr": "Same-PR follow-up",
-        "same-plan": "Same-plan follow-up",
-        "future": "Future follow-up",
-    }
-    phrase = phrases.get(status, "Unresolved item")
-    reviewer_name = _public_reviewer_name(item.reviewer)
-    return f"{phrase} from {reviewer_name}, round {item.source_round}: {summary}"
-
-
-def _render_disposition_status(disposition: ReviewItemDisposition) -> str:
-    labels = {
-        "resolved": "resolved",
-        "blocking": "still blocking",
-        "same-pr": "same-pr",
-        "same-plan": "same-plan",
-        "future": "future follow-up",
-    }
-    rendered = labels.get(disposition.disposition, disposition.disposition)
-    if disposition.note:
-        rendered = f"{rendered}: {disposition.note}"
-    return rendered
-
-
-def _render_prior_dispositions_section(
-    *,
-    heading: str,
-    prior_items: Sequence[UnresolvedReviewItem],
-    dispositions: Sequence[ReviewItemDisposition],
-) -> str:
-    item_by_id = {item.item_id: item for item in prior_items}
-    lines = [heading]
-    for disposition in dispositions:
-        item = item_by_id[disposition.item_id]
-        lines.append(
-            f"- [{disposition.item_id}] {_format_unresolved_item_label(item)}"
-            f" -> {_render_disposition_status(disposition)}"
-        )
-    return "\n".join(lines)
-
-
-def _replace_structured_section(
-    body: str,
-    *,
-    heading_re: re.Pattern[str],
-    replacement: str,
-) -> str:
-    lines = body.splitlines()
-    output: list[str] = []
-    index = 0
-    replaced = False
-    while index < len(lines):
-        line = lines[index]
-        if not replaced and heading_re.match(line):
-            output.extend(replacement.splitlines())
-            replaced = True
-            index += 1
-            while index < len(lines):
-                current = lines[index]
-                if (
-                    PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE.match(current)
-                    or PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE.match(current)
-                    or (
-                        current.strip()
-                        and (
-                            ANY_HEADING_RE.match(current)
-                            or HTML_COMMENT_RE.match(current)
-                            or SIGNATURE_RE.match(current)
-                        )
-                    )
-                ):
-                    break
-                index += 1
-            continue
-        output.append(line)
-        index += 1
-    return "\n".join(output) if replaced else body
-
-
-def _append_before_trailing_metadata(body: str, section: str) -> str:
-    lines = body.splitlines()
-    index = len(lines)
-    while index > 0 and not lines[index - 1].strip():
-        index -= 1
-    metadata_start = index
-    while metadata_start > 0:
-        candidate = lines[metadata_start - 1]
-        if not candidate.strip() or HTML_COMMENT_RE.match(candidate) or SIGNATURE_RE.match(candidate):
-            metadata_start -= 1
-            continue
-        break
-    if metadata_start == index:
-        return body.rstrip() + "\n\n" + section
-    prefix = "\n".join(lines[:metadata_start]).rstrip()
-    suffix = "\n".join(lines[metadata_start:]).lstrip("\n")
-    parts = [prefix, section, suffix]
-    return "\n\n".join(part for part in parts if part)
-
-
-def _serialize_unresolved_item(item: UnresolvedReviewItem) -> dict[str, object]:
-    return {
-        "item_id": item.item_id,
-        "reviewer": item.reviewer,
-        "source_round": item.source_round,
-        "text": item.text,
-        "status": item.status,
-        "source_status": item.source_status,
-        "notes": list(item.notes),
-    }
-
-
-def _deserialize_unresolved_item(payload: object) -> UnresolvedReviewItem:
-    if not isinstance(payload, dict):
-        raise AgentLoopError("Invalid round metadata unresolved-item payload.")
-    raw_notes = payload.get("notes") or []
-    notes = tuple(str(note) for note in raw_notes) if isinstance(raw_notes, list) else ()
-    return UnresolvedReviewItem(
-        item_id=str(payload["item_id"]),
-        reviewer=str(payload["reviewer"]),
-        source_round=int(payload["source_round"]),
-        text=str(payload["text"]),
-        status=str(payload["status"]),
-        source_status=str(payload["source_status"]) if payload.get("source_status") is not None else None,
-        notes=notes,
-    )
-
-
-def _serialize_disposition(disposition: ReviewItemDisposition) -> dict[str, object]:
-    return {
-        "item_id": disposition.item_id,
-        "reviewer": disposition.reviewer,
-        "disposition": disposition.disposition,
-        "note": disposition.note,
-    }
-
-
-def _deserialize_disposition(payload: object) -> ReviewItemDisposition:
-    if not isinstance(payload, dict):
-        raise AgentLoopError("Invalid round metadata disposition payload.")
-    return ReviewItemDisposition(
-        item_id=str(payload["item_id"]),
-        reviewer=str(payload["reviewer"]),
-        disposition=str(payload["disposition"]),
-        note=str(payload["note"]) if payload.get("note") is not None else None,
-    )
-
-
-def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
-    payload = {
-        "flow": metadata.flow,
-        "role": metadata.role,
-        "agent": metadata.agent,
-        "round_number": metadata.round_number,
-        "subject": metadata.subject,
-        "prior_items": [_serialize_unresolved_item(item) for item in metadata.prior_items],
-        "dispositions": [_serialize_disposition(item) for item in metadata.dispositions],
-        "new_items": [_serialize_unresolved_item(item) for item in metadata.new_items],
-        "state": metadata.state,
-        "canonical_plan": metadata.canonical_plan,
-    }
-    encoded = base64.urlsafe_b64encode(
-        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    )
-    return encoded.decode("ascii")
-
-
-def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
-    try:
-        raw = base64.urlsafe_b64decode(encoded.encode("ascii"))
-        payload = json.loads(raw.decode("utf-8"))
-        if not isinstance(payload, dict):
-            raise AgentLoopError("Invalid AGENT_LOOP_META payload.")
-        return PostedRoundMetadata(
-            flow=str(payload["flow"]),
-            role=str(payload["role"]),
-            agent=str(payload["agent"]),
-            round_number=int(payload["round_number"]),
-            subject=str(payload["subject"]),
-            prior_items=tuple(_deserialize_unresolved_item(item) for item in payload.get("prior_items", [])),
-            dispositions=tuple(_deserialize_disposition(item) for item in payload.get("dispositions", [])),
-            new_items=tuple(_deserialize_unresolved_item(item) for item in payload.get("new_items", [])),
-            state=str(payload["state"]) if payload.get("state") is not None else None,
-            canonical_plan=(
-                str(payload["canonical_plan"])
-                if payload.get("canonical_plan") is not None
-                else None
-            ),
-        )
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
-        raise AgentLoopError("Invalid AGENT_LOOP_META payload.") from exc
-
-
-def _attach_round_metadata(body: str, metadata: PostedRoundMetadata) -> str:
-    marker = f"<!-- AGENT_LOOP_META: {_encode_round_metadata(metadata)} -->"
-    lines = body.splitlines()
-    index = len(lines)
-    while index > 0 and not lines[index - 1].strip():
-        index -= 1
-    metadata_start = index
-    while metadata_start > 0:
-        candidate = lines[metadata_start - 1]
-        if not candidate.strip() or HTML_COMMENT_RE.match(candidate) or SIGNATURE_RE.match(candidate):
-            metadata_start -= 1
-            continue
-        break
-    prefix = "\n".join(lines[:metadata_start]).rstrip("\n")
-    suffix = "\n".join(lines[metadata_start:]).lstrip("\n")
-    if not prefix:
-        return "\n".join(part for part in (marker, suffix) if part)
-    if not suffix:
-        return "\n".join((prefix, marker))
-    return "\n".join((prefix, marker, suffix))
-
-
-def _strip_round_metadata(body: str) -> str:
-    cleaned = re.sub(
-        r"\n?\s*<!--\s*AGENT_LOOP_META:\s*[A-Za-z0-9+/=_-]+\s*-->\s*\n?",
-        "\n",
-        body,
-        flags=re.I,
-    )
-    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
-    return cleaned.strip()
-
-
-def _extract_round_metadata_records(comments: Sequence[object], *, flow: str) -> tuple[PostedRoundRecord, ...]:
-    records: list[PostedRoundRecord] = []
-    for index, comment in enumerate(comments):
-        body = getattr(comment, "body", None)
-        if not isinstance(body, str):
-            continue
-        matches = list(ROUND_RESUME_MARKER_RE.finditer(body))
-        if not matches:
-            continue
-        metadata = _decode_round_metadata(matches[-1].group("payload"))
-        if metadata.flow != flow:
-            continue
-        records.append(
-            PostedRoundRecord(
-                index=index,
-                metadata=metadata,
-                body=_strip_round_metadata(body),
-            )
-        )
-    return tuple(records)
-
-
-def _prior_item_ledger_signature(items: Sequence[UnresolvedReviewItem]) -> tuple[tuple[str, str, int, str, str, str | None, tuple[str, ...]], ...]:
-    return tuple(
-        (
-            item.item_id,
-            item.reviewer,
-            item.source_round,
-            item.text,
-            item.status,
-            item.source_status,
-            item.notes,
-        )
-        for item in items
-    )
-
-
-def _select_current_round_records(
-    records: Sequence[PostedRoundRecord],
-    *,
-    subject: str,
-) -> ResumedRoundSelection | None:
-    subject_records = [record for record in records if record.metadata.subject == subject]
-    if not subject_records:
-        return None
-    anchor_record = subject_records[-1]
-    anchor_metadata = anchor_record.metadata
-    prior_items_signature = _prior_item_ledger_signature(anchor_metadata.prior_items)
-    current_round_records = tuple(
-        record
-        for record in subject_records
-        if record.metadata.round_number == anchor_metadata.round_number
-        and _prior_item_ledger_signature(record.metadata.prior_items) == prior_items_signature
-    )
-    latest_coder_record = next(
-        (
-            record
-            for record in reversed(current_round_records)
-            if record.metadata.role == "coder"
-        ),
-        None,
-    )
-    if latest_coder_record is not None:
-        current_round_records = tuple(
-            record for record in current_round_records if record.index >= latest_coder_record.index
-        )
-    return ResumedRoundSelection(
-        anchor_record=anchor_record,
-        current_round_records=current_round_records,
-    )
-
-
-def _max_unresolved_item_number_from_records(records: Sequence[PostedRoundRecord]) -> int:
-    max_number = 0
-    for record in records:
-        for item in (*record.metadata.prior_items, *record.metadata.new_items):
-            match = re.fullmatch(r"item-(\d+)", item.item_id)
-            if match:
-                max_number = max(max_number, int(match.group(1)))
-    return max_number
-
-
-def _plan_subject(text: str) -> str:
-    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
-
-
-def render_canonical_plan_steps(plan_steps: Sequence[str]) -> str:
-    return "\n".join(f"{index}. {step}" for index, step in enumerate(plan_steps, start=1))
-
-
-def render_canonical_plan_revision(
-    parsed_revision: StructuredPlanRevision,
-    prior_items: Sequence[UnresolvedReviewItem],
-) -> str:
-    sections = [parsed_revision.summary.strip()]
-    if prior_items or parsed_revision.prior_plan_item_dispositions:
-        sections.append(
-            _render_prior_dispositions_section(
-                heading="### Prior plan review item dispositions",
-                prior_items=prior_items,
-                dispositions=parsed_revision.prior_plan_item_dispositions,
-            )
-        )
-    else:
-        sections.append("### Prior plan review item dispositions\n- None.")
-    sections.append(
-        "\n".join(
-            [
-                "### Plan steps",
-                render_canonical_plan_steps(parsed_revision.plan_steps),
-            ]
-        )
-    )
-    return "\n\n".join(sections)
-
-
-def _resume_pr_round(
-    comments: Sequence[object],
-    *,
-    head_sha: str | None,
-    configured_reviewers: Sequence[AgentName],
-) -> ResumedReviewRound | None:
-    if not head_sha:
-        return None
-    records = _extract_round_metadata_records(comments, flow="pr")
-    if not records:
-        return None
-    selection = _select_current_round_records(records, subject=head_sha)
-    if selection is None:
-        return None
-    current_round_records = selection.current_round_records
-    anchor_metadata = selection.anchor_record.metadata
-    latest_coder_record = next(
-        (
-            record
-            for record in reversed(current_round_records)
-            if record.metadata.role == "coder"
-        ),
-        None,
-    )
-    reviewer_records: dict[str, PostedRoundRecord] = {}
-    configured_reviewer_names = {agent_display_name(agent) for agent in configured_reviewers}
-    for record in current_round_records:
-        metadata = record.metadata
-        if metadata.role != "reviewer" or metadata.agent not in configured_reviewer_names:
-            continue
-        reviewer_records[metadata.agent] = record
-    if latest_coder_record is None and not reviewer_records:
-        return None
-    prior_items = anchor_metadata.prior_items
-    round_number = anchor_metadata.round_number
-    return ResumedReviewRound(
-        round_number=round_number,
-        prior_items=prior_items,
-        coder_output=latest_coder_record.body if latest_coder_record is not None else None,
-        completed_reviews=tuple(reviewer_records[agent_display_name(agent)] for agent in configured_reviewers if agent_display_name(agent) in reviewer_records),
-        next_unresolved_item_number=_max_unresolved_item_number_from_records(
-            [record for record in records if record.metadata.subject == head_sha]
-        )
-        + 1,
-    )
-
-
-def _resume_plan_round(
-    comments: Sequence[object],
-    *,
-    configured_reviewers: Sequence[AgentName],
-) -> tuple[str, ResumedReviewRound] | None:
-    records = _extract_round_metadata_records(comments, flow="plan")
-    if not records:
-        return None
-    latest_coder_record = next((record for record in reversed(records) if record.metadata.role == "coder"), None)
-    if latest_coder_record is None:
-        return None
-    selection = _select_current_round_records(records, subject=latest_coder_record.metadata.subject)
-    if selection is None:
-        return None
-    current_round_records = selection.current_round_records
-    anchor_metadata = selection.anchor_record.metadata
-    current_plan = latest_coder_record.metadata.canonical_plan or latest_coder_record.body
-    reviewer_records: dict[str, PostedRoundRecord] = {}
-    configured_reviewer_names = {agent_display_name(agent) for agent in configured_reviewers}
-    for record in current_round_records:
-        metadata = record.metadata
-        if metadata.role != "reviewer" or metadata.agent not in configured_reviewer_names:
-            continue
-        reviewer_records[metadata.agent] = record
-    return (
-        current_plan,
-        ResumedReviewRound(
-            round_number=anchor_metadata.round_number,
-            prior_items=anchor_metadata.prior_items,
-            coder_output=current_plan,
-            completed_reviews=tuple(reviewer_records[agent_display_name(agent)] for agent in configured_reviewers if agent_display_name(agent) in reviewer_records),
-            next_unresolved_item_number=_max_unresolved_item_number_from_records(
-                [record for record in records if record.metadata.subject == anchor_metadata.subject]
-            )
-            + 1,
-        ),
-    )
-
-
-def _record_prior_item_disposition(
-    prior_dispositions: dict[str, list[ReviewItemDisposition]],
-    disposition: ReviewItemDisposition,
-    *,
-    flow: str,
-    round_number: int,
-    subject: str,
-    reviewer_name: str,
-) -> None:
-    if disposition.item_id not in prior_dispositions:
-        raise AgentLoopError(
-            "Resumed "
-            f"{flow} round {round_number} reconstructed prior items "
-            f"{', '.join(sorted(prior_dispositions)) or '(none)'}, but {reviewer_name} "
-            f"dispositioned unknown item `{disposition.item_id}` for subject `{subject}`."
-        )
-    prior_dispositions[disposition.item_id].append(disposition)
-
-
-def _render_public_review_comment(
-    body: str,
-    *,
-    review_kind: str,
-    prior_items: Sequence[UnresolvedReviewItem],
-    dispositions: Sequence[ReviewItemDisposition],
-    new_items: Sequence[UnresolvedReviewItem],
-) -> str:
-    rendered = body
-    if prior_items:
-        heading = "### Prior unresolved item dispositions"
-        heading_re = PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE
-        if review_kind == "plan":
-            heading = "### Prior unresolved plan item dispositions"
-            heading_re = PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE
-        rendered = _replace_structured_section(
-            rendered,
-            heading_re=heading_re,
-            replacement=_render_prior_dispositions_section(
-                heading=heading,
-                prior_items=prior_items,
-                dispositions=dispositions,
-            ),
-        )
-    return rendered
-
-
-def _render_public_pr_review_comment(
-    parsed_review: ParsedReview,
-    *,
-    reviewer: str,
-    human_requirements_resolved_flag: bool,
-    prior_items: Sequence[UnresolvedReviewItem],
-    dispositions: Sequence[ReviewItemDisposition],
-) -> str:
-    sections: list[str] = [f"**Review verdict:** {parsed_review.state.title()}"]
-    if parsed_review.summary:
-        sections.append(parsed_review.summary.strip())
-    if parsed_review.blocking_items:
-        sections.append(
-            "\n".join(
-                [
-                    "### Blocking issues",
-                    *[f"- {item.text}" for item in parsed_review.blocking_items],
-                ]
-            )
-        )
-    if parsed_review.followups.same_pr:
-        sections.append(
-            "\n".join(
-                [
-                    "### Same-PR follow-ups",
-                    *[f"- {item.text}" for item in parsed_review.followups.same_pr],
-                ]
-            )
-        )
-    if parsed_review.followups.future:
-        sections.append(
-            "\n".join(
-                [
-                    "### Future follow-ups",
-                    *[f"- {item.text}" for item in parsed_review.followups.future],
-                ]
-            )
-        )
-    if prior_items:
-        sections.append(
-            _render_prior_dispositions_section(
-                heading="### Prior unresolved item dispositions",
-                prior_items=prior_items,
-                dispositions=dispositions,
-            )
-        )
-    footer: list[str] = []
-    if human_requirements_resolved_flag:
-        footer.append("<!-- HUMAN_REQUIREMENTS_RESOLVED -->")
-    footer.append(f"<!-- AGENT_STATE: {parsed_review.state} -->")
-    footer.append(f"-- {_public_reviewer_name(reviewer)}")
-    return "\n\n".join(section for section in sections if section) + (
-        ("\n\n" if sections else "") + "\n".join(footer)
-    )
-
-
-def _render_public_plan_review_comment(
-    parsed_review: ParsedPlanReview,
-    *,
-    reviewer: str,
-    prior_items: Sequence[UnresolvedReviewItem],
-    dispositions: Sequence[ReviewItemDisposition],
-) -> str:
-    sections: list[str] = [f"**Review verdict:** {parsed_review.state.title()}"]
-    if parsed_review.summary:
-        sections.append(parsed_review.summary.strip())
-    if parsed_review.items.blocking:
-        sections.append(
-            "\n".join(
-                [
-                    "### Blocking plan issues",
-                    *[f"- {item.text}" for item in parsed_review.items.blocking],
-                ]
-            )
-        )
-    if parsed_review.items.same_plan:
-        sections.append(
-            "\n".join(
-                [
-                    "### Same-plan follow-ups",
-                    *[f"- {item.text}" for item in parsed_review.items.same_plan],
-                ]
-            )
-        )
-    if parsed_review.items.future:
-        sections.append(
-            "\n".join(
-                [
-                    "### Future follow-ups",
-                    *[f"- {item.text}" for item in parsed_review.items.future],
-                ]
-            )
-        )
-    if prior_items:
-        sections.append(
-            _render_prior_dispositions_section(
-                heading="### Prior unresolved plan item dispositions",
-                prior_items=prior_items,
-                dispositions=dispositions,
-            )
-        )
-    footer = [
-        f"<!-- AGENT_PLAN_STATE: {parsed_review.state} -->",
-        f"-- {_public_reviewer_name(reviewer)}",
-    ]
-    return "\n\n".join(section for section in sections if section) + (
-        ("\n\n" if sections else "") + "\n".join(footer)
-    )
-
-
-def _extract_plan_revision_human_requirements_block(text: str) -> str:
-    stripped = text.lstrip()
-    if not stripped.startswith("{"):
-        return ""
-    decoder = json.JSONDecoder()
-    payload, end = decoder.raw_decode(stripped)
-    if not isinstance(payload, dict):
-        return ""
-    trailing = stripped[end:].lstrip()
-    state_match = PLAN_STATE_RE.search(trailing)
-    if state_match is None:
-        return ""
-    return trailing[: state_match.start()].strip()
-
-
-def _render_public_plan_revision_comment(
-    parsed_revision: StructuredPlanRevision,
-    *,
-    prior_items: Sequence[UnresolvedReviewItem],
-    raw_text: str,
-    signature: str,
-) -> str:
-    sections = [render_canonical_plan_revision(parsed_revision, prior_items)]
-    human_requirements_block = _extract_plan_revision_human_requirements_block(raw_text)
-    if human_requirements_block:
-        sections.append(human_requirements_block)
-    sections.append(f"<!-- AGENT_PLAN_STATE: {parsed_revision.state} -->")
-    sections.append(f"-- {signature}")
-    return "\n\n".join(section for section in sections if section)
 
 
 def _should_record_new_blocking_item(summary: str, *, had_prior_items: bool, had_dispositions: bool) -> bool:
@@ -1561,298 +579,6 @@ def _should_record_new_blocking_item(summary: str, *, had_prior_items: bool, had
     if len(non_empty_lines) > 1:
         return True
     return len(non_empty_lines[0]) >= 80
-
-
-def run_optional_tests(runner: Runner, config: AgentLoopConfig) -> None:
-    if not config.test_command:
-        return
-    log(config, f"Running local test command: {' '.join(config.test_command)}")
-    runner.run(config.test_command, cwd=active_workdir(config))
-    log(config, "Local test command passed")
-
-
-def run_pre_review_tests(runner: Runner, config: AgentLoopConfig) -> None:
-    if not config.pre_review_tests or not config.test_command:
-        return
-    log(config, f"Running pre-review test command: {' '.join(config.test_command)}")
-    runner.run(config.test_command, cwd=active_workdir(config))
-    log(config, "Pre-review test command passed")
-
-
-def _format_approved_followup_summary(pr_number: int, followups: list[ApprovedFollowup]) -> str:
-    lines = [
-        f"Approved-review future follow-ups for PR #{pr_number}:",
-        "",
-    ]
-    for followup in followups:
-        lines.append(f"- {followup.text} ({followup.reviewer})")
-    lines.extend(
-        [
-            "",
-            "These were mentioned in approved reviews as future work and did not block merge readiness.",
-            "",
-            "-- coding-review-agent-loop",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _approved_followups_marker(pr_number: int, head_sha: str | None, mode: str) -> str:
-    head = head_sha or "unknown"
-    return f"<!-- AGENT_APPROVED_FOLLOWUPS: pr={pr_number} head={head} mode={mode} -->"
-
-
-def _append_approved_followups_marker(
-    body: str,
-    *,
-    pr_number: int,
-    head_sha: str | None,
-    mode: str,
-) -> str:
-    footer = "\n-- coding-review-agent-loop"
-    prefix, found, _suffix = body.rpartition(footer)
-    if not found:
-        return body
-    prefix = prefix.rstrip()
-    return "\n".join(
-        [
-            prefix,
-            "",
-            _approved_followups_marker(pr_number, head_sha, mode),
-            "-- coding-review-agent-loop",
-        ]
-    )
-
-
-def _has_approved_followups_marker(
-    comments: Sequence[object],
-    *,
-    pr_number: int,
-    head_sha: str | None,
-    mode: str,
-) -> bool:
-    target_head = head_sha or "unknown"
-    for comment in comments:
-        body = getattr(comment, "body", None)
-        if not isinstance(body, str):
-            continue
-        for match in APPROVED_FOLLOWUP_MARKER_RE.finditer(body):
-            if (
-                int(match.group("pr")) == pr_number
-                and match.group("head") == target_head
-                and match.group("mode").lower() == mode.lower()
-            ):
-                return True
-    return False
-
-
-def _followup_issue_title(followup: ApprovedFollowup) -> str:
-    text = " ".join(followup.text.split())
-    title = f"Follow up future review note: {text}"
-    return title[:120]
-
-
-def _normalize_followup_key(text: str) -> str:
-    key = re.sub(r"`([^`]+)`", r"\1", text)
-    key = re.sub(r"\*\*([^*]+)\*\*", r"\1", key)
-    key = re.sub(r"[_*#>]+", " ", key)
-    key = re.sub(r"[^\w\s]+", " ", key.lower())
-    return " ".join(key.split())
-
-
-def _followup_heading_key(text: str) -> str | None:
-    heading_match = re.match(r"^\s*\*\*(?P<title>[^*]+)\*\*\s*:?", text)
-    if heading_match:
-        return _normalize_followup_key(heading_match.group("title"))
-    first_clause = re.split(r"\s+-\s+|:\s+", text, maxsplit=1)[0]
-    if first_clause != text and 3 <= len(first_clause.split()) <= 12:
-        return _normalize_followup_key(first_clause)
-    return None
-
-
-def _dedupe_approved_followups(followups: Sequence[ApprovedFollowup]) -> list[GroupedApprovedFollowup]:
-    grouped: list[GroupedApprovedFollowup] = []
-    indexes: dict[str, int] = {}
-    for followup in followups:
-        keys = [_normalize_followup_key(followup.text)]
-        heading_key = _followup_heading_key(followup.text)
-        if heading_key:
-            keys.append(heading_key)
-        existing_index = next((indexes[key] for key in keys if key in indexes), None)
-        if existing_index is None:
-            indexes.update((key, len(grouped)) for key in keys if key)
-            grouped.append(GroupedApprovedFollowup(text=followup.text, items=(followup,)))
-            continue
-        existing = grouped[existing_index]
-        grouped[existing_index] = GroupedApprovedFollowup(
-            text=existing.text,
-            items=(*existing.items, followup),
-        )
-        indexes.update((key, existing_index) for key in keys if key)
-    return grouped
-
-
-def _followup_issue_body(pr_number: int, followup: GroupedApprovedFollowup) -> str:
-    lines = [
-        f"Future follow-up from approved review on PR #{pr_number}.",
-        "",
-    ]
-    reviewers = followup.reviewers
-    if len(reviewers) == 1:
-        lines.append(f"Reviewer: {reviewers[0]}")
-    else:
-        lines.append("Reviewers:")
-        lines.extend(f"- {reviewer}" for reviewer in reviewers)
-    lines.extend(
-        [
-            "",
-            "Follow-up:",
-            f"- {followup.text}",
-        ]
-    )
-    if len(followup.items) > 1:
-        lines.extend(["", "Original reviewer notes:"])
-        lines.extend(f"- {item.reviewer}: {item.text}" for item in followup.items)
-    lines.extend(
-        [
-            "",
-            "This was mentioned in an approved review as future work and did not block merge readiness.",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _create_approved_followup_issues(
-    runner: Runner,
-    *,
-    config: AgentLoopConfig,
-    pr_number: int,
-    followups: list[ApprovedFollowup],
-) -> tuple[list[str], int]:
-    issue_urls: list[str] = []
-    deduped_followups = _dedupe_approved_followups(followups)
-    selected_followups = deduped_followups[:MAX_APPROVED_FOLLOWUP_ISSUES]
-    for followup in selected_followups:
-        issue_url = create_issue(
-            runner,
-            config=config,
-            title=_followup_issue_title(
-                ApprovedFollowup(reviewer=followup.reviewers[0], text=followup.text)
-            ),
-            body=_followup_issue_body(pr_number, followup),
-        )
-        if issue_url is not None:
-            issue_urls.append(issue_url)
-    skipped_count = len(deduped_followups) - len(selected_followups)
-    return issue_urls, skipped_count
-
-
-def _format_created_followup_issue_summary(
-    pr_number: int,
-    issue_urls: list[str],
-    skipped_count: int,
-) -> str:
-    unique_issue_urls = list(dict.fromkeys(issue_urls))
-    lines = [
-        f"Created approved-review future follow-up issues for PR #{pr_number}:",
-        "",
-    ]
-    if unique_issue_urls:
-        lines.extend(f"- {issue_url}" for issue_url in unique_issue_urls)
-    else:
-        lines.append("- Created issue URL unavailable from GitHub CLI output.")
-    lines.extend(
-        [
-            "",
-            "These were mentioned in approved reviews as future work and did not block merge readiness.",
-        ]
-    )
-    if skipped_count > 0:
-        lines.extend(
-            [
-                "",
-                f"Skipped {skipped_count} additional item(s) to avoid issue noise; reviewers should reserve "
-                "this section for substantial independent follow-up work.",
-            ]
-        )
-    lines.extend(["", "-- coding-review-agent-loop"])
-    return "\n".join(lines)
-
-
-def _publish_approved_followups(
-    runner: Runner,
-    *,
-    config: AgentLoopConfig,
-    pr_number: int,
-    head_sha: str | None,
-    pr_comments: Sequence[object],
-    followups: list[ApprovedFollowup],
-) -> bool:
-    if not followups or config.approved_followups == "ignore":
-        return False
-
-    if config.approved_followups in ("summarize", "fix-and-summarize"):
-        mode = "summarize"
-        if _has_approved_followups_marker(
-            pr_comments,
-            pr_number=pr_number,
-            head_sha=head_sha,
-            mode=mode,
-        ):
-            log(
-                config,
-                f"Approved-review future follow-ups already recorded for PR #{pr_number} at {head_sha or 'unknown'} ({mode})",
-            )
-            return False
-        body = _format_approved_followup_summary(pr_number, followups)
-        body = _append_approved_followups_marker(
-            body,
-            pr_number=pr_number,
-            head_sha=head_sha,
-            mode=mode,
-        )
-        post_pr_comment(runner, config=config, pr_number=pr_number, body=body)
-        return True
-
-    if config.approved_followups in ("issue", "fix-and-issue"):
-        mode = "issue"
-        if _has_approved_followups_marker(
-            pr_comments,
-            pr_number=pr_number,
-            head_sha=head_sha,
-            mode=mode,
-        ):
-            log(
-                config,
-                f"Approved-review future follow-ups already recorded for PR #{pr_number} at {head_sha or 'unknown'} ({mode})",
-            )
-            return False
-        issue_urls, skipped_count = _create_approved_followup_issues(
-            runner,
-            config=config,
-            pr_number=pr_number,
-            followups=followups,
-        )
-        if issue_urls:
-            body = _format_created_followup_issue_summary(pr_number, issue_urls, skipped_count)
-            body = _append_approved_followups_marker(
-                body,
-                pr_number=pr_number,
-                head_sha=head_sha,
-                mode=mode,
-            )
-            post_pr_comment(runner, config=config, pr_number=pr_number, body=body)
-            return True
-    return False
-
-
-def _format_same_pr_followups(followups: Sequence[ApprovedFollowup]) -> str:
-    lines: list[str] = []
-    for followup in followups:
-        lines.append(f"{followup.reviewer} same-PR follow-up:")
-        lines.append(f"- {followup.text}")
-        lines.append("")
-    return "\n".join(lines).strip()
 
 
 def _describe_pr_review_outcome(parsed_review: ParsedReview, *, has_blocking_summary: bool) -> str:
@@ -1876,114 +602,6 @@ def _describe_plan_review_outcome(parsed_review: ParsedPlanReview) -> str:
     if has_same_plan:
         return "blocking with same-plan follow-ups"
     return "blocking with blocking plan issues"
-
-
-def _format_same_pr_unresolved_items(items: Sequence[UnresolvedReviewItem]) -> str:
-    lines: list[str] = []
-    for item in items:
-        lines.append(
-            f"{item.reviewer} same-PR follow-up [{item.item_id}] from round {item.source_round}:"
-        )
-        lines.append(f"- {item.text}")
-        if item.notes:
-            lines.append("Latest reviewer updates:")
-            lines.extend(f"- {note}" for note in item.notes)
-        lines.append("")
-    return "\n".join(lines).strip()
-
-
-def _format_unresolved_items_for_coder(items: Sequence[UnresolvedReviewItem]) -> str:
-    lines: list[str] = []
-    for item in items:
-        lines.append(
-            f"{item.reviewer} unresolved {item.status} item [{item.item_id}] from round {item.source_round}:"
-        )
-        lines.append(f"- {item.text}")
-        if item.notes:
-            lines.append("Latest reviewer updates:")
-            lines.extend(f"- {note}" for note in item.notes)
-        lines.append("")
-    return "\n".join(lines).strip()
-
-
-def _format_plan_approval_summary_with_followups(
-    issue_number: int,
-    approved_plan: str,
-    future_followups: Sequence[ApprovedFollowup],
-) -> str:
-    lines = [
-        f"Planning complete for issue #{issue_number}.",
-        "",
-        "Outcome: implement",
-        "",
-        "Approved plan:",
-        "",
-        approved_plan,
-    ]
-    if future_followups:
-        lines.extend(["", "Approved plan future follow-ups:", ""])
-        lines.extend(f"- {followup.text} ({followup.reviewer})" for followup in future_followups)
-    lines.extend(["", "-- coding-review-agent-loop"])
-    return "\n".join(lines)
-
-
-def _format_pr_checks_comment(pr_number: int, state: str, details: list[str]) -> str:
-    headline = {
-        "failing": f"GitHub PR checks are failing for PR #{pr_number}.",
-        "pending": f"GitHub PR checks are still pending for PR #{pr_number}.",
-        "unavailable": f"GitHub PR check status is unavailable for PR #{pr_number}.",
-    }[state]
-    lines = [
-        headline,
-        "",
-        "Reviewer approvals do not make this PR merge-ready until GitHub PR checks are green, or the PR explicitly states that only a local subset passed.",
-        "",
-    ]
-    lines.extend(f"- {detail}" for detail in details)
-    lines.extend(["", "-- coding-review-agent-loop"])
-    return "\n".join(lines)
-
-
-def _pr_check_blocking_review(pr_number: int, state: str, details: list[str]) -> str:
-    headline = {
-        "failing": "GitHub PR checks are failing and must be resolved before approval.",
-        "pending": "GitHub PR checks are still pending, so this PR cannot be treated as merge-ready yet.",
-        "unavailable": "GitHub PR check status is unavailable, so merge readiness cannot be confirmed yet.",
-    }[state]
-    lines = [headline, ""]
-    lines.extend(f"- {detail}" for detail in details)
-    lines.extend(
-        [
-            "",
-            "Do not claim global test success unless GitHub PR checks are green. If only local tests passed, say that explicitly.",
-        ]
-    )
-    return "\n".join(lines)
-
-
-def _pr_check_details(pr_checks: PullRequestChecks) -> list[str]:
-    details: list[str] = []
-    if pr_checks.required_checks:
-        details.append(f"Required checks: {', '.join(pr_checks.required_checks)}")
-    if pr_checks.failing:
-        details.append(
-            "Failing checks: "
-            + ", ".join(f"{check.name} ({check.status})" for check in pr_checks.failing)
-        )
-    if pr_checks.pending:
-        details.append(
-            "Pending checks: "
-            + ", ".join(f"{check.name} ({check.status})" for check in pr_checks.pending)
-        )
-    if pr_checks.missing_required:
-        details.append(
-            "Required checks not yet reporting: " + ", ".join(pr_checks.missing_required)
-        )
-    if pr_checks.branch_protection_note:
-        details.append(pr_checks.branch_protection_note)
-    if not details:
-        details.append("No individual check names were available from the GitHub API.")
-    return details
 
 
 def _run_plan_first_loop(
