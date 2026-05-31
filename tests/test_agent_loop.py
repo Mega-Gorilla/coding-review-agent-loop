@@ -8742,6 +8742,83 @@ def test_parse_plan_decomposition_accepts_agent_and_human_phases():
         "Manual rollout checkpoint",
     ]
     assert parsed.phases[1].automation == "human-action"
+    assert parsed.phases[1].depends_on == ("Internal schema utilities",)
+
+
+def test_parse_plan_decomposition_accepts_normalized_earlier_phase_dependency():
+    parsed = parse_plan_decomposition(
+        plan_decomposition_json(
+            {
+                "title": "Internal schema utilities",
+                "scope": "Add helpers.",
+                "non_goals": "No live switch.",
+                "dependency_notes": "First phase.",
+                "rollout_risk": "low - internal only.",
+                "validation": "Run python -m pytest.",
+                "parent_context": "Approved plan slice and invariant details.",
+                "automation": "agent-pr",
+                "depends_on": [],
+            },
+            {
+                "title": "Manual rollout checkpoint",
+                "scope": "Human validates the deployed behavior.",
+                "non_goals": "No code changes.",
+                "dependency_notes": "After Internal schema utilities.",
+                "rollout_risk": "medium - live checkpoint.",
+                "validation": "Human remark and closure required.",
+                "parent_context": "Approved plan slice for the manual checkpoint.",
+                "automation": "human-action",
+                "depends_on": ["  internal   SCHEMA utilities  "],
+            },
+        )
+    )
+
+    assert parsed.phases[1].depends_on == ("internal   SCHEMA utilities",)
+
+
+def test_parse_plan_decomposition_rejects_self_dependency():
+    phase = {
+        "title": "Internal schema utilities",
+        "scope": "Add helpers.",
+        "non_goals": "No live switch.",
+        "dependency_notes": "First phase.",
+        "rollout_risk": "low - internal only.",
+        "validation": "Run python -m pytest.",
+        "parent_context": "Approved plan slice and invariant details.",
+        "automation": "agent-pr",
+        "depends_on": ["Internal schema utilities"],
+    }
+
+    with pytest.raises(AgentLoopError, match="cannot depend on itself"):
+        parse_plan_decomposition(plan_decomposition_json(phase))
+
+
+def test_parse_plan_decomposition_rejects_forward_dependency():
+    first_phase = {
+        "title": "Internal schema utilities",
+        "scope": "Add helpers.",
+        "non_goals": "No live switch.",
+        "dependency_notes": "First phase.",
+        "rollout_risk": "low - internal only.",
+        "validation": "Run python -m pytest.",
+        "parent_context": "Approved plan slice and invariant details.",
+        "automation": "agent-pr",
+        "depends_on": ["Manual rollout checkpoint"],
+    }
+    second_phase = {
+        "title": "Manual rollout checkpoint",
+        "scope": "Human validates the deployed behavior.",
+        "non_goals": "No code changes.",
+        "dependency_notes": "After Internal schema utilities.",
+        "rollout_risk": "medium - live checkpoint.",
+        "validation": "Human remark and closure required.",
+        "parent_context": "Approved plan slice for the manual checkpoint.",
+        "automation": "human-action",
+        "depends_on": [],
+    }
+
+    with pytest.raises(AgentLoopError, match="dependencies must reference an earlier phase"):
+        parse_plan_decomposition(plan_decomposition_json(first_phase, second_phase))
 
 
 @pytest.mark.parametrize(

@@ -101,6 +101,14 @@ def parse_plan_decomposition(text: str) -> PlanDecomposition:
             f"MAX_DECOMPOSITION_PHASES={MAX_DECOMPOSITION_PHASES}; consolidate phases."
         )
 
+    title_keys = [
+        " ".join(phase_payload["title"].lower().split())
+        for phase_payload in phases_payload
+        if isinstance(phase_payload, dict)
+        and isinstance(phase_payload.get("title"), str)
+        and phase_payload["title"].strip()
+    ]
+    all_title_keys = set(title_keys)
     phases: list[PlanPhase] = []
     seen_titles: set[str] = set()
     for index, phase_payload in enumerate(phases_payload, start=1):
@@ -125,6 +133,21 @@ def parse_plan_decomposition(text: str) -> PlanDecomposition:
             raise AgentLoopError(
                 f"Invalid plan decomposition: phase {title!r} `depends_on` must be a list of titles."
             )
+        for dependency in depends_on_payload:
+            dependency_key = " ".join(dependency.lower().split())
+            if dependency_key == title_key:
+                raise AgentLoopError(
+                    f"Invalid plan decomposition: phase {title!r} cannot depend on itself."
+                )
+            if dependency_key not in all_title_keys:
+                raise AgentLoopError(
+                    f"Invalid plan decomposition: phase {title!r} depends on unknown phase {dependency!r}."
+                )
+            if dependency_key not in seen_titles:
+                raise AgentLoopError(
+                    f"Invalid plan decomposition: phase {title!r} depends on {dependency!r}, "
+                    "but dependencies must reference an earlier phase."
+                )
         phases.append(
             PlanPhase(
                 title=title,
@@ -138,15 +161,6 @@ def parse_plan_decomposition(text: str) -> PlanDecomposition:
                 depends_on=tuple(value.strip() for value in depends_on_payload),
             )
         )
-
-    known_titles = {phase.title for phase in phases}
-    known_keys = {" ".join(phase.title.lower().split()): phase.title for phase in phases}
-    for phase in phases:
-        for dependency in phase.depends_on:
-            if dependency not in known_titles and " ".join(dependency.lower().split()) not in known_keys:
-                raise AgentLoopError(
-                    f"Invalid plan decomposition: phase {phase.title!r} depends on unknown phase {dependency!r}."
-                )
     return PlanDecomposition(phases=tuple(phases))
 
 
