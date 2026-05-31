@@ -177,7 +177,7 @@ TRANSIENT_AGENT_OUTPUT_RE = re.compile(
     r"Invalid stream|empty response|malformed tool call|"
     r"network (?:reset|timeout)|connection (?:reset|timed out|timeout)|"
     r"\btimed out\b|\btimeout\b|"
-    r"\b5\d\d\b|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout|"
+    r"Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout|"
     r"\b429\b|rate.?limit(?:ed)?|"
     r"session.?limit.?exceeded|session_limit_exceeded|too many sessions|"
     r"no capacity available|capacity.*(?:unavailable|exceeded)|"

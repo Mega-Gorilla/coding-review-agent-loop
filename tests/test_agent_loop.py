@@ -40,6 +40,8 @@ from coding_review_agent_loop.cli import (
 from coding_review_agent_loop.errors import QuotaResetExceededError
 from coding_review_agent_loop.orchestrator import (
     _format_reset_duration,
+    _failure_category,
+    _is_transient_agent_output,
     _parse_rate_limit_reset_seconds,
 )
 from coding_review_agent_loop.config import (
@@ -4977,6 +4979,33 @@ def test_pr_loop_does_not_post_gemini_diagnostics_without_agent_state(tmp_path):
     assert not any(diagnostic in comment for comment in runner.comments)
     sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
     assert sleep_commands == [["sleep", "1"], ["sleep", "1"]]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "orchestrator.py lines 577-581: it currently falls back to parse_plan_state(text)",
+        "orchestrator.py:577-581: it currently falls back to parse_plan_state(text)",
+        "A bare 500 in diagnostic prose without HTTP context.",
+    ],
+)
+def test_source_line_references_with_5xx_numbers_are_not_transient(text):
+    assert not _is_transient_agent_output(text)
+    assert _failure_category(text) == "deterministic"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Internal Server Error",
+        "Bad Gateway",
+        "Service Unavailable",
+        "Gateway Timeout",
+    ],
+)
+def test_explicit_server_error_phrases_remain_transient(text):
+    assert _is_transient_agent_output(text)
+    assert _failure_category(text) == "transient"
 
 
 def test_plan_review_does_not_post_diagnostics_without_plan_state(tmp_path):
@@ -10311,6 +10340,38 @@ def test_run_pr_loop_uses_repair_pass_on_format_failure(tmp_path):
 
     assert len(captured_repairs) == 1
     assert "AGENT_STATE: approved" in captured_repairs[0]
+
+
+def test_run_pr_loop_repairs_format_failure_with_5xx_source_line_reference(tmp_path):
+    """A 500-series source line reference must not make deterministic format errors transient."""
+    malformed_review = (
+        "Looks good overall.\n\n"
+        "Note: orchestrator.py:577-581 currently falls back to parse_plan_state(text).\n"
+        "AGENT_STATE: approved\n"
+        "-- OpenAI Codex"
+    )
+    repaired_review = (
+        '{"schema_version":1,"kind":"pr_review","state":"approved","summary":"Looks good overall.",'
+        '"blocking_items":[],"same_pr_followups":[],"future_followups":[],'
+        '"prior_item_dispositions":[]}'
+        "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+    )
+    runner = FakeRunner(
+        codex_outputs=[malformed_review],
+    )
+    config = make_config(tmp_path, coder="claude", reviewer="codex", agent_max_retries=0)
+
+    captured_repairs = []
+
+    def fake_attempt_repair(raw: str, gemini_cmd: str) -> str | None:
+        captured_repairs.append(raw)
+        return repaired_review
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_attempt_repair):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert len(captured_repairs) == 1
+    assert "orchestrator.py:577-581" in captured_repairs[0]
 
 
 def test_run_pr_loop_falls_back_to_error_when_repair_also_fails(tmp_path):
