@@ -346,6 +346,7 @@ def _resume_plan_round(
     current_round_records = selection.current_round_records
     anchor_metadata = selection.anchor_record.metadata
     current_plan = latest_coder_record.metadata.canonical_plan or latest_coder_record.body
+    coder_output = latest_coder_record.metadata.raw_structured_coder_response or current_plan
     reviewer_records: dict[str, PostedRoundRecord] = {}
     configured_reviewer_names = {agent_display_name(agent) for agent in configured_reviewers}
     for record in current_round_records:
@@ -358,7 +359,7 @@ def _resume_plan_round(
         ResumedReviewRound(
             round_number=anchor_metadata.round_number,
             prior_items=anchor_metadata.prior_items,
-            coder_output=current_plan,
+            coder_output=coder_output,
             completed_reviews=tuple(reviewer_records[agent_display_name(agent)] for agent in configured_reviewers if agent_display_name(agent) in reviewer_records),
             next_unresolved_item_number=_max_unresolved_item_number_from_records(
                 [record for record in records if record.metadata.subject == anchor_metadata.subject]

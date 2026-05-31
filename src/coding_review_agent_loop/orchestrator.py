@@ -1102,7 +1102,9 @@ def _run_plan_first_loop(
         )
         canonical_plan: str | None = None
         public_comment = plan_response.text
+        raw_structured_coder_response: str | None = None
         if isinstance(plan_response.marker_value, StructuredPlanRevision):
+            raw_structured_coder_response = plan_response.text
             canonical_plan = render_canonical_plan_revision(plan_response.marker_value, must_fix_items)
             current_plan = canonical_plan
             public_comment = _render_public_plan_revision_comment(
@@ -1128,6 +1130,7 @@ def _run_plan_first_loop(
                     subject=_plan_subject(current_plan),
                     prior_items=tuple(must_fix_items),
                     canonical_plan=canonical_plan,
+                    raw_structured_coder_response=raw_structured_coder_response,
                 ),
             ),
         )

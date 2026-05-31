@@ -8572,6 +8572,47 @@ def test_issue_loop_plan_first_revises_until_all_reviewers_approve(tmp_path):
     assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
 
 
+def test_issue_loop_plan_revision_stores_raw_structured_metadata(tmp_path):
+    raw_structured_revision = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_revision",
+                "state": "blocking",
+                "summary": "Revised plan with tests.",
+                "prior_plan_item_dispositions": [
+                    {"item_id": "item-1", "disposition": "resolved", "note": "Added the missing test step."}
+                ],
+                "plan_steps": ["Add the regression test.", "Run the focused suite."],
+            }
+        )
+        + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    runner = FakeRunner(
+        claude_outputs=[
+            "Initial plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            raw_structured_revision,
+        ],
+        codex_outputs=[
+            "### Blocking plan issues\n- Missing test strategy.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex",
+            "Plan looks sound."
+            + prior_plan_item_dispositions("[item-1] resolved")
+            + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, reviewer="codex")
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    assert runner.comments[2].startswith("## Revised plan")
+    assert '"kind": "plan_revision"' not in _strip_round_metadata(runner.comments[2])
+    raw_comment = runner.issue_comments[2]["body"]
+    match = re.search(r"<!--\s*AGENT_LOOP_META:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->", raw_comment)
+    assert match is not None
+    metadata = _decode_round_metadata(match.group("payload"))
+    assert metadata.raw_structured_coder_response == raw_structured_revision
+
+
 def test_issue_loop_plan_revision_rejects_missing_human_requirements_acknowledgement(tmp_path):
     runner = FakeRunner(
         issue_payload={
@@ -8940,6 +8981,54 @@ def test_resume_plan_round_prefers_canonical_plan_metadata():
     current_plan, state = resumed
     assert current_plan == canonical_plan
     assert state.coder_output == canonical_plan
+
+
+def test_resume_plan_round_prefers_structured_plan_revision_metadata_for_coder_output():
+    public_body = (
+        "## Revised plan\n\nRevised plan summary.\n\n### Plan steps\n1. Public body copy.\n\n"
+        "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    raw_structured_revision = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_revision",
+                "state": "blocking",
+                "summary": "Revised plan summary.",
+                "prior_plan_item_dispositions": [],
+                "plan_steps": ["Canonical copy."],
+            }
+        )
+        + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    parsed = validate_structured_plan_revision(raw_structured_revision)
+    assert parsed is not None
+    canonical_plan = render_canonical_plan_revision(parsed, ())
+    coder_comment = _attach_round_metadata(
+        public_body,
+        PostedRoundMetadata(
+            flow="plan",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject=_plan_subject(canonical_plan),
+            prior_items=(),
+            canonical_plan=canonical_plan,
+            raw_structured_coder_response=raw_structured_revision,
+        ),
+    )
+
+    resumed = _resume_plan_round(
+        [IssueComment(author="bot", created_at="2026-05-20T09:00:00Z", body=coder_comment)],
+        configured_reviewers=("codex", "gemini"),
+    )
+
+    assert resumed is not None
+    current_plan, state = resumed
+    assert current_plan == canonical_plan
+    assert state.coder_output == raw_structured_revision
+    assert validate_structured_plan_revision(state.coder_output) is not None
+    assert '"kind": "plan_revision"' not in _strip_round_metadata(coder_comment)
 
 
 def test_resume_plan_round_falls_back_to_raw_body_for_markdown_plan():
