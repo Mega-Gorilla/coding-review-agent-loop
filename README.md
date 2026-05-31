@@ -2,15 +2,20 @@
 
 Local command-line orchestration for a coding PR review loop.
 
-Run a local Claude/Codex/Gemini PR review loop using your existing CLI subscriptions,
-without paying separate model API costs.
+Run a local Claude/Codex/Gemini PR review loop using your existing CLI subscriptions.
 
-The main advantage is cost and account reuse: the tool shells out to your
+The main advantage is account reuse: the tool shells out to your
 already-authenticated local CLIs (`claude`, `codex`, `gemini`, and `gh`) instead
 of calling model APIs directly. If your local agent CLIs are backed by existing
 AI subscriptions or authenticated developer accounts, the review loop can use
-those existing entitlements rather than requiring separate model API
-keys and per-token API billing.
+those existing entitlements rather than requiring separate model API keys.
+
+**Claude billing note (effective June 15, 2026):** Non-interactive `claude`
+usage — including `claude -p` as used by this tool — draws from a separate
+monthly Agent SDK credit rather than your interactive subscription pool. Credits
+vary by plan ($20/month on Pro, $100 on Max 5×, $200 on Max 20×). See
+[Anthropic's support article](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
+for details. Gemini CLI and Codex CLI have their own separate billing models.
 
 ## Who This Is For
 
@@ -30,6 +35,11 @@ machine and uses the CLI accounts you have already authenticated.
 That makes it easier to experiment with agent-to-agent review loops before
 committing to hosted automation. It also keeps local workspace setup,
 credentials, and agent approval prompts under your direct control.
+
+Note that as of June 15, 2026, Claude CLI non-interactive usage draws from a
+separate monthly Agent SDK credit (see billing note above) rather than being
+unlimited within a subscription — so very high-volume automated use may still
+incur costs depending on your plan.
 
 ## Compared To Similar Tools
 
