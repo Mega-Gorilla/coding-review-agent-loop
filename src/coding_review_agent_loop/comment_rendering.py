@@ -17,6 +17,7 @@ from .protocol import (
     ParsedPlanReview,
     ParsedReview,
     ReviewItemDisposition,
+    StructuredCoderFollowup,
     StructuredPlanRevision,
     UnresolvedReviewItem,
     review_freeform_summary_text,
@@ -173,7 +174,7 @@ def render_canonical_plan_revision(
     if prior_items or parsed_revision.prior_plan_item_dispositions:
         sections.append(
             _render_prior_dispositions_section(
-                heading="### Prior plan review item dispositions",
+                heading="### Prior plan item dispositions",
                 prior_items=prior_items,
                 dispositions=parsed_revision.prior_plan_item_dispositions,
             )
@@ -328,6 +329,36 @@ def _render_public_plan_review_comment(
     )
 
 
+def _render_public_coder_followup_comment(
+    parsed_followup: StructuredCoderFollowup,
+    *,
+    signature: str,
+) -> str:
+    addressed_items = (
+        [f"- {item_id}" for item_id in parsed_followup.addressed_items]
+        if parsed_followup.addressed_items
+        else ["- None."]
+    )
+    remaining_items = (
+        [f"- {item_id}" for item_id in parsed_followup.remaining_items]
+        if parsed_followup.remaining_items
+        else ["- None."]
+    )
+    sections = [
+        "## Coder follow-up",
+        parsed_followup.summary.strip(),
+        "\n".join(["### Addressed items", *addressed_items]),
+        "\n".join(["### Remaining items", *remaining_items]),
+    ]
+    if parsed_followup.tests_run:
+        sections.append(
+            "\n".join(["### Tests run", *[f"- {test}" for test in parsed_followup.tests_run]])
+        )
+    sections.append(f"<!-- AGENT_STATE: {parsed_followup.state} -->")
+    sections.append(f"-- {signature}")
+    return "\n\n".join(section for section in sections if section)
+
+
 def _extract_plan_revision_human_requirements_block(text: str) -> str:
     stripped = text.lstrip()
     if not stripped.startswith("{"):
@@ -350,7 +381,7 @@ def _render_public_plan_revision_comment(
     raw_text: str,
     signature: str,
 ) -> str:
-    sections = [render_canonical_plan_revision(parsed_revision, prior_items)]
+    sections = ["## Revised plan", render_canonical_plan_revision(parsed_revision, prior_items)]
     human_requirements_block = _extract_plan_revision_human_requirements_block(raw_text)
     if human_requirements_block:
         sections.append(human_requirements_block)

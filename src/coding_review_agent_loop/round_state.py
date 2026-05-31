@@ -34,6 +34,7 @@ class PostedRoundMetadata:
     new_items: tuple[UnresolvedReviewItem, ...] = ()
     state: str | None = None
     canonical_plan: str | None = None
+    raw_structured_coder_response: str | None = None
 
 
 @dataclass(frozen=True)
@@ -118,6 +119,7 @@ def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
         "new_items": [_serialize_unresolved_item(item) for item in metadata.new_items],
         "state": metadata.state,
         "canonical_plan": metadata.canonical_plan,
+        "raw_structured_coder_response": metadata.raw_structured_coder_response,
     }
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -144,6 +146,11 @@ def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
             canonical_plan=(
                 str(payload["canonical_plan"])
                 if payload.get("canonical_plan") is not None
+                else None
+            ),
+            raw_structured_coder_response=(
+                str(payload["raw_structured_coder_response"])
+                if payload.get("raw_structured_coder_response") is not None
                 else None
             ),
         )
@@ -308,7 +315,12 @@ def _resume_pr_round(
     return ResumedReviewRound(
         round_number=round_number,
         prior_items=prior_items,
-        coder_output=latest_coder_record.body if latest_coder_record is not None else None,
+        coder_output=(
+            latest_coder_record.metadata.raw_structured_coder_response
+            or latest_coder_record.body
+            if latest_coder_record is not None
+            else None
+        ),
         completed_reviews=tuple(reviewer_records[agent_display_name(agent)] for agent in configured_reviewers if agent_display_name(agent) in reviewer_records),
         next_unresolved_item_number=_max_unresolved_item_number_from_records(
             [record for record in records if record.metadata.subject == head_sha]
@@ -334,6 +346,7 @@ def _resume_plan_round(
     current_round_records = selection.current_round_records
     anchor_metadata = selection.anchor_record.metadata
     current_plan = latest_coder_record.metadata.canonical_plan or latest_coder_record.body
+    coder_output = latest_coder_record.metadata.raw_structured_coder_response or current_plan
     reviewer_records: dict[str, PostedRoundRecord] = {}
     configured_reviewer_names = {agent_display_name(agent) for agent in configured_reviewers}
     for record in current_round_records:
@@ -346,7 +359,7 @@ def _resume_plan_round(
         ResumedReviewRound(
             round_number=anchor_metadata.round_number,
             prior_items=anchor_metadata.prior_items,
-            coder_output=current_plan,
+            coder_output=coder_output,
             completed_reviews=tuple(reviewer_records[agent_display_name(agent)] for agent in configured_reviewers if agent_display_name(agent) in reviewer_records),
             next_unresolved_item_number=_max_unresolved_item_number_from_records(
                 [record for record in records if record.metadata.subject == anchor_metadata.subject]
