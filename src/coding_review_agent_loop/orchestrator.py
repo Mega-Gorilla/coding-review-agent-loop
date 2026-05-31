@@ -18,6 +18,14 @@ from .config import (
     sync_coder_pr_before_validation,
     sync_reviewer_pr_before_review,
 )
+from .decomposition import (
+    CreatedPhaseIssue,
+    approved_plan_hash,
+    create_decomposition_child_issues,
+    find_existing_decomposition,
+    parse_plan_decomposition,
+    post_decomposition_parent_summary,
+)
 from .errors import AgentLoopError, QuotaResetExceededError
 from .github import (
     IssueContext,
@@ -41,6 +49,7 @@ from .prompts import (
     build_issue_implementation_prompt,
     build_issue_plan_prompt,
     build_issue_prompt,
+    build_plan_decomposition_prompt,
     build_plan_review_prompt,
     build_plan_revision_prompt,
     build_review_prompt,
@@ -604,6 +613,151 @@ def _describe_plan_review_outcome(parsed_review: ParsedPlanReview) -> str:
     return "blocking with blocking plan issues"
 
 
+def _implement_approved_issue(
+    runner: Runner,
+    *,
+    issue_number: int,
+    approved_plan: str,
+    config: AgentLoopConfig,
+    memory,
+    issue_context: IssueContext,
+    coder_session_id: str | None,
+    usage_context: RunUsageContext,
+) -> int:
+    coder_name = agent_display_name(config.coder)
+    sync_coder_base_before_implementation(config, runner)
+    log(config, f"Planning approved; invoking {coder_name} to implement issue #{issue_number}")
+    coder_response = _run_validated_agent(
+        runner,
+        agent=config.coder,
+        config=config,
+        prompt=build_issue_implementation_prompt(
+            issue_number,
+            approved_plan,
+            config,
+            memory,
+            issue_context=issue_context,
+        ),
+        session_id=coder_session_id,
+        marker_description="<!-- AGENT_PR: <number> --> or PR URL",
+        validate=lambda text, human_requirements=issue_context.human_requirements: _validate_response_with_human_requirements(
+            text,
+            marker_validator=_require_pr_number,
+            human_requirements=human_requirements,
+            requirement_scope="implementation requirements",
+            full_omission_fallback="Fetch the issue discussion directly before implementing.",
+        ),
+        usage_context=usage_context,
+    )
+    coder_output = coder_response.text
+    pr_number = int(coder_response.marker_value)
+    log(config, f"{coder_name} reported PR #{pr_number}; validating it is open")
+    validate_open_pr(runner, config=config, pr_number=pr_number)
+    validate_pr_references_issue(
+        runner,
+        config=config,
+        pr_number=pr_number,
+        issue_number=issue_number,
+    )
+    post_pr_comment(
+        runner,
+        config=config,
+        pr_number=pr_number,
+        body=_attach_round_metadata(
+            coder_output,
+            PostedRoundMetadata(
+                flow="pr",
+                role="coder",
+                agent=coder_name,
+                round_number=1,
+                subject=str(get_pr_review_context(runner, config=config, pr_number=pr_number).metadata.head_sha or "unknown"),
+                prior_items=(),
+            ),
+        ),
+    )
+    return run_pr_loop(
+        runner,
+        pr_number=pr_number,
+        config=config,
+        coder_session_id=coder_response.session_id,
+        issue_context=issue_context,
+        workdirs_ready=True,
+        usage_context=usage_context,
+        pre_review_test_pending=True,
+    )
+
+
+def _decompose_approved_plan(
+    runner: Runner,
+    *,
+    issue_number: int,
+    approved_plan: str,
+    config: AgentLoopConfig,
+    memory,
+    issue_context: IssueContext,
+    mode: str,
+    coder_session_id: str | None,
+    usage_context: RunUsageContext,
+) -> tuple[CreatedPhaseIssue, ...]:
+    plan_hash = approved_plan_hash(approved_plan)
+    existing = find_existing_decomposition(
+        issue_context.comments,
+        parent_issue=issue_number,
+        plan_hash=plan_hash,
+        mode=mode,
+    )
+    if existing is not None:
+        log(config, f"Plan decomposition already exists for issue #{issue_number} ({mode}); not recreating children")
+        return tuple(
+            CreatedPhaseIssue(
+                phase=type(
+                    "_ExistingPhase",
+                    (),
+                    {"title": title, "automation": automation, "rollout_risk": "recorded"},
+                )(),
+                issue_url=url,
+                issue_number=number,
+            )
+            for (title, url, number), automation in zip(existing.children, existing.automation, strict=False)
+        )
+
+    coder_name = agent_display_name(config.coder)
+    log(config, f"Planning approved; invoking {coder_name} to decompose issue #{issue_number}")
+    decomposition_response = _run_validated_agent(
+        runner,
+        agent=config.coder,
+        config=config,
+        prompt=build_plan_decomposition_prompt(
+            issue_number,
+            approved_plan,
+            config,
+            memory,
+            issue_context=issue_context,
+        ),
+        session_id=coder_session_id,
+        marker_description="plan decomposition JSON",
+        validate=parse_plan_decomposition,
+        usage_context=usage_context,
+    )
+    decomposition = decomposition_response.marker_value
+    created = create_decomposition_child_issues(
+        runner,
+        config=config,
+        parent_issue=issue_number,
+        approved_plan=approved_plan,
+        decomposition=decomposition,
+    )
+    post_decomposition_parent_summary(
+        runner,
+        config=config,
+        parent_issue=issue_number,
+        mode=mode,
+        plan_hash=plan_hash,
+        created=created,
+    )
+    return created
+
+
 def _run_plan_first_loop(
     runner: Runner,
     *,
@@ -840,73 +994,76 @@ def _run_plan_first_loop(
                     approved_future_followups,
                 ),
             )
-            if not implement_after_approval:
+            mode = config.plan_execution_mode
+            if implement_after_approval:
+                mode = "implement-one-shot"
+            if mode == "plan-only":
                 print(
                     f"Issue #{issue_number} plan approved by {format_agent_list(configured_reviewers)}."
                 )
                 return 0
 
-            sync_coder_base_before_implementation(config, runner)
-            log(config, f"Planning approved; invoking {coder_name} to implement issue #{issue_number}")
-            coder_response = _run_validated_agent(
-                runner,
-                agent=config.coder,
-                config=config,
-                prompt=build_issue_implementation_prompt(
-                    issue_number,
-                    current_plan,
-                    config,
-                    memory,
+            if mode in {"decompose-only", "implement-by-phase"}:
+                created = _decompose_approved_plan(
+                    runner,
+                    issue_number=issue_number,
+                    approved_plan=current_plan,
+                    config=config,
+                    memory=memory,
                     issue_context=issue_context,
-                ),
-                session_id=coder_session_id,
-                marker_description="<!-- AGENT_PR: <number> --> or PR URL",
-                validate=lambda text, human_requirements=issue_context.human_requirements: _validate_response_with_human_requirements(
-                    text,
-                    marker_validator=_require_pr_number,
-                    human_requirements=human_requirements,
-                    requirement_scope="implementation requirements",
-                    full_omission_fallback="Fetch the issue discussion directly before implementing.",
-                ),
-                usage_context=usage_context,
-            )
-            coder_output = coder_response.text
-            coder_session_id = coder_response.session_id
-            pr_number = int(coder_response.marker_value)
-            log(config, f"{coder_name} reported PR #{pr_number}; validating it is open")
-            validate_open_pr(runner, config=config, pr_number=pr_number)
-            validate_pr_references_issue(
-                runner,
-                config=config,
-                pr_number=pr_number,
-                issue_number=issue_number,
-            )
-            post_pr_comment(
-                runner,
-                config=config,
-                pr_number=pr_number,
-                body=_attach_round_metadata(
-                    coder_output,
-                    PostedRoundMetadata(
-                        flow="pr",
-                        role="coder",
-                        agent=coder_name,
-                        round_number=1,
-                        subject=str(get_pr_review_context(runner, config=config, pr_number=pr_number).metadata.head_sha or "unknown"),
-                        prior_items=(),
-                    ),
-                ),
-            )
-            return run_pr_loop(
-                runner,
-                pr_number=pr_number,
-                config=config,
-                coder_session_id=coder_session_id,
-                issue_context=issue_context,
-                workdirs_ready=True,
-                usage_context=usage_context,
-                pre_review_test_pending=True,
-            )
+                    mode=mode,
+                    coder_session_id=coder_session_id,
+                    usage_context=usage_context,
+                )
+                if mode == "decompose-only":
+                    print(f"Issue #{issue_number} approved plan decomposed into child issues.")
+                    return 0
+                first_agent_phase = next(
+                    (item for item in created if item.phase.automation == "agent-pr"),
+                    None,
+                )
+                first_phase = created[0] if created else None
+                if first_phase is None:
+                    raise AgentLoopError("Plan decomposition produced no phases.")
+                if first_phase.phase.automation != "agent-pr":
+                    print(
+                        f"Issue #{issue_number} approved plan decomposed; first phase requires human work "
+                        f"({first_phase.phase.automation}), so implementation is stopping."
+                    )
+                    return 0
+                if first_agent_phase is None or first_agent_phase.issue_number is None:
+                    raise AgentLoopError(
+                        "Cannot implement first decomposed phase because its child issue number "
+                        "was not available from GitHub CLI output."
+                    )
+                child_issue_context = get_issue_context(
+                    runner,
+                    config=config,
+                    issue_number=first_agent_phase.issue_number,
+                )
+                return _implement_approved_issue(
+                    runner,
+                    issue_number=first_agent_phase.issue_number,
+                    approved_plan=getattr(first_agent_phase.phase, "parent_context", current_plan),
+                    config=config,
+                    memory=memory,
+                    issue_context=child_issue_context,
+                    coder_session_id=coder_session_id,
+                    usage_context=usage_context,
+                )
+
+            if mode == "implement-one-shot":
+                return _implement_approved_issue(
+                    runner,
+                    issue_number=issue_number,
+                    approved_plan=current_plan,
+                    config=config,
+                    memory=memory,
+                    issue_context=issue_context,
+                    coder_session_id=coder_session_id,
+                    usage_context=usage_context,
+                )
+            raise AgentLoopError(f"Unknown plan execution mode: {mode}")
 
         if round_number == config.max_rounds:
             raise AgentLoopError(

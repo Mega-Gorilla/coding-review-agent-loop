@@ -270,6 +270,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="With --plan-first, continue into implementation after reviewers approve the plan.",
     )
+    issue.add_argument(
+        "--plan-execution-mode",
+        choices=("plan-only", "decompose-only", "implement-one-shot", "implement-by-phase"),
+        default=None,
+        help=(
+            "With --plan-first, choose what happens after approval: plan-only, "
+            "decompose-only, implement-one-shot, or implement-by-phase. "
+            "Defaults to plan-only unless --implement-after-approval is used."
+        ),
+    )
     add_common(issue)
 
     pr = subparsers.add_parser("pr", help="Run the reviewer/coder loop on an existing PR.")
@@ -334,12 +344,30 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "issue":
             if args.implement_after_approval and not args.plan_first:
                 raise AgentLoopError("--implement-after-approval requires --plan-first.")
+            if args.plan_execution_mode and not args.plan_first:
+                raise AgentLoopError("--plan-execution-mode requires --plan-first.")
+            plan_execution_mode = args.plan_execution_mode
+            if plan_execution_mode is None:
+                plan_execution_mode = (
+                    "implement-one-shot" if args.implement_after_approval else "plan-only"
+                )
+            elif args.implement_after_approval and plan_execution_mode != "implement-one-shot":
+                raise AgentLoopError(
+                    "--implement-after-approval is only compatible with "
+                    "--plan-execution-mode implement-one-shot."
+                )
+            config = AgentLoopConfig(
+                **{
+                    **config.__dict__,
+                    "plan_execution_mode": plan_execution_mode,
+                }
+            )
             return run_issue_loop(
                 runner,
                 issue_number=args.issue_number,
                 config=config,
                 plan_first=args.plan_first,
-                implement_after_approval=args.implement_after_approval,
+                implement_after_approval=plan_execution_mode == "implement-one-shot",
             )
         if args.command == "pr":
             return run_pr_loop(runner, pr_number=args.pr_number, config=config)

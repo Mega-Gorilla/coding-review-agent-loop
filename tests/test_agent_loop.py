@@ -47,6 +47,12 @@ from coding_review_agent_loop.config import (
     default_agent_workdir,
     default_cache_root,
 )
+from coding_review_agent_loop.decomposition import (
+    MAX_DECOMPOSITION_PHASES,
+    approved_plan_hash,
+    format_decomposition_parent_summary,
+    parse_plan_decomposition,
+)
 from coding_review_agent_loop.github import (
     HumanReviewRequirement,
     IssueComment,
@@ -574,6 +580,30 @@ def _make_migration(revision: str, down_revision: str | tuple[str, ...] | None) 
         f"down_revision = {repr(down_revision)}\n"
         "branch_labels = None\n"
         "depends_on = None\n"
+    )
+
+
+def plan_decomposition_json(*phases):
+    if not phases:
+        phases = (
+            {
+                "title": "Internal schema utilities",
+                "scope": "Add internal helpers only.",
+                "non_goals": "No live orchestrator behavior changes.",
+                "dependency_notes": "First phase; no dependencies.",
+                "rollout_risk": "low - internal only.",
+                "validation": "Run parser and orchestrator tests before the next phase.",
+                "parent_context": "Approved plan slice: add helpers and tests while preserving existing behavior.",
+                "automation": "agent-pr",
+                "depends_on": [],
+            },
+        )
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "plan_decomposition",
+            "phases": list(phases),
+        }
     )
 
 
@@ -7540,6 +7570,33 @@ def test_approved_followups_cli_mode_is_configurable(tmp_path, mode):
     assert config.approved_followups == mode
 
 
+@pytest.mark.parametrize(
+    "mode",
+    ["plan-only", "decompose-only", "implement-one-shot", "implement-by-phase"],
+)
+def test_plan_execution_mode_cli_is_configurable(tmp_path, mode):
+    parser = build_parser()
+    args = parser.parse_args([
+        "issue",
+        "56",
+        "--repo",
+        "OWNER/REPO",
+        "--plan-first",
+        "--plan-execution-mode",
+        mode,
+        "--claude-dir",
+        str(tmp_path / "claude"),
+        "--codex-dir",
+        str(tmp_path / "codex"),
+        "--gemini-dir",
+        str(tmp_path / "gemini"),
+    ])
+
+    config = config_from_args(args, FakeRunner())
+
+    assert config.plan_execution_mode == mode
+
+
 def test_explicit_agent_dirs_are_preserved_when_others_default(tmp_path):
     parser = build_parser()
     codex_dir = tmp_path / "codex"
@@ -8235,6 +8292,89 @@ def test_issue_loop_plan_first_stops_after_approved_plan(tmp_path):
     assert not any(cmd[:2] == ["git", "switch"] for cmd, _cwd in runner.commands)
 
 
+def test_parse_plan_decomposition_accepts_agent_and_human_phases():
+    parsed = parse_plan_decomposition(
+        plan_decomposition_json(
+            {
+                "title": "Internal schema utilities",
+                "scope": "Add helpers.",
+                "non_goals": "No live switch.",
+                "dependency_notes": "First phase.",
+                "rollout_risk": "low - internal only.",
+                "validation": "Run python -m pytest.",
+                "parent_context": "Approved plan slice and invariant details.",
+                "automation": "agent-pr",
+                "depends_on": [],
+            },
+            {
+                "title": "Manual rollout checkpoint",
+                "scope": "Human validates the deployed behavior.",
+                "non_goals": "No code changes.",
+                "dependency_notes": "After Internal schema utilities.",
+                "rollout_risk": "medium - live checkpoint.",
+                "validation": "Human remark and closure required.",
+                "parent_context": "Approved plan slice for the manual checkpoint.",
+                "automation": "human-action",
+                "depends_on": ["Internal schema utilities"],
+            },
+        )
+    )
+
+    assert [phase.title for phase in parsed.phases] == [
+        "Internal schema utilities",
+        "Manual rollout checkpoint",
+    ]
+    assert parsed.phases[1].automation == "human-action"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda phase: phase.pop("parent_context"), "parent_context"),
+        (lambda phase: phase.pop("rollout_risk"), "rollout_risk"),
+        (lambda phase: phase.pop("validation"), "validation"),
+        (lambda phase: phase.__setitem__("automation", "robot"), "invalid automation"),
+        (lambda phase: phase.__setitem__("depends_on", ["Missing phase"]), "unknown phase"),
+    ],
+)
+def test_parse_plan_decomposition_rejects_invalid_phase_fields(mutate, message):
+    phase = {
+        "title": "Internal schema utilities",
+        "scope": "Add helpers.",
+        "non_goals": "No live switch.",
+        "dependency_notes": "First phase.",
+        "rollout_risk": "low - internal only.",
+        "validation": "Run python -m pytest.",
+        "parent_context": "Approved plan slice and invariant details.",
+        "automation": "agent-pr",
+        "depends_on": [],
+    }
+    mutate(phase)
+
+    with pytest.raises(AgentLoopError, match=message):
+        parse_plan_decomposition(plan_decomposition_json(phase))
+
+
+def test_parse_plan_decomposition_rejects_duplicates_and_over_cap():
+    phase = {
+        "title": "Repeated phase",
+        "scope": "Add helpers.",
+        "non_goals": "No live switch.",
+        "dependency_notes": "First phase.",
+        "rollout_risk": "low - internal only.",
+        "validation": "Run python -m pytest.",
+        "parent_context": "Approved plan slice and invariant details.",
+        "automation": "agent-pr",
+        "depends_on": [],
+    }
+    with pytest.raises(AgentLoopError, match="duplicate phase title"):
+        parse_plan_decomposition(plan_decomposition_json(phase, dict(phase)))
+
+    phases = [dict(phase, title=f"Phase {index}") for index in range(MAX_DECOMPOSITION_PHASES + 1)]
+    with pytest.raises(AgentLoopError, match="MAX_DECOMPOSITION_PHASES"):
+        parse_plan_decomposition(plan_decomposition_json(*phases))
+
+
 def test_issue_loop_plan_first_rejects_missing_initial_plan_human_requirements_acknowledgement(
     tmp_path,
 ):
@@ -8791,6 +8931,165 @@ def test_issue_loop_plan_first_approved_future_followups_are_summarized_without_
     assert "Approved plan future follow-ups:" in runner.comments[-1]
     assert "document parser helper reuse separately" in runner.comments[-1]
     assert "Add a later cleanup to dedupe shared prompt rendering." in runner.comments[-1]
+
+
+def test_issue_loop_plan_first_decompose_only_creates_child_issues(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Plan:\n- Add schema helpers.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            plan_decomposition_json(
+                {
+                    "title": "Schema helpers",
+                    "scope": "Add parser dataclasses and tests.",
+                    "non_goals": "No live orchestrator switch.",
+                    "dependency_notes": "First phase; no dependencies.",
+                    "rollout_risk": "low - internal only.",
+                    "validation": "Run python -m pytest tests/test_agent_loop.py.",
+                    "parent_context": "Approved plan slice: add schema helpers and preserve behavior.",
+                    "automation": "agent-pr",
+                    "depends_on": [],
+                },
+                {
+                    "title": "Human rollout checkpoint",
+                    "scope": "Human validates rollout readiness.",
+                    "non_goals": "No code changes.",
+                    "dependency_notes": "Depends on Schema helpers.",
+                    "rollout_risk": "medium - manual checkpoint.",
+                    "validation": "Human must add a remark and close the issue.",
+                    "parent_context": "Approved plan slice: stop for human validation.",
+                    "automation": "manual-close",
+                    "depends_on": ["Schema helpers"],
+                },
+            ),
+        ],
+        codex_outputs=[
+            "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        issue_urls=[
+            "https://github.com/OWNER/REPO/issues/101",
+            "https://github.com/OWNER/REPO/issues/102",
+        ],
+    )
+    config = make_config(tmp_path, plan_execution_mode="decompose-only")
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    assert len(runner.issues) == 2
+    assert runner.issues[0]["title"] == "Phase 1: Schema helpers (from #56)"
+    assert "Run `agent-loop issue <this issue number>`" in runner.issues[0]["body"]
+    assert "Approved plan slice: add schema helpers" in runner.issues[0]["body"]
+    assert runner.issues[1]["title"] == "[Human] Phase 2: Human rollout checkpoint (from #56)"
+    assert "depends on #101: Schema helpers" in runner.issues[1]["body"]
+    assert "human should add the required remark/update and close this issue" in runner.issues[1]["body"]
+    summary = runner.comments[-1]
+    assert summary.startswith("Approved plan decomposed for issue #56.")
+    assert "Every phase above has a GitHub child issue" in summary
+    assert "<!-- AGENT_PLAN_DECOMPOSITION:" in summary
+    assert not any(cmd[:3] == ["gh", "pr", "view"] for cmd, _cwd in runner.commands)
+
+
+def test_issue_loop_plan_first_decompose_only_is_idempotent(tmp_path):
+    plan = "Plan:\n- Add schema helpers.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    summary = format_decomposition_parent_summary(
+        parent_issue=56,
+        mode="decompose-only",
+        plan_hash=approved_plan_hash(plan),
+        created=(),
+    )
+    runner = FakeRunner(
+        issue_comments=[
+            {
+                "author": {"login": "bot"},
+                "createdAt": "2026-05-23T00:00:00Z",
+                "body": _attach_round_metadata(
+                    plan,
+                    PostedRoundMetadata(
+                        flow="plan",
+                        role="coder",
+                        agent="Claude",
+                        round_number=1,
+                        subject=_plan_subject(plan),
+                    ),
+                ),
+            },
+            {
+                "author": {"login": "bot"},
+                "createdAt": "2026-05-23T00:00:01Z",
+                "body": _attach_round_metadata(
+                    "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+                    PostedRoundMetadata(
+                        flow="plan",
+                        role="reviewer",
+                        agent="Codex",
+                        round_number=1,
+                        subject=_plan_subject(plan),
+                        state="approved",
+                    ),
+                ),
+            },
+            {"author": {"login": "bot"}, "createdAt": "2026-05-23T00:00:02Z", "body": summary},
+        ],
+    )
+    config = make_config(tmp_path, plan_execution_mode="decompose-only")
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    assert runner.issues == []
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+
+
+def test_issue_loop_plan_first_implement_by_phase_stops_on_human_first_phase(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Plan:\n- Validate migration manually first.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            plan_decomposition_json(
+                {
+                    "title": "Manual readiness check",
+                    "scope": "Human validates external readiness.",
+                    "non_goals": "No agent PR.",
+                    "dependency_notes": "First phase; no dependencies.",
+                    "rollout_risk": "medium - manual readiness gate.",
+                    "validation": "Human remark and closure required.",
+                    "parent_context": "Approved plan slice: manual readiness gate.",
+                    "automation": "human-action",
+                    "depends_on": [],
+                }
+            ),
+        ],
+        codex_outputs=["Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex"],
+    )
+    config = make_config(tmp_path, plan_execution_mode="implement-by-phase")
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    assert len(runner.issues) == 1
+    assert runner.issues[0]["title"].startswith("[Human] Phase 1")
+    assert not any(cmd[:3] == ["gh", "pr", "view"] for cmd, _cwd in runner.commands)
+
+
+def test_issue_loop_plan_first_implement_by_phase_implements_first_agent_phase(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Plan:\n- Add schema helpers.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            plan_decomposition_json(),
+            "Implemented first phase.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        issue_urls=["https://github.com/OWNER/REPO/issues/99"],
+        pr_payload={"body": "Fixes #99"},
+    )
+    config = make_config(tmp_path, plan_execution_mode="implement-by-phase")
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    assert len(runner.issues) == 1
+    claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert len(claude_calls) == 3
+    assert "GitHub issue #99" in claude_calls[2][-1]
+    assert "Approved implementation plan" in claude_calls[2][-1]
 
 
 def test_issue_loop_plan_first_keeps_blocking_review_when_future_followups_are_misclassified(tmp_path):
