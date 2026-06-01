@@ -34,6 +34,7 @@ flowchart LR
 
     Orchestrator --> Prompts[Prompt builders<br/>prompts.py]
     Orchestrator --> Protocol[Structured JSON, marker,<br/>and follow-up validation<br/>protocol.py]
+    Orchestrator --> Repair[Malformed structured-response repair<br/>repair.py / Gemini CLI]
     Orchestrator --> RoundState[Round resume metadata<br/>round_state.py / AGENT_LOOP_META]
     Orchestrator --> Registry[Agent registry<br/>agents/registry.py]
     Orchestrator --> GitHubOps[GitHub operations<br/>github.py]
@@ -44,6 +45,7 @@ flowchart LR
     Prompts --> StructuredContracts[Structured response contracts<br/>reviews / follow-ups / plans]
     HumanReqs --> Prompts
     Protocol --> RoundState
+    Repair --> Protocol
 
     Registry --> Claude[Claude backend<br/>claude]
     Registry --> Codex[Codex backend<br/>codex exec]
@@ -85,6 +87,7 @@ sequenceDiagram
     participant Resp as Public response files
     participant GH as GitHub via gh
     participant Protocol as Structured response validation
+    participant Repair as Repair pass
 
     User->>CLI: agent-loop issue | task | pr
     CLI->>Orch: validated config
@@ -105,18 +108,30 @@ sequenceDiagram
         Orch->>Reviewer: review PR with structured JSON review schema
         Reviewer-->>Resp: write public response if supported
         Resp-->>Protocol: validate JSON state, item ledgers, and footer
+        opt malformed structured response
+            Protocol->>Repair: ask Gemini to reformat only
+            Repair-->>Protocol: repaired JSON + footer
+        end
         Protocol-->>Orch: reviewed state and carried item dispositions
         Orch->>GH: post review comment
         alt any blocking review
             Orch->>Coder: address combined feedback and signed human requirements
             Coder-->>Resp: write public response if supported
             Resp-->>Protocol: validate coder_followup JSON and human_requirements ack
+            opt malformed structured response
+                Protocol->>Repair: ask Gemini to reformat only
+                Repair-->>Protocol: repaired JSON + footer
+            end
             Protocol-->>Orch: AGENT_STATE blocking
             Orch->>GH: post coder update with AGENT_LOOP_META
         else approved review has same-PR follow-ups in a fix-and mode
             Orch->>Coder: address same-PR follow-ups and signed human requirements
             Coder-->>Resp: write public response if supported
             Resp-->>Protocol: validate coder_followup JSON and human_requirements ack
+            opt malformed structured response
+                Protocol->>Repair: ask Gemini to reformat only
+                Repair-->>Protocol: repaired JSON + footer
+            end
             Protocol-->>Orch: AGENT_STATE blocking
             Orch->>GH: post coder update with AGENT_LOOP_META
         else all approved
@@ -591,6 +606,17 @@ an agent exits or returns only diagnostics, empty output, or normal prose
 without the required marker, the loop fails locally with `AgentLoopError` and
 the attempt log path instead of posting that raw output as a review.
 
+For structured plan reviews, plan revisions, PR reviews, and coder follow-ups,
+a present but malformed structured response may get one repair pass before the
+local failure is raised. The repair pass calls the configured Gemini CLI with a
+format-repair prompt and asks it to preserve the agent's intent while emitting
+only the required JSON object, matching footer marker, and standalone
+signature. Repaired output is accepted only after it passes the same schema,
+state, footer, follow-up, prior-item, and human-requirement validation as an
+original response. If the repair CLI fails, returns empty output, or produces
+invalid output, the original validation failure remains local and nothing is
+posted to GitHub.
+
 Known transient agent/model failures are retried before local failure. The
 default is two retries with bounded backoff; tune this with
 `--agent-max-retries` and `--agent-retry-backoff-seconds`. Retry matching is
@@ -695,6 +721,12 @@ diagnostics, and whether the subprocess is still making progress; the response
 file is the public answer the orchestrator will validate and post. Empty
 response files, missing markers, or diagnostics-only stdout fail locally instead
 of being posted to GitHub.
+
+If strict structured-response validation fails, the log may show a repair pass:
+`schema validation failed ... attempting repair pass`, followed by either
+`repair pass recovered malformed response` or `repair pass produced invalid
+output`. A recovered response is still revalidated before posting; a failed
+repair leaves the run in local failure just like any other protocol error.
 
 Long reset or quota responses can exit early with guidance to rerun after the
 reset or switch keys/models. Narrower transient stream, tool-call, network
