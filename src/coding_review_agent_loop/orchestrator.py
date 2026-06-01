@@ -20,11 +20,14 @@ from .config import (
 )
 from .decomposition import (
     CreatedPhaseIssue,
+    RecordedPhase,
     approved_plan_hash,
     create_decomposition_child_issues,
     find_existing_decomposition,
+    find_existing_phase_implementation_handoff,
     parse_plan_decomposition,
     post_decomposition_parent_summary,
+    post_phase_implementation_handoff_comment,
 )
 from .errors import AgentLoopError, QuotaResetExceededError
 from .github import (
@@ -716,11 +719,7 @@ def _decompose_approved_plan(
         log(config, f"Plan decomposition already exists for issue #{issue_number} ({mode}); not recreating children")
         return tuple(
             CreatedPhaseIssue(
-                phase=type(
-                    "_ExistingPhase",
-                    (),
-                    {"title": title, "automation": automation, "rollout_risk": "recorded"},
-                )(),
+                phase=RecordedPhase(title=title, automation=automation),
                 issue_url=url,
                 issue_number=number,
             )
@@ -1050,15 +1049,41 @@ def _run_plan_first_loop(
                         "Cannot implement first decomposed phase because its child issue number "
                         "was not available from GitHub CLI output."
                     )
+                plan_hash = approved_plan_hash(current_plan)
+                handoff = find_existing_phase_implementation_handoff(
+                    issue_context.comments,
+                    parent_issue=issue_number,
+                    plan_hash=plan_hash,
+                    mode=mode,
+                    phase_index=1,
+                    child_issue_number=first_agent_phase.issue_number,
+                )
+                if handoff is not None:
+                    print(
+                        f"Issue #{issue_number} approved plan already handed off to child issue "
+                        f"#{handoff.child_issue_number}; resume directly with "
+                        f"`agent-loop issue {handoff.child_issue_number}`."
+                    )
+                    return 0
+                post_phase_implementation_handoff_comment(
+                    runner,
+                    config=config,
+                    parent_issue=issue_number,
+                    mode=mode,
+                    plan_hash=plan_hash,
+                    phase_index=1,
+                    created=first_agent_phase,
+                )
                 child_issue_context = get_issue_context(
                     runner,
                     config=config,
                     issue_number=first_agent_phase.issue_number,
                 )
+                phase_parent_context = first_agent_phase.phase.parent_context or current_plan
                 return _implement_approved_issue(
                     runner,
                     issue_number=first_agent_phase.issue_number,
-                    approved_plan=getattr(first_agent_phase.phase, "parent_context", current_plan),
+                    approved_plan=phase_parent_context,
                     config=config,
                     memory=memory,
                     issue_context=child_issue_context,

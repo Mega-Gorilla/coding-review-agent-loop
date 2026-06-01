@@ -194,7 +194,11 @@ The modes are:
 - `implement-one-shot`: keep the existing post-approval implementation handoff.
   This is also what `--implement-after-approval` selects for compatibility.
 - `implement-by-phase`: create/link every phase issue, implement only the first
-  `agent-pr` child issue, then stop after that PR review loop.
+  `agent-pr` child issue, then stop after that PR review loop. The parent issue
+  records a one-time handoff before child implementation starts; parent reruns
+  after that handoff do not re-run the child and should be resumed directly with
+  `agent-loop issue <child>`. Older decomposition summaries without this marker
+  are treated as not yet handed off, so the first child handoff is recorded once.
 
 Generated child issues are self-contained: each body includes the parent issue
 link, the relevant approved parent-plan slice, constraints/invariants,
@@ -209,7 +213,7 @@ phase is expected to be implemented through a child issue and PR.
 their titles, bodies, and parent summary call out that a human must perform the
 work or checkpoint, add the required remark/update, and close the issue. If
 `implement-by-phase` sees a human-only first phase, it stops instead of
-pretending the agent can implement it.
+recording an implementation handoff.
 
 Plan decomposition allows at most 8 phases. Over-cap responses are validation
 failures and must be consolidated; phases are never silently truncated. This
