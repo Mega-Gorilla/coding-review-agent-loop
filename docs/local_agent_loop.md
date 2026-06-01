@@ -33,12 +33,17 @@ flowchart LR
     Memory --> MemoryCache[(Repo-scoped memory cache<br/>summary / architecture / tests)]
 
     Orchestrator --> Prompts[Prompt builders<br/>prompts.py]
-    Orchestrator --> Protocol[Marker and follow-up parsing<br/>protocol.py]
+    Orchestrator --> Protocol[Structured JSON, marker,<br/>and follow-up validation<br/>protocol.py]
+    Orchestrator --> RoundState[Round resume metadata<br/>round_state.py / AGENT_LOOP_META]
     Orchestrator --> Registry[Agent registry<br/>agents/registry.py]
     Orchestrator --> GitHubOps[GitHub operations<br/>github.py]
+    Orchestrator --> HumanReqs[Signed human requirement handling<br/>-- Human Reviewer]
     Orchestrator --> PreReviewTests[Optional pre-review local test command<br/>--test-command]
     Orchestrator --> OptionalTests[Optional post-approval local test command<br/>--test-command]
     Orchestrator --> Followups[Approved follow-up handling<br/>summaries / issues / same-PR fixes]
+    Prompts --> StructuredContracts[Structured response contracts<br/>reviews / follow-ups / plans]
+    HumanReqs --> Prompts
+    Protocol --> RoundState
 
     Registry --> Claude[Claude backend<br/>claude]
     Registry --> Codex[Codex backend<br/>codex exec]
@@ -58,8 +63,12 @@ flowchart LR
 
     AgentCLIs --> AgentDirs
     AgentCLIs --> ResponseFiles[(Public response files<br/>/tmp/coding-review-agent-loop/responses)]
-    ResponseFiles --> Orchestrator
+    ResponseFiles --> Protocol
+    Protocol --> Orchestrator
+    RoundState --> GitHubOps
     GhCLI --> GitHub[(GitHub repo<br/>issues / PRs / comments / checks)]
+    GitHub --> HumanReqs
+    GitHub --> RoundState
     Followups --> GitHubOps
 ```
 
@@ -75,36 +84,43 @@ sequenceDiagram
     participant Reviewer as Reviewer agent CLI(s)
     participant Resp as Public response files
     participant GH as GitHub via gh
+    participant Protocol as Structured response validation
 
     User->>CLI: agent-loop issue | task | pr
     CLI->>Orch: validated config
     Orch->>Orch: ensure active agent workdirs
     Orch->>Memory: prepare advisory repo memory
+    Orch->>GH: load prior AGENT_LOOP_META and signed human requirements
     alt issue or task
-        Orch->>Coder: create or update PR
+        Orch->>Coder: create or update PR with structured-response contract
         Coder-->>Resp: write public response if supported
-        Coder-->>Orch: response file or parsed stdout with AGENT_PR marker
+        Resp-->>Protocol: structured JSON or marker fallback
+        Protocol-->>Orch: validated AGENT_PR marker or clarification
         Orch->>GH: validate PR and post coder output
     else existing PR
         Orch->>GH: validate open PR
     end
 
     loop until all reviewers approve or max rounds reached
-        Orch->>Reviewer: review PR
+        Orch->>Reviewer: review PR with structured JSON review schema
         Reviewer-->>Resp: write public response if supported
-        Reviewer-->>Orch: response file or parsed stdout with AGENT_STATE
+        Resp-->>Protocol: validate JSON state, item ledgers, and footer
+        Protocol-->>Orch: reviewed state and carried item dispositions
         Orch->>GH: post review comment
         alt any blocking review
-            Orch->>Coder: address combined feedback
+            Orch->>Coder: address combined feedback and signed human requirements
             Coder-->>Resp: write public response if supported
-            Coder-->>Orch: AGENT_STATE blocking
-            Orch->>GH: post coder update
+            Resp-->>Protocol: validate coder_followup JSON and human_requirements ack
+            Protocol-->>Orch: AGENT_STATE blocking
+            Orch->>GH: post coder update with AGENT_LOOP_META
         else approved review has same-PR follow-ups in a fix-and mode
-            Orch->>Coder: address same-PR follow-ups
+            Orch->>Coder: address same-PR follow-ups and signed human requirements
             Coder-->>Resp: write public response if supported
-            Coder-->>Orch: AGENT_STATE blocking
-            Orch->>GH: post coder update
+            Resp-->>Protocol: validate coder_followup JSON and human_requirements ack
+            Protocol-->>Orch: AGENT_STATE blocking
+            Orch->>GH: post coder update with AGENT_LOOP_META
         else all approved
+            Orch->>Protocol: require reviewer resolution marker for signed human requirements
             opt future follow-ups requested
                 Orch->>GH: summarize follow-ups or create issues
             end

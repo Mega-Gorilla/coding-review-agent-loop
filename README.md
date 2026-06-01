@@ -359,7 +359,8 @@ are not mistaken for follow-up text.
 
 The remaining legacy compatibility surface is intentional:
 
-- Markdown review/plan parsing still accepts non-structured agent responses.
+- Markdown review/plan parsing remains supported in the resume path for
+  already-completed reviewer rounds that predate structured metadata.
 - The legacy heading `### Non-blocking follow-ups` still maps to future work.
 - Marker-only markdown paths remain compatibility fallbacks; new follow-up,
   review, and plan-revision examples should use structured JSON first.
