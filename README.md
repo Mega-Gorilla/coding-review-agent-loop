@@ -262,6 +262,38 @@ comments carry `AGENT_LOOP_META`. When metadata exists for the current head or
 plan subject, resume reconstruction uses that metadata-backed ledger and ignores
 stale visible item IDs from older heads, superseded plans, or replayed rounds.
 
+Reviewers should use structured review JSON when prompted. PR review payloads
+classify current work as `blocking_items`, `same_pr_followups`, or
+`future_followups`; plan review payloads use `blocking_plan_issues`,
+`same_plan_followups`, and `future_followups`. Blocking reviews may not hide
+required current-round work in future follow-ups, and approved reviews may not
+leave blocking or Same-PR/Same-plan work active. When a prior unresolved ledger
+is present, every carried `item-N` must be dispositioned exactly once.
+
+Coder follow-up rounds also use structured JSON. A PR follow-up response uses
+`kind: "coder_followup"` with `state`, `summary`, `addressed_items`,
+`remaining_items`, `human_requirements`, and optional `tests_run`, then a
+matching `<!-- AGENT_STATE: blocking -->` footer and standalone agent
+signature. Plan revision rounds use `kind: "plan_revision"` with
+`state: "blocking"`, `summary`, `prior_plan_item_dispositions`, and
+`plan_steps`, followed by `<!-- AGENT_PLAN_STATE: blocking -->`. The validator
+rejects unknown keys, footer/state mismatches, trailing prose after the
+signature, and coder follow-up item partitions that omit or duplicate carried
+review items. Public GitHub comments are rendered from the validated payload and
+omit the raw JSON, while `AGENT_LOOP_META` retains resume metadata.
+
+Signed human requirements are issue or PR comments, or an issue body, ending
+with `-- Human Reviewer`. They are surfaced separately in coder prompts as
+high-priority requirements. Coders must acknowledge them in structured
+`human_requirements` fields; legacy markdown paths must include
+`### Human requirements` and `<!-- HUMAN_REQUIREMENTS_ADDRESSED -->`. If the
+prompt omits detailed requirements because of truncation, the coder must state
+that it `checked the relevant GitHub discussion directly before responding`.
+The orchestrator carries a synthetic acknowledgement item until the coder
+acknowledgement validates, and reviewer approval must include
+`<!-- HUMAN_REQUIREMENTS_RESOLVED -->` before those requirements are treated as
+closed.
+
 When `--approved-followups` is set to `summarize`, `issue`, or a `fix-and-*`
 mode, approved reviews may include future work under:
 

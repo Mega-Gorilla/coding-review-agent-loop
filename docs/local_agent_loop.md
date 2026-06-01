@@ -220,6 +220,16 @@ failures and must be consolidated; phases are never silently truncated. This
 limit is independent of `--approved-followups`, whose issue mode still caps
 approved-review future follow-up issues separately.
 
+The decomposition JSON is intentionally strict. Each phase title must be unique,
+`automation` must be one of `agent-pr`, `human-action`, or `manual-close`, and
+`depends_on` must name earlier phase titles only. Unknown dependencies,
+self-dependencies, and forward dependencies are rejected. Parent summaries carry
+an `AGENT_PLAN_DECOMPOSITION` marker keyed by parent issue, approved-plan hash,
+and mode so reruns do not recreate child issues. `implement-by-phase` also
+writes an `AGENT_PLAN_PHASE_IMPLEMENTATION` handoff marker before starting the
+first child implementation; parent reruns after that point should resume through
+the child issue.
+
 Implement a free-form task:
 
 ```bash
@@ -430,7 +440,7 @@ agent-loop issue 56 \
   --gemini-arg=--approval-mode --gemini-arg=auto_edit
 ```
 
-Providing any `--claude-arg`, `--codex-arg`, or `--gemini-arg` replaces that agent's default entirely. Claude and Gemini prompts include a tool-owned response-file path under `/tmp/coding-review-agent-loop/responses/`; when the file exists and is non-empty, the loop validates and posts that file instead of stdout so CLI diagnostics and tool narration do not leak into GitHub comments. Gemini still supports stdout marker filtering as a fallback. If you pass `--gemini-arg=--output-format --gemini-arg=json`, the loop extracts the JSON `response` field before parsing markers when no response file was written. Fallback stdout is never posted unless the required protocol marker validates.
+Providing any `--claude-arg`, `--codex-arg`, or `--gemini-arg` replaces that agent's default entirely. Agent prompts include a tool-owned public response-file path. Claude and Codex response files live under `/tmp/coding-review-agent-loop/responses/`; Gemini uses a writable response path inside its trusted git metadata area or workspace response directory. When a response file exists and is non-empty, the loop validates and posts that file instead of stdout so CLI diagnostics and tool narration do not leak into GitHub comments. Codex also writes its last CLI message to a temporary file as a fallback, and Gemini still supports stdout marker filtering as a fallback. If you pass `--gemini-arg=--output-format --gemini-arg=json`, the loop extracts the JSON `response` field before parsing markers when no response file was written. Fallback stdout is never posted unless the required protocol marker validates.
 
 ## Protocol
 
@@ -464,6 +474,107 @@ markdown comments, newer orchestrator-rendered comments, or both. When
 `AGENT_LOOP_META` exists for the current PR head or plan subject, resume uses
 that metadata-backed ledger and ignores stale visible item IDs from older heads,
 superseded plans, or replayed rounds.
+
+### Structured reviewer responses
+
+Reviewer prompts prefer strict JSON followed by the matching footer marker and
+standalone signature. PR reviews classify work into `blocking_items`,
+`same_pr_followups`, `future_followups`, and `prior_item_dispositions`. Plan
+reviews use `blocking_plan_issues`, `same_plan_followups`,
+`future_followups`, and `prior_plan_item_dispositions`. Blocking reviews may not
+include structured future follow-ups; current-round work must stay blocking or
+Same-PR/Same-plan. Approved reviews may include future follow-ups, but they may
+not include blocking work, Same-PR/Same-plan work, or carried prior items left
+active. When the prompt includes a prior unresolved ledger, every carried
+`item-N` must be dispositioned exactly once as resolved, still blocking,
+Same-PR/Same-plan, or future.
+
+### Structured coder responses
+
+Coder follow-up rounds after PR review feedback must use this structured shape:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "coder_followup",
+  "state": "blocking",
+  "summary": "Implemented the requested validation and updated tests.",
+  "addressed_items": ["item-1"],
+  "remaining_items": [],
+  "human_requirements": {
+    "addressed_ids": ["Requirement 1"],
+    "checked_discussion_directly": false
+  },
+  "tests_run": ["python -m pytest tests/test_agent_loop.py -k coder_followup"]
+}
+```
+
+The payload is followed by `<!-- AGENT_STATE: blocking -->` and the standalone
+agent signature. `addressed_items` and `remaining_items` must partition every
+carried reviewer item except the synthetic human-requirements acknowledgement
+item, which the orchestrator reconciles separately. Unknown item IDs,
+duplicates, omitted items, unknown JSON keys, footer/state mismatches, and
+trailing prose after the signature are rejected. The public GitHub comment is
+rendered from the validated payload, including the summary, addressed and
+remaining items, optional tests, and signature, but omitting the raw JSON.
+
+Plan revision rounds use a parallel structured shape:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "plan_revision",
+  "state": "blocking",
+  "summary": "Revised the plan to include the migration safety check.",
+  "prior_plan_item_dispositions": [
+    {
+      "item_id": "item-1",
+      "disposition": "resolved",
+      "note": "Added the migration safety step."
+    }
+  ],
+  "plan_steps": [
+    "Add migration validation before changing production behavior.",
+    "Update tests for the new validation path."
+  ]
+}
+```
+
+Plan revisions must use `state: "blocking"` and the
+`<!-- AGENT_PLAN_STATE: blocking -->` footer. The orchestrator validates the
+JSON, normalizes the plan into canonical markdown for stored plan state, renders
+a public comment without raw JSON, and stores the raw structured payload in
+`AGENT_LOOP_META` for resume.
+
+### Human requirements
+
+Signed human requirements come from issue bodies, issue comments, or PR
+comments ending with the standalone signature `-- Human Reviewer`. The loop
+extracts those signed entries separately from ordinary discussion and surfaces
+them in coder prompts before issue or PR context. Later signed requirements can
+refine earlier ones; the prompt tells agents to treat them as high-priority
+human instructions.
+
+Coders must explicitly acknowledge signed requirements. In structured
+`coder_followup` responses, fill `human_requirements.addressed_ids` with every
+surfaced `Requirement N` and set `checked_discussion_directly` when the prompt
+says detailed requirements were omitted. In legacy markdown implementation or
+plan-revision paths, include:
+
+```md
+<!-- HUMAN_REQUIREMENTS_ADDRESSED -->
+### Human requirements
+- Requirement 1: Implemented by preserving the stable API path.
+```
+
+If truncation omits all detailed signed requirements, the acknowledgement must
+state that the coder `checked the relevant GitHub discussion directly before
+responding`. Missing, duplicate, or unknown requirement IDs fail validation.
+When acknowledgement fails, the orchestrator carries a synthetic blocking item
+for the missing acknowledgement until a later coder response validates.
+Reviewer approval must include `<!-- HUMAN_REQUIREMENTS_RESOLVED -->`; without
+that marker, the loop keeps the requirements open instead of treating the round
+as fully approved.
 
 The loop validates required markers before posting agent output to GitHub. If
 an agent exits or returns only diagnostics, empty output, or normal prose
@@ -550,12 +661,19 @@ agents run:
 ```
 
 Use `tail -f` on the displayed path to see live output. Logs are diagnostic
-output and may include CLI status text or tool narration. For Claude and
-Gemini, prompts also include a public response-file path under
-`/tmp/coding-review-agent-loop/responses/`; when that file exists and is
-non-empty, the loop validates and posts the file contents to GitHub instead of
-stdout. Fallback stdout is still validated before posting. The log directory
-gets its own `.gitignore` on first use.
+output and may include CLI status text, tool narration, retry diagnostics, or
+JSON event streams. GitHub comments come from validated public response files,
+validated Codex last-message output, or validated fallback stdout, not from raw
+logs. For Claude and Codex the response path is under
+`/tmp/coding-review-agent-loop/responses/`; Gemini uses a writable response path
+inside its trusted git metadata area or workspace response directory and also
+supports marker-filtered stdout fallback. When an agent appears stuck, inspect
+both the heartbeat log path and the response-file path printed at start. Long
+reset, quota, auth, credit, dirty-workdir, and missing-marker failures can exit
+early with guidance; narrower transient stream, tool-call, timeout, reset, or
+provider 5xx failures retry according to `--agent-max-retries` and
+`--agent-retry-backoff-seconds`. The log directory gets its own `.gitignore` on
+first use.
 
 Each top-level run also writes `<run-id>-usage-summary.json` in the same
 directory. That sidecar aggregates usage by call, by agent, and for the full
