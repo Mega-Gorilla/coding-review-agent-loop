@@ -262,6 +262,30 @@ comments carry `AGENT_LOOP_META`. When metadata exists for the current head or
 plan subject, resume reconstruction uses that metadata-backed ledger and ignores
 stale visible item IDs from older heads, superseded plans, or replayed rounds.
 
+Structured JSON is also the preferred coder format for follow-up and plan
+revision rounds. Coder follow-up responses use `kind: "coder_followup"` with
+`state`, `summary`, `addressed_items`, `remaining_items`,
+`human_requirements`, and optional `tests_run`; every carried reviewer item ID
+must appear exactly once in either `addressed_items` or `remaining_items`.
+Plan-revision responses use `kind: "plan_revision"` with `state: "blocking"`,
+`summary`, `prior_plan_item_dispositions`, and `plan_steps`. Structured
+responses must start with one top-level JSON object, place the matching
+`AGENT_STATE` or `AGENT_PLAN_STATE` footer immediately after it, and end with
+only the standalone agent signature. The loop renders validated structured
+payloads into normal public GitHub comments, so raw JSON is not posted.
+
+Signed human reviewer comments are approval-critical when they end with a
+standalone `-- Human Reviewer` signature. The loop surfaces those requirements
+to coders and reviewers. In markdown fallback paths, coders must include
+`<!-- HUMAN_REQUIREMENTS_ADDRESSED -->` plus a `### Human requirements` section
+that covers every surfaced `Requirement N`; in structured coder follow-ups, the
+same acknowledgement is carried in the `human_requirements` object. If details
+were omitted to keep a prompt bounded, the coder must state that it checked the
+GitHub discussion directly before responding. Reviewers cannot approve signed
+requirements as resolved unless the approved review includes
+`<!-- HUMAN_REQUIREMENTS_RESOLVED -->`; otherwise the loop carries a synthetic
+human-requirements acknowledgement item into the next round.
+
 When `--approved-followups` is set to `summarize`, `issue`, or a `fix-and-*`
 mode, approved reviews may include future work under:
 
@@ -337,8 +361,19 @@ The remaining legacy compatibility surface is intentional:
 
 - Markdown review/plan parsing still accepts non-structured agent responses.
 - The legacy heading `### Non-blocking follow-ups` still maps to future work.
+- Marker-only markdown paths remain compatibility fallbacks; new follow-up,
+  review, and plan-revision examples should use structured JSON first.
 - Resume reconstruction should not depend on reparsing old prose once
   `AGENT_LOOP_META` exists for the active structured-response round.
+
+Agent subprocess logs are written under `.agent-loop-logs/` in the active
+checkout, and long-running agents print heartbeat lines with the exact log
+path. GitHub comments come from validated public response files under
+`/tmp/coding-review-agent-loop/responses/...` or validated fallback stdout, not
+from raw logs. If an agent looks stuck or returns diagnostics, inspect the
+heartbeat log path and the response-file path; quota/reset failures may exit
+early with rerun guidance, while narrower transient failures retry according to
+`--agent-max-retries` and `--agent-retry-backoff-seconds`.
 
 For trusted local automation that must run without approval prompts:
 
@@ -355,7 +390,7 @@ https://github.com/wwind123/coding-review-agent-loop/pull/13
 
 ```bash
 ~/tools/coding-review-agent-loop/.venv/bin/agent-loop task \
-  "Please go over all the issue and pr reviews again and see if there's any non-blocking issues still worth addressing but have not been addressed." \
+  "Please go over all issue and PR reviews again and see if any future follow-ups are still worth addressing but have not been addressed." \
   --repo wwind123/coding-review-agent-loop \
   --coder codex \
   --reviewer claude \

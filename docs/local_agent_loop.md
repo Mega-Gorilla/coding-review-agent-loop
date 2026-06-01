@@ -200,6 +200,10 @@ The modes are:
   `agent-loop issue <child>`. Older decomposition summaries without this marker
   are treated as not yet handed off, so the first child handoff is recorded once.
 
+`--implement-after-approval` is a compatibility shortcut for
+`--plan-execution-mode implement-one-shot`. It requires `--plan-first` and is
+not compatible with any other explicit `--plan-execution-mode` value.
+
 Generated child issues are self-contained: each body includes the parent issue
 link, the relevant approved parent-plan slice, constraints/invariants,
 dependency notes, scope and non-goals, rollout risk, validation/soak
@@ -218,7 +222,14 @@ recording an implementation handoff.
 Plan decomposition allows at most 8 phases. Over-cap responses are validation
 failures and must be consolidated; phases are never silently truncated. This
 limit is independent of `--approved-followups`, whose issue mode still caps
-approved-review future follow-up issues separately.
+approved-review future follow-up issues separately. Decomposition also rejects
+duplicate phase titles, invalid automation classes, unknown dependencies,
+self-dependencies, and forward dependencies; `depends_on` may reference only
+earlier phase titles. Parent decomposition metadata
+(`AGENT_PLAN_DECOMPOSITION`) and phase handoff metadata
+(`AGENT_PLAN_PHASE_IMPLEMENTATION`) make reruns idempotent. If a parent issue
+has already handed off an `implement-by-phase` child, rerun the child issue
+directly instead of expecting the parent to restart it.
 
 Implement a free-form task:
 
@@ -357,7 +368,7 @@ https://github.com/wwind123/coding-review-agent-loop/pull/13
 
 ```bash
 ~/tools/coding-review-agent-loop/.venv/bin/agent-loop task \
-  "Please go over all the issue and pr reviews again and see if there's any non-blocking issues still worth addressing but have not been addressed." \
+  "Please go over all issue and PR reviews again and see if any future follow-ups are still worth addressing but have not been addressed." \
   --repo wwind123/coding-review-agent-loop \
   --coder codex \
   --reviewer claude \
@@ -465,6 +476,100 @@ markdown comments, newer orchestrator-rendered comments, or both. When
 that metadata-backed ledger and ignores stale visible item IDs from older heads,
 superseded plans, or replayed rounds.
 
+Reviewer responses should use structured JSON first. A PR review starts with:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "pr_review",
+  "state": "approved",
+  "summary": "short reviewer summary",
+  "blocking_items": [],
+  "same_pr_followups": [],
+  "future_followups": ["future work after approval"],
+  "prior_item_dispositions": [
+    {"item_id": "item-1", "disposition": "resolved"}
+  ]
+}
+```
+
+A plan review uses `kind: "plan_review"`, `blocking_plan_issues`,
+`same_plan_followups`, `future_followups`, and
+`prior_plan_item_dispositions`. The JSON state must match the final
+`AGENT_STATE` or `AGENT_PLAN_STATE` footer. Blocking reviews must not hide
+current-round work in `future_followups`; approved reviews must not contain
+active blocking, Same-PR, Same-plan, or carried-forward active items.
+
+Coder follow-up and plan-revision rounds are structured too. A PR follow-up
+response must classify every carried reviewer item exactly once:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "coder_followup",
+  "state": "blocking",
+  "summary": "Implemented the requested fix.",
+  "addressed_items": ["item-1"],
+  "remaining_items": [],
+  "human_requirements": {
+    "addressed_ids": [],
+    "checked_discussion_directly": false
+  },
+  "tests_run": ["python -m pytest tests/test_agent_loop.py -k followup"]
+}
+```
+
+A plan revision uses:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "plan_revision",
+  "state": "blocking",
+  "summary": "Updated the plan for the reviewer feedback.",
+  "prior_plan_item_dispositions": [
+    {"item_id": "item-3", "disposition": "resolved", "note": "Covered in step 2."}
+  ],
+  "plan_steps": ["Update the parser.", "Add focused tests."]
+}
+```
+
+Structured payloads must be the first content in the response, not fenced in
+markdown, and may not have prose between the JSON and the required footer. The
+only trailing content after the footer is the standalone agent signature. Plan
+revisions are rendered into canonical markdown for stored plan state, reviewer
+prompts, subject hashing, and resume; public comments render human-readable
+sections and omit raw JSON.
+
+Signed human reviewer comments are requirements when the comment body ends with
+a standalone `-- Human Reviewer` signature. Issue comments become signed
+planning or implementation requirements; PR comments become signed PR-review
+requirements. They override AI reviewer preferences unless they are unsafe,
+impossible, or superseded by a later signed human instruction.
+
+When signed requirements are present, coder markdown fallback responses must
+include:
+
+```md
+<!-- HUMAN_REQUIREMENTS_ADDRESSED -->
+
+### Human requirements
+- Requirement 1: explain how it was addressed or why it cannot be satisfied safely.
+```
+
+Structured coder follow-ups carry the same acknowledgement in
+`human_requirements.addressed_ids` and
+`human_requirements.checked_discussion_directly`. If the prompt says detailed
+requirements were omitted to stay bounded, the coder must check the GitHub
+discussion directly and acknowledge that fact instead of listing requirement
+IDs. The orchestrator injects a synthetic
+`item-human-requirements-acknowledgement` item when coder acknowledgement is
+missing or invalid, then reconciles that item after a valid structured or
+markdown acknowledgement. Reviewers must include
+`<!-- HUMAN_REQUIREMENTS_RESOLVED -->` in an approved review before the loop
+treats signed requirements as resolved; otherwise the synthetic item is carried
+into the next round even if the visible review says approved.
+
 The loop validates required markers before posting agent output to GitHub. If
 an agent exits or returns only diagnostics, empty output, or normal prose
 without the required marker, the loop fails locally with `AgentLoopError` and
@@ -492,8 +597,8 @@ handled in a separate issue or PR. The legacy heading
 compatibility.
 
 When `--approved-followups` is set to a `fix-and-*` mode, approved reviewers
-can put small, localized, low-risk cleanup that should land in the current PR
-under:
+can request small, localized, low-risk cleanup that should land in the current
+PR by returning a blocking review and putting those items under:
 
 ```md
 ### Same-PR follow-ups
@@ -501,14 +606,16 @@ under:
 ```
 
 Same-PR follow-ups are sent back to the coder in the existing PR and require a
-new review round. They should stay narrowly scoped to files already touched by
-the PR or directly adjacent code; larger redesigns and independent work belong
-under Future follow-ups. Approved future follow-ups remain in the round-to-round
-ledger so later reviewers can explicitly confirm they are still future work,
-resolved, or should be promoted back to same-PR or blocking status. The final
-summary or issue creation uses the remaining future items from that ledger.
-Without a `fix-and-*` mode, reviewers should mark same-PR cleanup blocking
-instead.
+new review round before approval can finalize. They should stay narrowly scoped
+to files already touched by the PR or directly adjacent code; larger redesigns
+and independent work belong under Future follow-ups. Approved reviews may not
+include Same-PR follow-ups, blocking items, or carried-forward items that remain
+`blocking` or `same-pr`. Approved future follow-ups remain in the
+round-to-round ledger so later reviewers can explicitly confirm they are still
+future work, resolved, or should be promoted back to same-PR or blocking
+status. The final summary or issue creation uses the remaining future items
+from that ledger. Without a `fix-and-*` mode, reviewers should mark same-PR
+cleanup blocking instead.
 
 By default, `--approved-followups=ignore` asks reviewers not to include these
 sections. Reviewers should mark the review blocking instead when cleanup should
@@ -534,6 +641,9 @@ The remaining legacy compatibility surface is intentionally narrow:
   structured JSON.
 - The legacy heading `### Non-blocking follow-ups` is still treated as future
   work.
+- Marker-only markdown paths are still parsed where supported, but structured
+  JSON is the documented format for new reviewer, coder follow-up, and plan
+  revision responses.
 - Resume reconstruction should rely on `AGENT_LOOP_META` instead of reparsing
   old prose whenever metadata exists for the active round.
 
@@ -554,8 +664,29 @@ output and may include CLI status text or tool narration. For Claude and
 Gemini, prompts also include a public response-file path under
 `/tmp/coding-review-agent-loop/responses/`; when that file exists and is
 non-empty, the loop validates and posts the file contents to GitHub instead of
-stdout. Fallback stdout is still validated before posting. The log directory
-gets its own `.gitignore` on first use.
+stdout. Codex also receives a response-file instruction, and separately uses
+`--output-last-message` so the loop can fall back to the last Codex message
+instead of raw JSON event logs. Gemini response files live inside Gemini's git
+directory because Gemini can only write trusted workspace paths; Gemini stdout
+also supports the `=== AGENT_LOOP_PUBLIC_RESPONSE_BELOW ===` marker and, when
+`--output-format json` is used, extraction of the JSON `response` field.
+Fallback stdout is still validated before posting. The log directory gets its
+own `.gitignore` on first use.
+
+When an agent appears stuck, inspect the heartbeat log path first and then the
+printed response-file path. The log shows CLI narration, tool output, provider
+diagnostics, and whether the subprocess is still making progress; the response
+file is the public answer the orchestrator will validate and post. Empty
+response files, missing markers, or diagnostics-only stdout fail locally instead
+of being posted to GitHub.
+
+Long reset or quota responses can exit early with guidance to rerun after the
+reset or switch keys/models. Narrower transient stream, tool-call, network
+reset, timeout, empty-response, provider 5xx, and first-attempt marker
+near-miss failures retry according to `--agent-max-retries` and
+`--agent-retry-backoff-seconds`. Authentication, billing, dirty workdirs, and
+normal missing-marker responses are treated as non-retryable configuration or
+protocol failures.
 
 Each top-level run also writes `<run-id>-usage-summary.json` in the same
 directory. That sidecar aggregates usage by call, by agent, and for the full
