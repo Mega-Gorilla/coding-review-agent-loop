@@ -20,6 +20,10 @@ DECOMPOSITION_MARKER_RE = re.compile(
     r"<!--\s*AGENT_PLAN_DECOMPOSITION:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->",
     re.I,
 )
+PHASE_IMPLEMENTATION_MARKER_RE = re.compile(
+    r"<!--\s*AGENT_PLAN_PHASE_IMPLEMENTATION:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->",
+    re.I,
+)
 ISSUE_NUMBER_RE = re.compile(r"/issues/(\d+)(?:\b|$)|#(\d+)\b")
 
 
@@ -42,8 +46,16 @@ class PlanDecomposition:
 
 
 @dataclass(frozen=True)
+class RecordedPhase:
+    title: str
+    automation: str
+    rollout_risk: str = "recorded"
+    parent_context: str | None = None
+
+
+@dataclass(frozen=True)
 class CreatedPhaseIssue:
-    phase: PlanPhase
+    phase: PlanPhase | RecordedPhase
     issue_url: str | None
     issue_number: int | None
 
@@ -57,6 +69,18 @@ class DecompositionMetadata:
     phase_titles: tuple[str, ...]
     automation: tuple[str, ...]
     children: tuple[tuple[str, str | None, int | None], ...]
+
+
+@dataclass(frozen=True)
+class PhaseImplementationHandoffMetadata:
+    parent_issue: int
+    plan_hash: str
+    mode: str
+    phase_index: int
+    phase_title: str
+    automation: str
+    child_issue_number: int
+    child_issue_url: str | None
 
 
 def approved_plan_hash(approved_plan: str) -> str:
@@ -289,28 +313,40 @@ def create_decomposition_child_issues(
     return tuple(created)
 
 
-def _encode_metadata(metadata: DecompositionMetadata) -> str:
-    payload = {
-        "parent_issue": metadata.parent_issue,
-        "plan_hash": metadata.plan_hash,
-        "mode": metadata.mode,
-        "phase_count": metadata.phase_count,
-        "phase_titles": list(metadata.phase_titles),
-        "automation": list(metadata.automation),
-        "children": [
-            {"title": title, "url": url, "number": number}
-            for title, url, number in metadata.children
-        ],
-    }
+def _encode_json_payload(payload: dict[str, object]) -> str:
     raw = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii")
 
 
-def _decode_metadata(encoded: str) -> DecompositionMetadata:
+def _decode_json_payload(encoded: str, *, marker_name: str) -> dict[str, object]:
     try:
         payload = json.loads(base64.urlsafe_b64decode(encoded.encode("ascii")).decode("utf-8"))
     except (ValueError, json.JSONDecodeError) as exc:
-        raise AgentLoopError("Invalid AGENT_PLAN_DECOMPOSITION payload.") from exc
+        raise AgentLoopError(f"Invalid {marker_name} payload.") from exc
+    if not isinstance(payload, dict):
+        raise AgentLoopError(f"Invalid {marker_name} payload.")
+    return payload
+
+
+def _encode_metadata(metadata: DecompositionMetadata) -> str:
+    return _encode_json_payload(
+        {
+            "parent_issue": metadata.parent_issue,
+            "plan_hash": metadata.plan_hash,
+            "mode": metadata.mode,
+            "phase_count": metadata.phase_count,
+            "phase_titles": list(metadata.phase_titles),
+            "automation": list(metadata.automation),
+            "children": [
+                {"title": title, "url": url, "number": number}
+                for title, url, number in metadata.children
+            ],
+        }
+    )
+
+
+def _decode_metadata(encoded: str) -> DecompositionMetadata:
+    payload = _decode_json_payload(encoded, marker_name="AGENT_PLAN_DECOMPOSITION")
     children_payload = payload.get("children")
     if not isinstance(children_payload, list):
         raise AgentLoopError("Invalid AGENT_PLAN_DECOMPOSITION payload.")
@@ -341,6 +377,41 @@ def _decode_metadata(encoded: str) -> DecompositionMetadata:
         raise AgentLoopError("Invalid AGENT_PLAN_DECOMPOSITION payload.") from exc
 
 
+def _encode_phase_implementation_handoff_metadata(
+    metadata: PhaseImplementationHandoffMetadata,
+) -> str:
+    return _encode_json_payload(
+        {
+            "parent_issue": metadata.parent_issue,
+            "plan_hash": metadata.plan_hash,
+            "mode": metadata.mode,
+            "phase_index": metadata.phase_index,
+            "phase_title": metadata.phase_title,
+            "automation": metadata.automation,
+            "child_issue_number": metadata.child_issue_number,
+            "child_issue_url": metadata.child_issue_url,
+        }
+    )
+
+
+def _decode_phase_implementation_handoff_metadata(encoded: str) -> PhaseImplementationHandoffMetadata:
+    payload = _decode_json_payload(encoded, marker_name="AGENT_PLAN_PHASE_IMPLEMENTATION")
+    try:
+        child_issue_url = payload.get("child_issue_url")
+        return PhaseImplementationHandoffMetadata(
+            parent_issue=int(payload["parent_issue"]),
+            plan_hash=str(payload["plan_hash"]),
+            mode=str(payload["mode"]),
+            phase_index=int(payload["phase_index"]),
+            phase_title=str(payload["phase_title"]),
+            automation=str(payload["automation"]),
+            child_issue_number=int(payload["child_issue_number"]),
+            child_issue_url=child_issue_url if isinstance(child_issue_url, str) else None,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AgentLoopError("Invalid AGENT_PLAN_PHASE_IMPLEMENTATION payload.") from exc
+
+
 def find_existing_decomposition(
     comments: Sequence[object],
     *,
@@ -369,6 +440,33 @@ def find_existing_decomposition(
             "Existing plan decomposition metadata is incomplete; manual recovery required before rerun. "
             f"Known child issues: {known or 'none'}."
         )
+    return found
+
+
+def find_existing_phase_implementation_handoff(
+    comments: Sequence[object],
+    *,
+    parent_issue: int,
+    plan_hash: str,
+    mode: str,
+    phase_index: int,
+    child_issue_number: int,
+) -> PhaseImplementationHandoffMetadata | None:
+    found: PhaseImplementationHandoffMetadata | None = None
+    for comment in comments:
+        body = getattr(comment, "body", None)
+        if not isinstance(body, str):
+            continue
+        for match in PHASE_IMPLEMENTATION_MARKER_RE.finditer(body):
+            metadata = _decode_phase_implementation_handoff_metadata(match.group("payload"))
+            if (
+                metadata.parent_issue == parent_issue
+                and metadata.plan_hash == plan_hash
+                and metadata.mode == mode
+                and metadata.phase_index == phase_index
+                and metadata.child_issue_number == child_issue_number
+            ):
+                found = metadata
     return found
 
 
@@ -420,6 +518,69 @@ def format_decomposition_parent_summary(
         ]
     )
     return "\n".join(lines)
+
+
+def format_phase_implementation_handoff_comment(
+    *,
+    parent_issue: int,
+    mode: str,
+    plan_hash: str,
+    phase_index: int,
+    created: CreatedPhaseIssue,
+) -> str:
+    if created.issue_number is None:
+        raise AgentLoopError(
+            "Cannot record decomposed phase implementation handoff because the child issue number is unavailable."
+        )
+    metadata = PhaseImplementationHandoffMetadata(
+        parent_issue=parent_issue,
+        plan_hash=plan_hash,
+        mode=mode,
+        phase_index=phase_index,
+        phase_title=created.phase.title,
+        automation=created.phase.automation,
+        child_issue_number=created.issue_number,
+        child_issue_url=created.issue_url,
+    )
+    child = created.issue_url or f"#{created.issue_number}"
+    lines = [
+        f"Approved plan implementation for issue #{parent_issue} handed off to phase {phase_index}: {child}.",
+        "",
+        f"Mode: {mode}",
+        f"Phase: {created.phase.title}",
+        f"Automation: {created.phase.automation}",
+        "",
+        "Parent reruns will not automatically re-run this child implementation. "
+        f"Resume directly with `agent-loop issue {created.issue_number}`.",
+        "",
+        f"<!-- AGENT_PLAN_PHASE_IMPLEMENTATION: {_encode_phase_implementation_handoff_metadata(metadata)} -->",
+        "-- coding-review-agent-loop",
+    ]
+    return "\n".join(lines)
+
+
+def post_phase_implementation_handoff_comment(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    parent_issue: int,
+    mode: str,
+    plan_hash: str,
+    phase_index: int,
+    created: CreatedPhaseIssue,
+) -> None:
+    post_issue_comment(
+        runner,
+        config=config,
+        issue_number=parent_issue,
+        body=format_phase_implementation_handoff_comment(
+            parent_issue=parent_issue,
+            mode=mode,
+            plan_hash=plan_hash,
+            phase_index=phase_index,
+            created=created,
+        ),
+    )
 
 
 def post_decomposition_parent_summary(

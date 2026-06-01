@@ -146,10 +146,14 @@ by the backward-compatible `--implement-after-approval` flag. `decompose-only`
 asks the coder to turn the approved plan into ordered phases, always creates
 one GitHub child issue per phase, posts a parent summary table, and stops.
 `implement-by-phase` creates every child issue, then implements only the first
-`agent-pr` phase and stops after that PR review loop. If the first phase is
-`human-action` or `manual-close`, the loop creates and reports all child issues
-but stops so a human can do the required work, add a remark/update, and close
-that child issue.
+`agent-pr` phase and stops after that PR review loop. Before entering that child
+implementation, the parent issue records a one-time handoff marker. Parent
+reruns after that marker do not re-run the child implementation; resume directly
+with `agent-loop issue <child>`. If decomposition already exists without a
+handoff marker, the first child is treated as not yet attempted and the handoff
+is recorded once. If the first phase is `human-action` or `manual-close`, the
+loop creates and reports all child issues but stops so a human can do the
+required work, add a remark/update, and close that child issue.
 
 Each generated child issue copies the relevant parent-plan slice, constraints
 and invariants, dependency notes, scope and non-goals, rollout risk,
