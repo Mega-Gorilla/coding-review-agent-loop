@@ -1059,6 +1059,11 @@ under this exact heading:
 Use Same-PR follow-ups only for narrow current-PR cleanup in files already
 touched by this PR or directly adjacent code. Do not use this section for
 larger redesigns, broad refactors, or independent future work.
+Keep `blocking_items` and `same_pr_followups` mutually exclusive. Use
+`blocking_items` for defects, missing requirements, regressions, security
+issues, or consistency gaps that make the PR not merge-ready. Use
+`same_pr_followups` only for small localized cleanup that should be handled in
+this PR but is not itself the reason the PR is blocked.
 Same-PR follow-ups may appear only in blocking reviews. If any Same-PR
 follow-up remains, including a carried-forward prior item that stays
 `still blocking` or `same-pr`, the review is not approved yet.
@@ -1155,6 +1160,12 @@ exactly one top-level JSON object and no prose or code fences before it:
     {{"item_id": "item-2", "disposition": "future", "note": "brief reason"}}
   ]
 }}
+
+`blocking_items` and `same_pr_followups` must be mutually exclusive: a single
+concern belongs in exactly one list. Put merge-blocking defects, missing
+requirements, regressions, security issues, and consistency gaps in
+`blocking_items`; put only small Same-PR cleanup that is not itself the reason
+the PR is blocked in `same_pr_followups`.
 
 After the JSON object, include only:
 1. optional `<!-- HUMAN_REQUIREMENTS_RESOLVED -->`

@@ -803,6 +803,34 @@ def _structured_followups(items: tuple[str, ...], *, reviewer: str) -> tuple[App
     return tuple(ApprovedFollowup(reviewer=reviewer, text=item) for item in items)
 
 
+def _normalized_review_item_text(text: str) -> str:
+    normalized = text.strip()
+    normalized = re.sub(r"^\s*(?:[-*+]\s+|\d+[.)]\s+)+", "", normalized)
+    normalized = normalized.strip("`*_ \t\r\n")
+    normalized = re.sub(r"`([^`]+)`", r"\1", normalized)
+    normalized = re.sub(r"\s+", " ", normalized)
+    normalized = normalized.strip("`*_ \t\r\n.,;:!?-")
+    return normalized.casefold()
+
+
+def _dedupe_same_pr_against_blocking(
+    blocking_items: tuple[ApprovedFollowup, ...],
+    same_pr_followups: tuple[ApprovedFollowup, ...],
+) -> tuple[ApprovedFollowup, ...]:
+    blocking_texts = {
+        normalized
+        for item in blocking_items
+        if (normalized := _normalized_review_item_text(item.text))
+    }
+    if not blocking_texts:
+        return same_pr_followups
+    return tuple(
+        item
+        for item in same_pr_followups
+        if _normalized_review_item_text(item.text) not in blocking_texts
+    )
+
+
 def parse_structured_pr_review(text: str, *, reviewer: str) -> ParsedReview | None:
     payload = _extract_structured_pr_review_payload(text)
     if payload is None:
@@ -854,12 +882,17 @@ def parse_structured_pr_review(text: str, *, reviewer: str) -> ParsedReview | No
     )
     if state == "blocking" and future_followups:
         raise AgentLoopError("Blocking structured reviews may not include future follow-ups.")
+    structured_blocking_items = _structured_followups(blocking_items, reviewer=reviewer)
+    structured_same_pr_followups = _dedupe_same_pr_against_blocking(
+        structured_blocking_items,
+        _structured_followups(same_pr_followups, reviewer=reviewer),
+    )
     return _finalize_parsed_review(
         state=state,
         summary=summary,
-        blocking_items=_structured_followups(blocking_items, reviewer=reviewer),
+        blocking_items=structured_blocking_items,
         followups=ApprovedFollowups(
-            same_pr=_structured_followups(same_pr_followups, reviewer=reviewer),
+            same_pr=structured_same_pr_followups,
             future=_structured_followups(future_followups, reviewer=reviewer),
         ),
         dispositions=dispositions,
@@ -1412,6 +1445,10 @@ def parse_review(text: str, *, reviewer: str) -> ParsedReview:
     summary = review_freeform_summary_text(text)
     blocking_items = parse_pr_blocking_items(text, reviewer=reviewer)
     followups = parse_approved_followups(text, reviewer=reviewer)
+    followups = ApprovedFollowups(
+        same_pr=_dedupe_same_pr_against_blocking(blocking_items, followups.same_pr),
+        future=followups.future,
+    )
     dispositions = parse_unresolved_item_dispositions(text, reviewer=reviewer)
     return _finalize_parsed_review(
         state=state,
