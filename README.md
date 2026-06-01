@@ -274,6 +274,13 @@ responses must start with one top-level JSON object, place the matching
 only the standalone agent signature. The loop renders validated structured
 payloads into normal public GitHub comments, so raw JSON is not posted.
 
+When a structured plan review, plan revision, PR review, or coder follow-up is
+present but malformed, the loop may run one Gemini-backed repair pass. The
+repair pass is format-only: it asks Gemini to re-emit the agent's intent as the
+required JSON object, footer marker, and signature. The repaired response is
+accepted only if it passes the same strict validation as the original response;
+failed repairs remain local protocol errors and are not posted to GitHub.
+
 Signed human reviewer comments are approval-critical when they end with a
 standalone `-- Human Reviewer` signature. The loop surfaces those requirements
 to coders and reviewers. In markdown fallback paths, coders must include
@@ -374,7 +381,9 @@ path. GitHub comments come from validated public response files under
 from raw logs. If an agent looks stuck or returns diagnostics, inspect the
 heartbeat log path and the response-file path; quota/reset failures may exit
 early with rerun guidance, while narrower transient failures retry according to
-`--agent-max-retries` and `--agent-retry-backoff-seconds`.
+`--agent-max-retries` and `--agent-retry-backoff-seconds`. Repair-pass attempts
+are also visible in the log as schema-validation failure, repair attempt, and
+recovered-or-invalid repair messages.
 
 For trusted local automation that must run without approval prompts:
 
