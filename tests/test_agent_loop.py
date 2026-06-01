@@ -2544,6 +2544,71 @@ def test_parse_review_round_trips_blocking_issues_section_without_polluting_summ
     ]
 
 
+def test_parse_review_dedupes_same_pr_items_that_duplicate_blocking_items():
+    review = (
+        "Blocking issue summary."
+        + blocking_issues("`Add the missing share.html CSS update.`")
+        + "\n\n### Same-PR follow-ups\n"
+        + "- Add the missing share.html CSS update.\n"
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+    )
+
+    parsed = parse_review(review, reviewer="OpenAI Codex")
+
+    assert [item.text for item in parsed.blocking_items] == [
+        "`Add the missing share.html CSS update.`"
+    ]
+    assert parsed.followups.same_pr == ()
+
+
+def test_parse_structured_pr_review_dedupes_exact_normalized_same_pr_duplicates():
+    review = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "pr_review",
+            "state": "blocking",
+            "summary": "Blocked.",
+            "blocking_items": ["- Add the missing `share.html` CSS update."],
+            "same_pr_followups": ["Add the missing share.html CSS update"],
+            "future_followups": [],
+            "prior_item_dispositions": [],
+        }
+    )
+    review += "\n\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+
+    parsed = parse_pr_review(review, reviewer="OpenAI Codex")
+
+    assert [item.text for item in parsed.blocking_items] == [
+        "- Add the missing `share.html` CSS update."
+    ]
+    assert parsed.followups.same_pr == ()
+
+
+def test_parse_structured_pr_review_keeps_near_but_distinct_same_pr_items():
+    review = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "pr_review",
+            "state": "blocking",
+            "summary": "Blocked.",
+            "blocking_items": ["Add the missing share.html CSS update."],
+            "same_pr_followups": ["Add the missing share.html print CSS update."],
+            "future_followups": [],
+            "prior_item_dispositions": [],
+        }
+    )
+    review += "\n\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+
+    parsed = parse_pr_review(review, reviewer="OpenAI Codex")
+
+    assert [item.text for item in parsed.blocking_items] == [
+        "Add the missing share.html CSS update."
+    ]
+    assert [item.text for item in parsed.followups.same_pr] == [
+        "Add the missing share.html print CSS update."
+    ]
+
+
 def test_legacy_plan_review_helpers_populate_summary_from_markdown():
     review = """
     Plan needs one more regression test.
@@ -6184,6 +6249,7 @@ def test_review_prompt_requests_future_followups_when_processed(tmp_path):
     prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"])
     assert "### Future follow-ups" in prompt
     assert "legacy heading `### Non-blocking follow-ups`" in prompt
+    assert "Do not use the Same-PR follow-ups section in this mode" in prompt
     assert "Use blocking only for issues that should prevent merge." in prompt
 
 
@@ -6198,10 +6264,31 @@ def test_review_prompt_allows_same_pr_followups_for_fix_modes(tmp_path):
     assert "### Future follow-ups" in prompt
     assert "small, localized, low-risk cleanup" in prompt
     assert "narrow current-PR cleanup in files already\ntouched by this PR or directly adjacent code" in prompt
+    assert "Keep `blocking_items` and `same_pr_followups` mutually exclusive." in prompt
+    assert (
+        "Use\n`blocking_items` for defects, missing requirements, regressions, security\n"
+        "issues, or consistency gaps that make the PR not merge-ready."
+    ) in prompt
+    assert (
+        "Use\n`same_pr_followups` only for small localized cleanup that should be handled in\n"
+        "this PR but is not itself the reason the PR is blocked."
+    ) in prompt
     assert "Same-PR follow-ups may appear only in blocking reviews." in prompt
     assert "will be sent back to Claude and require another review" in prompt
     assert "Approved means there are no blocking issues, no Same-PR follow-ups, and no\ncarried-forward prior unresolved items left active" in prompt
     assert "If you return `<!-- AGENT_STATE: blocking -->`, do not use structured\nFuture follow-ups" in prompt
+    assert (
+        "`blocking_items` and `same_pr_followups` must be mutually exclusive: a single\n"
+        "concern belongs in exactly one list."
+    ) in prompt
+    assert (
+        "Put merge-blocking defects, missing\nrequirements, regressions, security "
+        "issues, and consistency gaps in\n`blocking_items`"
+    ) in prompt
+    assert (
+        "put only small Same-PR cleanup that is not itself the reason\n"
+        "the PR is blocked in `same_pr_followups`."
+    ) in prompt
 
 
 def test_same_pr_followup_prompt_no_longer_claims_pr_was_approved(tmp_path):
