@@ -415,6 +415,7 @@ def _run_validated_agent(
     session_id: str | None = None,
     usage_context: RunUsageContext | None = None,
     use_repair: bool = False,
+    repair_expected_kind: str | None = None,
 ) -> ValidatedAgentResponse:
     agent_name = agent_display_name(agent)
     log_paths: list[object] = []
@@ -463,11 +464,16 @@ def _run_validated_agent(
                 )
                 if use_repair and not _is_transient_agent_output(text):
                     log(config, f"{agent_name}: schema validation failed ({exc}); attempting repair pass")
-                    repaired = attempt_repair(text, config.gemini_cmd)
+                    repaired = attempt_repair(
+                        text,
+                        config.gemini_cmd,
+                        expected_kind=repair_expected_kind,
+                    )
                     if repaired is not None:
                         try:
                             marker_value = validate(repaired)
                         except AgentLoopError as repair_exc:
+                            last_error = str(repair_exc)
                             log(
                                 config,
                                 f"{agent_name}: repair pass produced invalid output ({repair_exc})",
@@ -891,6 +897,7 @@ def _run_plan_first_loop(
                     ),
                     usage_context=usage_context,
                     use_repair=True,
+                    repair_expected_kind="plan_review",
                 )
                 review_output = review_response.text
                 reviewer_session_ids[reviewer] = review_response.session_id
@@ -1137,6 +1144,7 @@ def _run_plan_first_loop(
             ),
             usage_context=usage_context,
             use_repair=True,
+            repair_expected_kind="plan_revision",
         )
         canonical_plan: str | None = None
         public_comment = plan_response.text
@@ -1509,6 +1517,7 @@ def run_pr_loop(
                         ),
                         usage_context=usage_context,
                         use_repair=True,
+                        repair_expected_kind="pr_review",
                     )
                     review_output = review_response.text
                     reviewer_session_ids[reviewer] = review_response.session_id
@@ -1830,6 +1839,7 @@ def run_pr_loop(
                 ),
                 usage_context=usage_context,
                 use_repair=True,
+                repair_expected_kind="coder_followup",
             )
             coder_output = coder_response.text
             coder_session_id = coder_response.session_id

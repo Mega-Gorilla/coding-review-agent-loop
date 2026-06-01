@@ -15,6 +15,10 @@ from .agents.gemini import _parse_gemini_payload
 
 _logger = logging.getLogger(__name__)
 
+# v11 prompt — constrains repair to the caller's expected response kind when supplied
+# and preserves signed human-requirements acknowledgements on plan revisions:
+#   - expected_kind prevents plan_revision repair from drifting into coder_followup
+#   - plan_revision repair may include the signed human requirements marker/section before AGENT_PLAN_STATE
 # v10 prompt — adds plan_revision repair and keeps coder_followup repair bugs fixed:
 #   - fenced JSON (```json ... ```) now explicitly handled
 #   - addressed_items vs human_requirements.addressed_ids distinction clarified
@@ -23,6 +27,8 @@ _logger = logging.getLogger(__name__)
 # itself contains literal { } characters in the JSON examples.
 _REPAIR_PROMPT = """\
 You are a format-repair assistant. An AI agent produced a code review, plan review, plan revision, or coder follow-up that failed strict schema validation. Extract its intent and reformat it into one of these four valid formats.
+
+{expected_kind_instruction}
 
 ## Valid Format A — PR Review:
 
@@ -88,6 +94,11 @@ You are a format-repair assistant. An AI agent produced a code review, plan revi
   ],
   "plan_steps": ["Update the parser.", "Add regression tests."]
 }
+<!-- HUMAN_REQUIREMENTS_ADDRESSED -->
+
+### Human requirements
+
+- Requirement 1: <how the revised plan addresses this signed human requirement, if present in the original>
 <!-- AGENT_PLAN_STATE: blocking -->
 -- <Coder Name>
 
@@ -117,6 +128,7 @@ You are a format-repair assistant. An AI agent produced a code review, plan revi
 ### BLOCKING only. plan_revision.state must be "blocking" and must include at least one plan_steps string.
 
 ## FORMAT SELECTION:
+- If an expected response kind is provided above, use ONLY that format. Do not infer a different kind from keywords in the malformed response.
 - Use Format C if the original contains "coder_followup" or "addressed_items" or "remaining_items".
 - Use Format D if the original contains "plan_revision" or "plan_steps".
 - Use Format B if the original contains AGENT_PLAN_STATE / blocking_plan_issues / same_plan_followups / prior_plan_item_dispositions.
@@ -210,9 +222,54 @@ Notes:
 - <!-- HUMAN_REQUIREMENTS_ADDRESSED --> is NOT needed in the structured path
 - No prose, no ### sections after the JSON
 
+## WORKED EXAMPLE 4 — plan revision with signed human requirements:
+
+Original (malformed): markdown revised plan, with a signed human-requirements acknowledgement.
+
+### Prior plan review item dispositions
+
+- item-1: resolved by adding API compatibility checks.
+
+### Revised plan
+
+- Keep the public API unchanged.
+- Add regression tests for compatibility.
+
+<!-- HUMAN_REQUIREMENTS_ADDRESSED -->
+
+### Human requirements
+
+- Requirement 1: The revised plan preserves backward compatibility.
+
+<!-- AGENT_PLAN_STATE: blocking -->
+-- Anthropic Claude
+
+CORRECT repair — output plan_revision JSON first, preserve the human requirements marker and section before AGENT_PLAN_STATE:
+{
+  "schema_version": 1,
+  "kind": "plan_revision",
+  "state": "blocking",
+  "summary": "Revised the plan to preserve backward compatibility.",
+  "prior_plan_item_dispositions": [
+    {"item_id": "item-1", "disposition": "resolved", "note": "Added API compatibility checks."}
+  ],
+  "plan_steps": ["Keep the public API unchanged.", "Add regression tests for compatibility."]
+}
+<!-- HUMAN_REQUIREMENTS_ADDRESSED -->
+
+### Human requirements
+
+- Requirement 1: The revised plan preserves backward compatibility.
+<!-- AGENT_PLAN_STATE: blocking -->
+-- Anthropic Claude
+
+Notes:
+- When repairing plan_revision, do not output coder_followup even if the original contains a Human requirements section.
+- If the original plan revision includes <!-- HUMAN_REQUIREMENTS_ADDRESSED --> and a ### Human requirements section, preserve both after the JSON and before <!-- AGENT_PLAN_STATE: blocking -->.
+
 ## FORMAT:
 1. Start DIRECTLY with { — no prose, no markdown fences.
-2. After }: <!-- AGENT_STATE: X --> (pr_review or coder_followup) OR <!-- AGENT_PLAN_STATE: X --> (plan_review or plan_revision). DIFFERENT MARKERS.
+2. After }: optional signed human requirements acknowledgement for plan_revision only, then <!-- AGENT_STATE: X --> (pr_review or coder_followup) OR <!-- AGENT_PLAN_STATE: X --> (plan_review or plan_revision). DIFFERENT MARKERS.
 3. JSON "state" matches X. Then: -- Agent Name. STOP. Nothing else.
 
 Output ONLY the repaired response. No explanations.
@@ -222,16 +279,26 @@ Output ONLY the repaired response. No explanations.
 {raw_response}"""
 
 _REPAIR_MODEL = "gemini-3.1-flash-lite"
+_SUPPORTED_EXPECTED_KINDS = {"pr_review", "plan_review", "coder_followup", "plan_revision"}
 
 
-def attempt_repair(raw: str, gemini_cmd: str) -> str | None:
+def attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None) -> str | None:
     """Call gemini-3.1-flash-lite via the Gemini CLI to reformat a malformed review response.
 
     Uses the same CLI invocation path as the reviewer so no extra auth is needed.
     Returns the repaired text on success, or None when the CLI fails or returns empty output.
     The caller is responsible for re-validating the returned text.
     """
-    prompt = _REPAIR_PROMPT.replace("{raw_response}", raw, 1)
+    if expected_kind is not None and expected_kind not in _SUPPORTED_EXPECTED_KINDS:
+        raise ValueError(f"Unsupported expected repair kind: {expected_kind}")
+    expected_kind_instruction = (
+        "## Expected response kind:\n"
+        f"You MUST repair this response as `{expected_kind}`. Output no other `kind` value.\n"
+        if expected_kind is not None
+        else "## Expected response kind:\nNo expected response kind was provided; choose from the format-selection rules.\n"
+    )
+    prompt = _REPAIR_PROMPT.replace("{expected_kind_instruction}", expected_kind_instruction, 1)
+    prompt = prompt.replace("{raw_response}", raw, 1)
     try:
         result = subprocess.run(
             [gemini_cmd, "--model", _REPAIR_MODEL, "--skip-trust", "--prompt", prompt],
