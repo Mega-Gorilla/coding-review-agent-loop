@@ -401,6 +401,7 @@ def _format_unresolved_review_items(unresolved_items: Sequence[UnresolvedReviewI
         "Prior unresolved review items from earlier rounds",
         "",
         "Explicitly evaluate every item below before approving. Use the item IDs exactly as written.",
+        "For carried future follow-ups, restate `future follow-up: reason` only when the item still deserves separate tracking; use `resolved` if later PR changes already handled it, or promote it to `same-pr`/`still blocking` if it must be fixed before merge.",
         "",
     ]
     for item in unresolved_items:
@@ -425,6 +426,7 @@ def _format_unresolved_plan_items(unresolved_items: Sequence[UnresolvedReviewIte
         "Prior unresolved plan items from earlier rounds",
         "",
         "Explicitly evaluate every item below before approving. Use the item IDs exactly as written.",
+        "For carried future follow-ups, restate `future follow-up: reason` only when the item still deserves separate tracking; use `resolved` if later plan changes already handled it, or promote it to `same-plan`/`still blocking` if it must be fixed before implementation.",
         "",
     ]
     for item in unresolved_items:
@@ -642,6 +644,7 @@ Use one bullet per listed item and cover every item exactly once. Allowed forms:
 - [item-id] future follow-up: brief reason
 
 Only use `future follow-up` when returning `approved`. If a current-plan item still needs to be fixed before implementation starts, keep it as `still blocking` or `same-plan` instead of downgrading it.
+For any prior item that was already marked `future`, explicitly choose whether it remains valid future work, was resolved by later plan changes, or now belongs back in same-plan/blocking work.
 Contradictory forms like `same-plan: none`, `still blocking: none`, and `future follow-up: none` are invalid; use `resolved` if the item is no longer active.
 """
     else:
@@ -1039,6 +1042,7 @@ Use one bullet per listed item and cover every item exactly once. Allowed forms:
 - [item-id] future follow-up: brief reason
 
 Only use `future follow-up` when returning `approved`. If an item should still be fixed before merge, keep it as `still blocking` or `same-pr` instead of downgrading it.
+For any prior item that was already marked `future`, explicitly choose whether it remains valid future work, was resolved by later commits, or now belongs back in same-PR/blocking work.
 Contradictory forms like `same-pr: none`, `still blocking: none`, and `future follow-up: none` are invalid; use `resolved` if the item is no longer active.
 """
     else:

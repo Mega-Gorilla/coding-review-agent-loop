@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -17,6 +18,7 @@ APPROVED_FOLLOWUP_MARKER_RE = re.compile(
     r"<!--\s*AGENT_APPROVED_FOLLOWUPS:\s*pr=(?P<pr>\d+)\s+head=(?P<head>\S+)\s+mode=(?P<mode>[a-z-]+)\s*-->",
     re.I,
 )
+FOLLOWUP_UPDATE_SPLIT_RE = re.compile(r"\n{2,}Update from ", re.I)
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,170 @@ class GroupedApprovedFollowup:
         return tuple(reviewers)
 
 
+@dataclass(frozen=True)
+class ApprovedFollowupReconciliation:
+    groups: tuple[GroupedApprovedFollowup, ...]
+    selected_groups: tuple[GroupedApprovedFollowup, ...]
+    skipped_by_cap: int
+    deduplicated_count: int
+
+
+_FOLLOWUP_STOPWORDS = {
+    "a",
+    "about",
+    "across",
+    "add",
+    "after",
+    "against",
+    "all",
+    "also",
+    "and",
+    "another",
+    "around",
+    "as",
+    "before",
+    "behavior",
+    "better",
+    "broader",
+    "but",
+    "by",
+    "can",
+    "cleanup",
+    "consider",
+    "coverage",
+    "doc",
+    "docs",
+    "document",
+    "documentation",
+    "ensure",
+    "for",
+    "from",
+    "future",
+    "handle",
+    "handled",
+    "in",
+    "include",
+    "issue",
+    "later",
+    "make",
+    "mention",
+    "note",
+    "of",
+    "on",
+    "or",
+    "pr",
+    "separate",
+    "should",
+    "so",
+    "that",
+    "the",
+    "this",
+    "to",
+    "track",
+    "update",
+    "use",
+    "when",
+    "with",
+    "work",
+}
+
+
+_CODE_OR_PATH_RE = re.compile(
+    r"`([^`]+)`|"
+    r"\b(?:[A-Za-z_][\w]*\.)+[A-Za-z_][\w]*\b|"
+    r"\b[\w.-]+/[\w./-]+\b|"
+    r"\b[\w.-]+\.(?:py|md|txt|toml|yaml|yml|json|js|ts|tsx|jsx|html|css|rst)\b"
+)
+
+
+def _followup_identifier_keys(text: str) -> set[str]:
+    text = _followup_main_text(text)
+    keys: set[str] = set()
+    for match in _CODE_OR_PATH_RE.finditer(text):
+        identifier = next((group for group in match.groups() if group), match.group(0))
+        normalized = _normalize_followup_key(identifier)
+        if normalized:
+            keys.add(normalized)
+    return keys
+
+
+def _followup_topic_terms(text: str) -> set[str]:
+    text = _followup_main_text(text)
+    normalized = _normalize_followup_key(text)
+    terms = {
+        term
+        for term in normalized.split()
+        if len(term) >= 4 and term not in _FOLLOWUP_STOPWORDS and not term.isdigit()
+    }
+    return terms
+
+
+def _followup_candidate_keys(text: str) -> set[str]:
+    text = _followup_main_text(text)
+    keys = {_normalize_followup_key(text)}
+    heading_key = _followup_heading_key(text)
+    if heading_key:
+        keys.add(f"heading:{heading_key}")
+    identifiers = _followup_identifier_keys(text)
+    keys.update(f"id:{identifier}" for identifier in identifiers)
+    terms = _followup_topic_terms(text)
+    if len(terms) >= 3:
+        keys.add("terms:" + "+".join(sorted(terms)))
+    if identifiers and len(terms) >= 2:
+        for identifier in identifiers:
+            for term in sorted(terms):
+                keys.add(f"id-term:{identifier}+{term}")
+    return {key for key in keys if key}
+
+
+def _followup_similarity(left: ApprovedFollowup, right: ApprovedFollowup) -> float:
+    left_terms = _followup_topic_terms(left.text)
+    right_terms = _followup_topic_terms(right.text)
+    if not left_terms or not right_terms:
+        return 0.0
+    common_terms = left_terms & right_terms
+    if len(common_terms) < 3:
+        return 0.0
+    left_ids = _followup_identifier_keys(left.text)
+    right_ids = _followup_identifier_keys(right.text)
+    if left_ids or right_ids:
+        id_overlap = left_ids & right_ids
+        if left_ids and right_ids and not id_overlap:
+            return 0.0
+        if id_overlap and len(common_terms) >= 2:
+            return 1.0
+    if common_terms == left_terms or common_terms == right_terms:
+        return 1.0
+    return len(common_terms) / len(left_terms | right_terms)
+
+
+def _followup_specificity_score(followup: ApprovedFollowup, reviewer_counts: Counter[str]) -> tuple[int, int, int, int]:
+    identifiers = _followup_identifier_keys(followup.text)
+    normalized_length = len(_normalize_followup_key(_followup_main_text(followup.text)))
+    has_disposition_note = int("Update from " in followup.text)
+    reviewer_support = reviewer_counts[followup.text]
+    return (
+        len(identifiers),
+        has_disposition_note,
+        reviewer_support,
+        normalized_length,
+    )
+
+
+def _select_canonical_followup(items: Sequence[ApprovedFollowup]) -> ApprovedFollowup:
+    reviewer_counts = Counter(item.text for item in items)
+    return max(items, key=lambda item: _followup_specificity_score(item, reviewer_counts))
+
+
+def _followup_main_text(text: str) -> str:
+    return FOLLOWUP_UPDATE_SPLIT_RE.split(text, maxsplit=1)[0].strip()
+
+
+def _followup_update_notes(text: str) -> tuple[str, ...]:
+    parts = FOLLOWUP_UPDATE_SPLIT_RE.split(text)
+    return tuple(f"Update from {part.strip()}" for part in parts[1:] if part.strip())
+
+
 def _approved_followup_from_unresolved_item(item: UnresolvedReviewItem) -> ApprovedFollowup:
     text = item.text
     for note in item.notes:
@@ -42,15 +208,63 @@ def _approved_followup_from_unresolved_item(item: UnresolvedReviewItem) -> Appro
     return ApprovedFollowup(reviewer=item.reviewer, text=text)
 
 
-def _format_approved_followup_summary(pr_number: int, followups: list[ApprovedFollowup]) -> str:
+def reconcile_approved_followups(
+    followups: Sequence[ApprovedFollowup],
+    *,
+    issue_limit: int = MAX_APPROVED_FOLLOWUP_ISSUES,
+) -> ApprovedFollowupReconciliation:
+    grouped: list[GroupedApprovedFollowup] = []
+    indexes: dict[str, int] = {}
+    for followup in followups:
+        keys = _followup_candidate_keys(followup.text)
+        existing_index = next((indexes[key] for key in keys if key in indexes), None)
+        if existing_index is None:
+            for index, group in enumerate(grouped):
+                if any(_followup_similarity(followup, item) >= 0.55 for item in group.items):
+                    existing_index = index
+                    break
+        if existing_index is None:
+            indexes.update((key, len(grouped)) for key in keys)
+            grouped.append(GroupedApprovedFollowup(text=followup.text, items=(followup,)))
+            continue
+
+        existing = grouped[existing_index]
+        items = (*existing.items, followup)
+        canonical = _select_canonical_followup(items)
+        grouped[existing_index] = GroupedApprovedFollowup(text=canonical.text, items=items)
+        indexes.update((key, existing_index) for key in keys)
+
+    selected_groups = tuple(grouped[:issue_limit])
+    return ApprovedFollowupReconciliation(
+        groups=tuple(grouped),
+        selected_groups=selected_groups,
+        skipped_by_cap=max(0, len(grouped) - len(selected_groups)),
+        deduplicated_count=len(followups) - len(grouped),
+    )
+
+
+def _format_approved_followup_summary(
+    pr_number: int,
+    reconciliation: ApprovedFollowupReconciliation,
+) -> str:
     lines = [
         f"Approved-review future follow-ups for PR #{pr_number}:",
         "",
     ]
-    for followup in followups:
-        lines.append(f"- {followup.text} ({followup.reviewer})")
+    for followup in reconciliation.selected_groups:
+        reviewers = ", ".join(followup.reviewers)
+        lines.append(f"- {_followup_main_text(followup.text)} ({reviewers})")
+        for item in followup.items:
+            for note in _followup_update_notes(item.text):
+                lines.append(f"  - {note}")
     lines.extend(
         [
+            "",
+            (
+                f"Reconciliation: {len(reconciliation.selected_groups)} filed/summarized, "
+                f"{reconciliation.deduplicated_count} deduplicated, "
+                f"{reconciliation.skipped_by_cap} skipped by cap."
+            ),
             "",
             "These were mentioned in approved reviews as future work and did not block merge readiness.",
             "",
@@ -110,12 +324,13 @@ def _has_approved_followups_marker(
 
 
 def _followup_issue_title(followup: ApprovedFollowup) -> str:
-    text = " ".join(followup.text.split())
+    text = " ".join(_followup_main_text(followup.text).split())
     title = f"Follow up future review note: {text}"
     return title[:120]
 
 
 def _normalize_followup_key(text: str) -> str:
+    text = _followup_main_text(text)
     key = re.sub(r"`([^`]+)`", r"\1", text)
     key = re.sub(r"\*\*([^*]+)\*\*", r"\1", key)
     key = re.sub(r"[_*#>]+", " ", key)
@@ -124,6 +339,7 @@ def _normalize_followup_key(text: str) -> str:
 
 
 def _followup_heading_key(text: str) -> str | None:
+    text = _followup_main_text(text)
     heading_match = re.match(r"^\s*\*\*(?P<title>[^*]+)\*\*\s*:?", text)
     if heading_match:
         return _normalize_followup_key(heading_match.group("title"))
@@ -134,25 +350,7 @@ def _followup_heading_key(text: str) -> str | None:
 
 
 def _dedupe_approved_followups(followups: Sequence[ApprovedFollowup]) -> list[GroupedApprovedFollowup]:
-    grouped: list[GroupedApprovedFollowup] = []
-    indexes: dict[str, int] = {}
-    for followup in followups:
-        keys = [_normalize_followup_key(followup.text)]
-        heading_key = _followup_heading_key(followup.text)
-        if heading_key:
-            keys.append(heading_key)
-        existing_index = next((indexes[key] for key in keys if key in indexes), None)
-        if existing_index is None:
-            indexes.update((key, len(grouped)) for key in keys if key)
-            grouped.append(GroupedApprovedFollowup(text=followup.text, items=(followup,)))
-            continue
-        existing = grouped[existing_index]
-        grouped[existing_index] = GroupedApprovedFollowup(
-            text=existing.text,
-            items=(*existing.items, followup),
-        )
-        indexes.update((key, existing_index) for key in keys if key)
-    return grouped
+    return list(reconcile_approved_followups(followups, issue_limit=len(followups) or 0).groups)
 
 
 def _followup_issue_body(pr_number: int, followup: GroupedApprovedFollowup) -> str:
@@ -170,12 +368,11 @@ def _followup_issue_body(pr_number: int, followup: GroupedApprovedFollowup) -> s
         [
             "",
             "Follow-up:",
-            f"- {followup.text}",
+            f"- {_followup_main_text(followup.text)}",
         ]
     )
-    if len(followup.items) > 1:
-        lines.extend(["", "Original reviewer notes:"])
-        lines.extend(f"- {item.reviewer}: {item.text}" for item in followup.items)
+    lines.extend(["", "Original reviewer notes:"])
+    lines.extend(f"- {item.reviewer}: {item.text}" for item in followup.items)
     lines.extend(
         [
             "",
@@ -190,12 +387,10 @@ def _create_approved_followup_issues(
     *,
     config: AgentLoopConfig,
     pr_number: int,
-    followups: list[ApprovedFollowup],
-) -> tuple[list[str], int]:
+    reconciliation: ApprovedFollowupReconciliation,
+) -> list[str]:
     issue_urls: list[str] = []
-    deduped_followups = _dedupe_approved_followups(followups)
-    selected_followups = deduped_followups[:MAX_APPROVED_FOLLOWUP_ISSUES]
-    for followup in selected_followups:
+    for followup in reconciliation.selected_groups:
         issue_url = create_issue(
             runner,
             config=config,
@@ -206,14 +401,13 @@ def _create_approved_followup_issues(
         )
         if issue_url is not None:
             issue_urls.append(issue_url)
-    skipped_count = len(deduped_followups) - len(selected_followups)
-    return issue_urls, skipped_count
+    return issue_urls
 
 
 def _format_created_followup_issue_summary(
     pr_number: int,
     issue_urls: list[str],
-    skipped_count: int,
+    reconciliation: ApprovedFollowupReconciliation,
 ) -> str:
     unique_issue_urls = list(dict.fromkeys(issue_urls))
     lines = [
@@ -227,14 +421,20 @@ def _format_created_followup_issue_summary(
     lines.extend(
         [
             "",
+            (
+                f"Reconciliation: {len(unique_issue_urls)} filed, "
+                f"{reconciliation.deduplicated_count} deduplicated, "
+                f"{reconciliation.skipped_by_cap} skipped by cap."
+            ),
+            "",
             "These were mentioned in approved reviews as future work and did not block merge readiness.",
         ]
     )
-    if skipped_count > 0:
+    if reconciliation.skipped_by_cap > 0:
         lines.extend(
             [
                 "",
-                f"Skipped {skipped_count} additional item(s) to avoid issue noise; reviewers should reserve "
+                f"Skipped {reconciliation.skipped_by_cap} additional item(s) to avoid issue noise; reviewers should reserve "
                 "this section for substantial independent follow-up work.",
             ]
         )
@@ -253,6 +453,19 @@ def _publish_approved_followups(
 ) -> bool:
     if not followups or config.approved_followups == "ignore":
         return False
+    reconciliation = reconcile_approved_followups(
+        followups,
+        issue_limit=MAX_APPROVED_FOLLOWUP_ISSUES,
+    )
+    if not reconciliation.selected_groups:
+        return False
+    log(
+        config,
+        f"Approved-review future follow-up reconciliation for PR #{pr_number}: "
+        f"{len(reconciliation.selected_groups)} selected, "
+        f"{reconciliation.deduplicated_count} deduplicated, "
+        f"{reconciliation.skipped_by_cap} skipped by cap",
+    )
 
     if config.approved_followups in ("summarize", "fix-and-summarize"):
         mode = "summarize"
@@ -267,7 +480,7 @@ def _publish_approved_followups(
                 f"Approved-review future follow-ups already recorded for PR #{pr_number} at {head_sha or 'unknown'} ({mode})",
             )
             return False
-        body = _format_approved_followup_summary(pr_number, followups)
+        body = _format_approved_followup_summary(pr_number, reconciliation)
         body = _append_approved_followups_marker(
             body,
             pr_number=pr_number,
@@ -290,14 +503,14 @@ def _publish_approved_followups(
                 f"Approved-review future follow-ups already recorded for PR #{pr_number} at {head_sha or 'unknown'} ({mode})",
             )
             return False
-        issue_urls, skipped_count = _create_approved_followup_issues(
+        issue_urls = _create_approved_followup_issues(
             runner,
             config=config,
             pr_number=pr_number,
-            followups=followups,
+            reconciliation=reconciliation,
         )
         if issue_urls:
-            body = _format_created_followup_issue_summary(pr_number, issue_urls, skipped_count)
+            body = _format_created_followup_issue_summary(pr_number, issue_urls, reconciliation)
             body = _append_approved_followups_marker(
                 body,
                 pr_number=pr_number,
