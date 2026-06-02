@@ -374,6 +374,19 @@ def _format_invalid_agent_response_error(
     )
 
 
+def _agent_failure_classification_text(
+    result: AgentResult,
+    *,
+    phase: str,
+) -> str:
+    """Choose the text that matches the failure being classified."""
+    if phase in {"command", "empty"}:
+        return result.raw_output or result.text
+    if result.text_source in {"response_file", "stdout_marker"}:
+        return result.text
+    return result.text
+
+
 def _new_usage_context(config: AgentLoopConfig) -> RunUsageContext:
     run_id = new_run_id()
     return RunUsageContext(run_id=run_id, summary_path=run_usage_summary_path(config, run_id))
@@ -422,6 +435,7 @@ def _run_validated_agent(
     max_attempts = config.agent_max_retries + 1
     last_error = f"{agent_name} produced no output."
     last_result: AgentResult | None = None
+    last_classification_text = ""
 
     for attempt in range(1, max_attempts + 1):
         result = run_agent_result(
@@ -450,19 +464,36 @@ def _run_validated_agent(
         should_retry = False
         if result.returncode != 0:
             last_error = f"agent command exited with {result.returncode}"
-            should_retry = _is_transient_agent_output(text)
+            classification_text = _agent_failure_classification_text(result, phase="command")
+            last_classification_text = classification_text
+            should_retry = _is_transient_agent_output(classification_text)
         elif not text.strip():
             last_error = "agent response was empty"
-            should_retry = _is_transient_agent_output(text)
+            classification_text = _agent_failure_classification_text(result, phase="empty")
+            last_classification_text = classification_text
+            should_retry = _is_transient_agent_output(classification_text)
         else:
             try:
                 marker_value = validate(text)
             except AgentLoopError as exc:
                 last_error = str(exc)
-                should_retry = _is_transient_agent_output(text) or (
-                    attempt == 1 and _is_retryable_marker_near_miss(text)
+                classification_text = _agent_failure_classification_text(result, phase="validation")
+                last_classification_text = classification_text
+                public_text_is_transient = _is_transient_agent_output(classification_text)
+                should_retry = public_text_is_transient or (
+                    attempt == 1 and _is_retryable_marker_near_miss(classification_text)
                 )
-                if use_repair and not _is_transient_agent_output(text):
+                if (
+                    result.raw_output
+                    and result.raw_output != classification_text
+                    and _is_transient_agent_output(result.raw_output)
+                    and not public_text_is_transient
+                ):
+                    log(
+                        config,
+                        f"{agent_name}: transient diagnostics were present outside the public response",
+                    )
+                if use_repair and not public_text_is_transient:
                     log(config, f"{agent_name}: schema validation failed ({exc}); attempting repair pass")
                     repaired = attempt_repair(
                         text,
@@ -499,8 +530,8 @@ def _run_validated_agent(
                 )
 
         if should_retry:
-            if _QUOTA_RATE_LIMIT_RE.search(text):
-                reset_secs = _parse_rate_limit_reset_seconds(text)
+            if _QUOTA_RATE_LIMIT_RE.search(classification_text):
+                reset_secs = _parse_rate_limit_reset_seconds(classification_text)
                 if reset_secs is not None and reset_secs > LONG_RESET_THRESHOLD_SECONDS:
                     duration_str = _format_reset_duration(reset_secs)
                     at_str = _format_reset_at_utc(reset_secs)
@@ -510,7 +541,7 @@ def _run_validated_agent(
                     )
             if attempt < max_attempts:
                 delay = _retry_delay(config, attempt)
-                category = _failure_category(text)
+                category = _failure_category(classification_text)
                 log(
                     config,
                     f"{agent_name}: {category} failure ({last_error}); "
@@ -527,7 +558,7 @@ def _run_validated_agent(
             reason=last_error,
             result=last_result,
             log_paths=log_paths,
-            category=_failure_category(text),
+            category=_failure_category(last_classification_text),
         )
     )
 

@@ -100,6 +100,8 @@ class ClaudeBackend:
         response_file_text = read_public_response_file(response_path)
         return AgentResult(
             text=response_file_text or message_text,
+            raw_output=result.stdout,
+            text_source="response_file" if response_file_text is not None else "stdout",
             response_file_text=response_file_text,
             message_text=message_text,
             session_id=new_session_id,

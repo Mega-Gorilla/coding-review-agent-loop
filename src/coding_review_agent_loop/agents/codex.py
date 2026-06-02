@@ -132,6 +132,8 @@ class CodexBackend:
             log(config, f"Codex finished; log: {log_path}")
             return AgentResult(
                 text=result.stdout,
+                raw_output=result.stdout,
+                text_source="stdout",
                 message_text=result.stdout,
                 log_path=log_path,
                 returncode=result.returncode,
@@ -164,6 +166,8 @@ class CodexBackend:
             log(config, f"Codex finished; log: {log_path}")
             return AgentResult(
                 text=response_file_text or message_text,
+                raw_output=result.stdout,
+                text_source="response_file" if response_file_text is not None else "stdout",
                 response_file_text=response_file_text,
                 message_text=message_text,
                 log_path=log_path,

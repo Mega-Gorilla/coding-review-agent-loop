@@ -390,7 +390,9 @@ class FakeRunner(Runner):
         response_path = Path(match.group(1))
         response_path.parent.mkdir(parents=True, exist_ok=True)
         response = self.public_response_outputs.pop(0)
-        if isinstance(response, str):
+        if isinstance(response, dict):
+            response = response.get("text", "")
+        elif isinstance(response, str):
             response = self._normalize_legacy_agent_output(response, prompt)
         response_path.write_text(response, encoding="utf-8")
 
@@ -437,8 +439,16 @@ class FakeRunner(Runner):
             return CommandResult(cmd, cwd_path, stdout, "", returncode)
 
         if cmd[:1] == ["gemini"]:
-            output, returncode = self._next_agent_output(self.gemini_outputs)
-            if isinstance(output, str):
+            output = self._next_agent_output(self.gemini_outputs)
+            explicit_stdout = False
+            if isinstance(output, dict):
+                stdout = output.get("stdout", "")
+                returncode = output.get("returncode", 0)
+                explicit_stdout = True
+            else:
+                stdout, returncode = output
+            output = stdout
+            if isinstance(output, str) and not explicit_stdout:
                 output = self._normalize_legacy_agent_output(output, "\n".join(cmd))
             self._maybe_write_public_response_file(cmd)
             log_path.write_text(f"$ {' '.join(cmd)}\n\n{output}", encoding="utf-8")
@@ -1070,7 +1080,7 @@ def test_parse_gemini_output_extracts_json_response():
         "response": "Reviewed.\n<!-- AGENT_STATE: approved -->",
         "session_id": "gemini-session-1",
     })
-    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
+    text, sid, usage, raw_usage, source = _parse_gemini_payload(raw)
     assert text == "Reviewed.\n<!-- AGENT_STATE: approved -->"
     assert sid == "gemini-session-1"
     assert usage is None
@@ -1078,7 +1088,7 @@ def test_parse_gemini_output_extracts_json_response():
 
 
 def test_parse_gemini_output_falls_back_on_plain_text():
-    text, sid, usage, raw_usage = _parse_gemini_payload("plain response")
+    text, sid, usage, raw_usage, source = _parse_gemini_payload("plain response")
     assert text == "plain response"
     assert sid is None
     assert usage is None
@@ -1087,7 +1097,7 @@ def test_parse_gemini_output_falls_back_on_plain_text():
 
 def test_parse_gemini_output_falls_back_on_non_string_response():
     raw = json.dumps({"response": 42, "session_id": "gemini-session-1"})
-    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
+    text, sid, usage, raw_usage, source = _parse_gemini_payload(raw)
     assert text == raw
     assert sid == "gemini-session-1"
     assert usage is None
@@ -1108,7 +1118,7 @@ No blocking findings.
 
 -- Google Gemini
 """
-    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
+    text, sid, usage, raw_usage, source = _parse_gemini_payload(raw)
     assert text.startswith("## Review")
     assert "True color" not in text
     assert "YOLO mode" not in text
@@ -1128,7 +1138,7 @@ intermediate draft
 Final answer.
 <!-- AGENT_STATE: approved -->
 """
-    text, _sid, usage, raw_usage = _parse_gemini_payload(raw)
+    text, _sid, usage, raw_usage, source = _parse_gemini_payload(raw)
     assert text == "Final answer.\n<!-- AGENT_STATE: approved -->\n"
     assert usage is None
     assert raw_usage is None
@@ -1139,7 +1149,7 @@ def test_parse_gemini_json_response_strips_public_response_marker():
         "response": f"diagnostic\n{PUBLIC_RESPONSE_MARKER}\nReviewed.\n<!-- AGENT_STATE: approved -->",
         "session_id": "gemini-session-1",
     })
-    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
+    text, sid, usage, raw_usage, source = _parse_gemini_payload(raw)
     assert text == "Reviewed.\n<!-- AGENT_STATE: approved -->"
     assert sid == "gemini-session-1"
     assert usage is None
@@ -1167,7 +1177,7 @@ Looks good.
 
 -- Google Gemini
 """
-    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
+    text, sid, usage, raw_usage, source = _parse_gemini_payload(raw)
     assert text.startswith("## Code Review")
     assert "_GaxiosError" not in text
     assert "YOLO mode" not in text
@@ -1192,7 +1202,7 @@ Looks like a solid approach.
 
 -- Google Gemini
 """
-    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
+    text, sid, usage, raw_usage, source = _parse_gemini_payload(raw)
     assert text.startswith("## Plan Review")
     assert "YOLO mode" not in text
     assert "<!-- AGENT_PLAN_STATE: approved -->" in text
@@ -1217,7 +1227,7 @@ Still looks good.
 
 <!-- AGENT_STATE: approved -->
 """
-    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
+    text, sid, usage, raw_usage, source = _parse_gemini_payload(raw)
     assert text.startswith("## Summary")
     assert "YOLO mode" not in text
     assert "## Details" in text
@@ -1236,7 +1246,7 @@ I need to ask a question.
     Which endpoint should I update?
 <!-- AGENT_CLARIFY -->
 """
-    text, sid, usage, raw_usage = _parse_gemini_payload(raw)
+    text, sid, usage, raw_usage, source = _parse_gemini_payload(raw)
     assert text.startswith("    Which endpoint")
     assert "True color" not in text
     assert "<!-- AGENT_CLARIFY -->" in text
@@ -5240,6 +5250,94 @@ def test_gemini_public_response_file_resolves_worktree_git_dir(tmp_path):
     assert str(config.gemini_dir / ".git" / "agent-loop") not in gemini_call[2]
 
 
+def test_gemini_pre_marker_429_does_not_suppress_structured_review_repair(tmp_path):
+    malformed_public_review = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "approved",
+                "summary": "Found one issue.",
+                "blocking_items": [],
+                "same_pr_followups": [],
+                "future_followups": [],
+                "prior_item_dispositions": [],
+            }
+        )
+        + "\nProse between JSON and footer should be repaired.\n"
+        "<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    )
+    raw_stdout = (
+        "Attempt 1 failed with status 429. Retrying with backoff... "
+        "No capacity available for model gemini-3-flash-preview on the server.\n"
+        f"{PUBLIC_RESPONSE_MARKER}\n"
+        f"{malformed_public_review}"
+    )
+    repaired_review = structured_pr_review(
+        state="approved",
+        summary="Review passed after repair.",
+        reviewer="Google Gemini",
+    )
+    runner = FakeRunner(gemini_outputs=[{"stdout": raw_stdout}])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+    captured_repairs = []
+
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None) -> str | None:
+        captured_repairs.append(raw)
+        assert expected_kind == "pr_review"
+        return repaired_review
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_attempt_repair):
+        assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert captured_repairs == [malformed_public_review]
+    assert "429" not in captured_repairs[0]
+    assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
+    assert any("Review passed after repair." in comment for comment in runner.comments)
+
+
+def test_gemini_response_file_repair_ignores_raw_stdout_transient_diagnostics(tmp_path):
+    malformed_public_review = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "approved",
+                "summary": "Found one issue.",
+                "blocking_items": ["Approved reviews cannot have blocking items."],
+                "same_pr_followups": [],
+                "future_followups": [],
+                "prior_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    )
+    repaired_review = structured_pr_review(
+        state="approved",
+        summary="Response file review passed after repair.",
+        reviewer="Google Gemini",
+    )
+    runner = FakeRunner(
+        gemini_outputs=[
+            {"stdout": "Attempt 1 failed with status 429. No capacity available, then recovered."}
+        ],
+        public_response_outputs=[{"text": malformed_public_review}],
+    )
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+    captured_repairs = []
+
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None) -> str | None:
+        captured_repairs.append(raw)
+        return repaired_review
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_attempt_repair):
+        assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert captured_repairs == [malformed_public_review]
+    assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
+    assert any("Response file review passed after repair." in comment for comment in runner.comments)
+
+
 def test_pr_loop_exhausted_transient_retry_reports_attempt_logs(tmp_path):
     diagnostic = "[ERROR] Invalid stream: The model returned an empty response or malformed tool call."
     runner = FakeRunner(gemini_outputs=[(diagnostic, 1), (diagnostic, 1), (diagnostic, 1)])
@@ -5250,6 +5348,7 @@ def test_pr_loop_exhausted_transient_retry_reports_attempt_logs(tmp_path):
 
     message = str(exc_info.value)
     assert "No review result was recorded" in message
+    assert "Failure category: transient" in message
     assert "Attempt logs:" in message
     assert "gemini.log" in message
     assert runner.comments == []
@@ -5317,6 +5416,86 @@ def test_pr_loop_retries_gemini_no_capacity(tmp_path):
     assert runner.comments == [f"**Review verdict:** Approved\n\n{valid}"]
     sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
     assert len(sleep_commands) == 1
+
+
+def test_gemini_transient_text_inside_public_response_suppresses_repair(tmp_path):
+    public_response = (
+        f"{PUBLIC_RESPONSE_MARKER}\n"
+        "HTTP 429 Too Many Requests: rate limit exceeded.\n"
+        "<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    )
+    runner = FakeRunner(gemini_outputs=[{"stdout": public_response}])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
+        with pytest.raises(AgentLoopError) as exc_info:
+            run_pr_loop(runner, pr_number=77, config=config)
+
+    repair_mock.assert_not_called()
+    assert "Failure category: transient" in str(exc_info.value)
+
+
+def test_gemini_duplicate_trailing_agent_state_marker_is_repairable(tmp_path):
+    malformed_public_review = (
+        structured_pr_review(
+            state="approved",
+            summary="Found one issue.",
+            reviewer="Google Gemini",
+        )
+        + "\n\n<!-- AGENT_STATE: approved -->"
+    )
+    raw_stdout = f"{PUBLIC_RESPONSE_MARKER}\n{malformed_public_review}"
+    repaired_review = structured_pr_review(
+        state="approved",
+        summary="Duplicate marker repaired.",
+        reviewer="Google Gemini",
+    )
+    runner = FakeRunner(gemini_outputs=[{"stdout": raw_stdout}])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=repaired_review) as repair_mock:
+        assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    repair_mock.assert_called_once_with(
+        malformed_public_review,
+        config.gemini_cmd,
+        expected_kind="pr_review",
+    )
+    assert any("Duplicate marker repaired." in comment for comment in runner.comments)
+
+
+def test_gemini_pre_marker_429_malformed_public_response_fails_deterministically(tmp_path):
+    malformed_public_review = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "approved",
+                "summary": "Found one issue.",
+                "blocking_items": [],
+                "same_pr_followups": [],
+                "future_followups": [],
+                "prior_item_dispositions": [],
+            }
+        )
+        + "\nExtra prose before the footer.\n"
+        "<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+    )
+    raw_stdout = (
+        "Attempt 1 failed with status 429. No capacity available for model gemini.\n"
+        f"{PUBLIC_RESPONSE_MARKER}\n"
+        f"{malformed_public_review}"
+    )
+    runner = FakeRunner(gemini_outputs=[{"stdout": raw_stdout}])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value="still invalid"):
+        with pytest.raises(AgentLoopError) as exc_info:
+            run_pr_loop(runner, pr_number=77, config=config)
+
+    message = str(exc_info.value)
+    assert "Failure category: deterministic" in message
+    assert "Failure category: transient" not in message
 
 
 def test_pr_loop_does_not_retry_billing_credit_exhaustion(tmp_path):
