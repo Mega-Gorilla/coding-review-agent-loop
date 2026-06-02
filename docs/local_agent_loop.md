@@ -542,6 +542,8 @@ response must classify every carried reviewer item exactly once:
   "summary": "Implemented the requested fix.",
   "addressed_items": ["item-1"],
   "remaining_items": [],
+  "addressed_item_notes": {"item-1": "Updated the parser and added regression coverage."},
+  "remaining_item_notes": {},
   "human_requirements": {
     "addressed_ids": [],
     "checked_discussion_directly": false

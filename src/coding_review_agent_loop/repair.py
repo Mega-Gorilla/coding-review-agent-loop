@@ -77,6 +77,8 @@ You are a format-repair assistant. An AI agent produced a code review, plan revi
   "summary": "<short summary>",
   "addressed_items": ["item-1"],
   "remaining_items": ["item-2"],
+  "addressed_item_notes": {"item-1": "<how it was resolved>"},
+  "remaining_item_notes": {"item-2": "<why it remains>"},
   "human_requirements": {
     "addressed_ids": ["Requirement 1"],
     "checked_discussion_directly": false

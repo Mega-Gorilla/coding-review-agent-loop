@@ -759,6 +759,8 @@ def structured_coder_followup(
     summary: str = "Updated the PR.",
     addressed_items: list[str] | None = None,
     remaining_items: list[str] | None = None,
+    addressed_item_notes: dict[str, str] | None = None,
+    remaining_item_notes: dict[str, str] | None = None,
     human_requirement_ids: list[str] | None = None,
     checked_discussion_directly: bool = False,
     reviewer: str = "Anthropic Claude",
@@ -772,6 +774,8 @@ def structured_coder_followup(
                 "summary": summary,
                 "addressed_items": addressed_items or [],
                 "remaining_items": remaining_items or [],
+                "addressed_item_notes": addressed_item_notes or {},
+                "remaining_item_notes": remaining_item_notes or {},
                 "human_requirements": {
                     "addressed_ids": human_requirement_ids or [],
                     "checked_discussion_directly": checked_discussion_directly,
@@ -3177,6 +3181,87 @@ def test_validate_structured_coder_followup_accepts_v1_payload():
     assert parsed.addressed_items == ("item-1",)
     assert parsed.remaining_items == ("item-2",)
     assert parsed.human_requirements.addressed_ids == ("Requirement 1",)
+    assert parsed.addressed_item_notes == {}
+    assert parsed.remaining_item_notes == {}
+
+
+def test_validate_structured_coder_followup_accepts_optional_item_notes():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "blocking",
+                "summary": "Addressed the parser; deferred the docs.",
+                "addressed_items": ["item-1"],
+                "remaining_items": ["item-2"],
+                "addressed_item_notes": {"item-1": "Added parsing coverage."},
+                "remaining_item_notes": {"item-2": "Deferred until the docs owner weighs in."},
+                "human_requirements": {
+                    "addressed_ids": [],
+                    "checked_discussion_directly": False,
+                },
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+    )
+
+    parsed = validate_structured_coder_followup(payload)
+
+    assert parsed is not None
+    assert parsed.addressed_item_notes == {"item-1": "Added parsing coverage."}
+    assert parsed.remaining_item_notes == {
+        "item-2": "Deferred until the docs owner weighs in."
+    }
+
+
+def test_validate_structured_coder_followup_rejects_note_for_unlisted_item():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "blocking",
+                "summary": "Addressed one item.",
+                "addressed_items": ["item-1"],
+                "remaining_items": [],
+                "addressed_item_notes": {"item-2": "This note is stale."},
+                "human_requirements": {
+                    "addressed_ids": [],
+                    "checked_discussion_directly": False,
+                },
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+    )
+
+    with pytest.raises(AgentLoopError, match="item-2.*not listed in coder_followup.addressed_items"):
+        validate_structured_coder_followup(payload)
+
+
+@pytest.mark.parametrize("bad_note", ["", "   ", 5, None])
+def test_validate_structured_coder_followup_rejects_invalid_note_values(bad_note):
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "blocking",
+                "summary": "Addressed one item.",
+                "addressed_items": ["item-1"],
+                "remaining_items": [],
+                "addressed_item_notes": {"item-1": bad_note},
+                "human_requirements": {
+                    "addressed_ids": [],
+                    "checked_discussion_directly": False,
+                },
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+    )
+
+    with pytest.raises(AgentLoopError, match="coder_followup.addressed_item_notes.item-1"):
+        validate_structured_coder_followup(payload)
 
 
 def test_validate_structured_coder_followup_returns_none_when_no_structured_candidate_exists():
@@ -3776,6 +3861,10 @@ def test_render_public_coder_followup_comment():
                 "summary": "Added the requested regression test.",
                 "addressed_items": ["item-1", "item-2"],
                 "remaining_items": [],
+                "addressed_item_notes": {
+                    "item-1": "Added coverage for the parser.",
+                    "item-2": "Updated the helper.",
+                },
                 "human_requirements": {
                     "addressed_ids": ["Requirement 1"],
                     "checked_discussion_directly": False,
@@ -3788,15 +3877,37 @@ def test_render_public_coder_followup_comment():
         + "\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
     )
     assert parsed is not None
+    prior_items = (
+        UnresolvedReviewItem(
+            item_id="item-1",
+            reviewer="OpenAI Codex",
+            source_round=1,
+            text="Add a regression test before merge.",
+            status="blocking",
+        ),
+        UnresolvedReviewItem(
+            item_id="item-2",
+            reviewer="Google Gemini",
+            source_round=2,
+            text="Rename the shared helper.",
+            status="same-pr",
+        ),
+    )
 
-    rendered = _render_public_coder_followup_comment(parsed, signature="Anthropic Claude")
+    rendered = _render_public_coder_followup_comment(
+        parsed,
+        signature="Anthropic Claude",
+        prior_items=prior_items,
+    )
 
     assert rendered == (
         "## Coder follow-up\n\n"
         "Added the requested regression test.\n\n"
         "### Addressed items\n"
-        "- item-1\n"
-        "- item-2\n\n"
+        "- item-1: Blocking issue from OpenAI Codex, round 1: Add a regression test before merge.\n"
+        "  - Resolution: Added coverage for the parser.\n"
+        "- item-2: Same-PR follow-up from Google Gemini, round 2: Rename the shared helper.\n"
+        "  - Resolution: Updated the helper.\n\n"
         "### Remaining items\n"
         "- None.\n\n"
         "### Tests run\n"
@@ -3832,7 +3943,128 @@ def test_render_public_coder_followup_comment():
     )
     assert "### Tests run" not in rendered_without_tests
     assert "### Addressed items\n- None." in rendered_without_tests
-    assert "### Remaining items\n- item-3" in rendered_without_tests
+    assert (
+        "### Remaining items\n"
+        "- item-3: Item context unavailable in current round metadata.\n"
+        "  - Reason: No reason provided by coder."
+    ) in rendered_without_tests
+
+
+def test_render_public_coder_followup_comment_expands_carried_items_with_notes_and_placeholders():
+    parsed = validate_structured_coder_followup(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "blocking",
+                "summary": "Fixed the blocker and deferred the follow-up.",
+                "addressed_items": ["item-1"],
+                "remaining_items": ["item-2"],
+                "addressed_item_notes": {"item-1": "Restored the missing validation branch."},
+                "human_requirements": {
+                    "addressed_ids": [],
+                    "checked_discussion_directly": False,
+                },
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    assert parsed is not None
+    prior_items = (
+        UnresolvedReviewItem(
+            item_id="item-1",
+            reviewer="OpenAI Codex",
+            source_round=2,
+            text="  - Preserve structured coder follow-up metadata.\n\nExtra context should be summarized.",
+            status="blocking",
+        ),
+        UnresolvedReviewItem(
+            item_id="item-2",
+            reviewer="Google Gemini",
+            source_round=3,
+            text="Move the rendering helper into a shared module.",
+            status="same-pr",
+        ),
+    )
+
+    rendered = _render_public_coder_followup_comment(
+        parsed,
+        signature="Anthropic Claude",
+        prior_items=prior_items,
+    )
+
+    assert (
+        "- item-1: Blocking issue from OpenAI Codex, round 2: "
+        "Preserve structured coder follow-up metadata."
+    ) in rendered
+    assert "  - Resolution: Restored the missing validation branch." in rendered
+    assert (
+        "- item-2: Same-PR follow-up from Google Gemini, round 3: "
+        "Move the rendering helper into a shared module."
+    ) in rendered
+    assert "  - Reason: No reason provided by coder." in rendered
+
+
+def test_render_public_coder_followup_comment_expands_pr_220_remaining_items():
+    parsed = validate_structured_coder_followup(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "blocking",
+                "summary": "Hardened markdown stripping; two follow-ups remain.",
+                "addressed_items": ["item-3", "item-4"],
+                "remaining_items": ["item-5", "item-6"],
+                "remaining_item_notes": {
+                    "item-5": "Deferred because URL canonicalization needs product confirmation.",
+                    "item-6": "Deferred because the helper move should be isolated from this fix.",
+                },
+                "human_requirements": {
+                    "addressed_ids": [],
+                    "checked_discussion_directly": False,
+                },
+            }
+        )
+        + "\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    assert parsed is not None
+    prior_items = (
+        UnresolvedReviewItem(
+            item_id="item-5",
+            reviewer="Google Gemini",
+            source_round=3,
+            text=(
+                "Update `server/static/index.html` and `server/static/landing.html` to use "
+                "relative paths for `og:image` and `og:url` if possible."
+            ),
+            status="same-pr",
+        ),
+        UnresolvedReviewItem(
+            item_id="item-6",
+            reviewer="Google Gemini",
+            source_round=3,
+            text=(
+                "Deduplicate `_strip_markdown` helper logic between `server/app.py` and "
+                "`core/orchestrator.py` by moving it to `core/utils.py`."
+            ),
+            status="same-pr",
+        ),
+    )
+
+    rendered = _render_public_coder_followup_comment(
+        parsed,
+        signature="Anthropic Claude",
+        prior_items=prior_items,
+    )
+
+    assert "- item-5: Same-PR follow-up from Google Gemini, round 3:" in rendered
+    assert "relative paths" in rendered
+    assert "  - Reason: Deferred because URL canonicalization needs product confirmation." in rendered
+    assert "- item-6: Same-PR follow-up from Google Gemini, round 3:" in rendered
+    assert "Deduplicate `_strip_markdown` helper logic" in rendered
+    assert "  - Reason: Deferred because the helper move should be isolated from this fix." in rendered
+    assert "\n- item-5\n" not in rendered
+    assert "\n- item-6\n" not in rendered
 
 
 def test_render_public_plan_review_comment_normalizes_sections():
@@ -6258,6 +6490,9 @@ def test_pr_loop_accepts_structured_coder_followup_in_pr_round(tmp_path):
                     "summary": "Added the requested regression test.",
                     "addressed_items": ["item-1"],
                     "remaining_items": [],
+                    "addressed_item_notes": {
+                        "item-1": "Added the structured coder follow-up regression case."
+                    },
                     "human_requirements": {
                         "addressed_ids": [],
                         "checked_discussion_directly": False,
@@ -6284,7 +6519,8 @@ def test_pr_loop_accepts_structured_coder_followup_in_pr_round(tmp_path):
     assert len(followup_comments) == 1
     visible_followup = _strip_round_metadata(followup_comments[0])
     assert "Added the requested regression test." in visible_followup
-    assert "### Addressed items\n- item-1" in visible_followup
+    assert "### Addressed items\n- item-1: Blocking issue from OpenAI Codex" in visible_followup
+    assert "  - Resolution: Added the structured coder follow-up regression case." in visible_followup
     assert "### Remaining items\n- None." in visible_followup
     assert (
         "### Tests run\n- pytest tests/test_agent_loop.py -k structured_coder_followup"

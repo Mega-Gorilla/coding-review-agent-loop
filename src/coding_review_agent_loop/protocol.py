@@ -181,6 +181,8 @@ class StructuredCoderFollowup:
     addressed_items: tuple[str, ...]
     remaining_items: tuple[str, ...]
     human_requirements: StructuredHumanRequirementsPayload
+    addressed_item_notes: dict[str, str]
+    remaining_item_notes: dict[str, str]
     tests_run: tuple[str, ...] | None = None
 
 
@@ -506,6 +508,23 @@ def _expect_item_id_list(value: object, *, context: str) -> tuple[str, ...]:
         _expect_item_id(item, context=f"{context} item at index {index}")
         for index, item in enumerate(value)
     )
+
+
+def _expect_item_note_map(
+    value: object,
+    *,
+    context: str,
+    allowed_item_ids: set[str],
+    allowed_context: str,
+) -> dict[str, str]:
+    note_payload = _expect_object(value, context=context)
+    rendered: dict[str, str] = {}
+    for raw_item_id, raw_note in note_payload.items():
+        item_id = _expect_item_id(raw_item_id, context=f"{context} key")
+        if item_id not in allowed_item_ids:
+            raise AgentLoopError(f"{context} key `{item_id}` is not listed in {allowed_context}.")
+        rendered[item_id] = _expect_non_empty_string(raw_note, context=f"{context}.{item_id}")
+    return rendered
 
 
 def _expect_requirement_id_list(value: object, *, context: str) -> tuple[str, ...]:
@@ -1033,7 +1052,7 @@ def validate_structured_coder_followup(text: str) -> StructuredCoderFollowup | N
             "remaining_items",
             "human_requirements",
         },
-        optional={"tests_run"},
+        optional={"addressed_item_notes", "remaining_item_notes", "tests_run"},
     )
     human_requirements_payload = _expect_object(
         payload["human_requirements"],
@@ -1054,19 +1073,33 @@ def validate_structured_coder_followup(text: str) -> StructuredCoderFollowup | N
         if tests_run_value is not None
         else None
     )
+    addressed_items = _expect_item_id_list(
+        payload["addressed_items"],
+        context="coder_followup.addressed_items",
+    )
+    remaining_items = _expect_item_id_list(
+        payload["remaining_items"],
+        context="coder_followup.remaining_items",
+    )
+    addressed_item_notes = _expect_item_note_map(
+        payload.get("addressed_item_notes", {}),
+        context="coder_followup.addressed_item_notes",
+        allowed_item_ids=set(addressed_items),
+        allowed_context="coder_followup.addressed_items",
+    )
+    remaining_item_notes = _expect_item_note_map(
+        payload.get("remaining_item_notes", {}),
+        context="coder_followup.remaining_item_notes",
+        allowed_item_ids=set(remaining_items),
+        allowed_context="coder_followup.remaining_items",
+    )
     return StructuredCoderFollowup(
         schema_version=1,
         kind="coder_followup",
         state=_expect_state(payload["state"], context="coder_followup.state"),
         summary=_expect_non_empty_string(payload["summary"], context="coder_followup.summary"),
-        addressed_items=_expect_item_id_list(
-            payload["addressed_items"],
-            context="coder_followup.addressed_items",
-        ),
-        remaining_items=_expect_item_id_list(
-            payload["remaining_items"],
-            context="coder_followup.remaining_items",
-        ),
+        addressed_items=addressed_items,
+        remaining_items=remaining_items,
         human_requirements=StructuredHumanRequirementsPayload(
             addressed_ids=_expect_requirement_id_list(
                 human_requirements_payload["addressed_ids"],
@@ -1077,6 +1110,8 @@ def validate_structured_coder_followup(text: str) -> StructuredCoderFollowup | N
                 context="coder_followup.human_requirements.checked_discussion_directly",
             ),
         ),
+        addressed_item_notes=addressed_item_notes,
+        remaining_item_notes=remaining_item_notes,
         tests_run=tests_run,
     )
 

@@ -368,6 +368,8 @@ def _structured_coder_followup_guidance(
         '  "summary": "Implemented the requested fix and left one reviewer item for follow-up.",',
         '  "addressed_items": ["item-1"],',
         '  "remaining_items": ["item-2"],',
+        '  "addressed_item_notes": {"item-1": "Updated the parser and added regression coverage."},',
+        '  "remaining_item_notes": {"item-2": "Deferred because it requires a separate UI change."},',
         '  "human_requirements": {',
         '    "addressed_ids": ["Requirement 1"],',
         '    "checked_discussion_directly": false',
@@ -375,10 +377,11 @@ def _structured_coder_followup_guidance(
         '  "tests_run": ["python -m pytest tests/test_agent_loop.py -k followup"]',
         "}",
         "",
-        "Required structured fields: `schema_version`, `kind`, `state`, `summary`, `addressed_items`, `remaining_items`, and `human_requirements`. `tests_run` is optional.",
+        "Required structured fields: `schema_version`, `kind`, `state`, `summary`, `addressed_items`, `remaining_items`, and `human_requirements`. `addressed_item_notes`, `remaining_item_notes`, and `tests_run` are optional.",
         "Your response and public response file must start directly with `{`, contain exactly one top-level JSON object, and must not include stdout filtering markers, prose, headings, or code fences before or between the JSON and footer.",
         "After the JSON object, add exactly one footer `<!-- AGENT_STATE: approved|blocking -->`, then only your standalone signature. The JSON `state` must match the `AGENT_STATE` footer exactly.",
         "Use `addressed_items` and `remaining_items` to classify the unresolved reviewer item IDs shown in this prompt. Do not omit any listed reviewer item ID and do not list any item ID more than once.",
+        "Use `addressed_item_notes` to summarize how each addressed item was resolved, and use `remaining_item_notes` to give a visible reason for each intentionally deferred remaining item.",
     ]
     if human_requirements_context.block:
         if human_requirements_context.surfaced_requirement_ids:

@@ -333,17 +333,48 @@ def _render_public_coder_followup_comment(
     parsed_followup: StructuredCoderFollowup,
     *,
     signature: str,
+    prior_items: Sequence[UnresolvedReviewItem] = (),
 ) -> str:
-    addressed_items = (
-        [f"- {item_id}" for item_id in parsed_followup.addressed_items]
-        if parsed_followup.addressed_items
-        else ["- None."]
-    )
-    remaining_items = (
-        [f"- {item_id}" for item_id in parsed_followup.remaining_items]
-        if parsed_followup.remaining_items
-        else ["- None."]
-    )
+    item_by_id = {item.item_id: item for item in prior_items}
+
+    def render_item(item_id: str, *, note_label: str, note: str | None, placeholder: str | None) -> list[str]:
+        item = item_by_id.get(item_id)
+        if item is None:
+            lines = [f"- {item_id}: Item context unavailable in current round metadata."]
+        else:
+            lines = [f"- {item_id}: {_format_unresolved_item_label(item)}"]
+        if note:
+            lines.append(f"  - {note_label}: {note}")
+        elif placeholder:
+            lines.append(f"  - {note_label}: {placeholder}")
+        return lines
+
+    addressed_items: list[str] = []
+    for item_id in parsed_followup.addressed_items:
+        addressed_items.extend(
+            render_item(
+                item_id,
+                note_label="Resolution",
+                note=parsed_followup.addressed_item_notes.get(item_id),
+                placeholder=None,
+            )
+        )
+    if not addressed_items:
+        addressed_items = ["- None."]
+
+    remaining_items: list[str] = []
+    for item_id in parsed_followup.remaining_items:
+        remaining_items.extend(
+            render_item(
+                item_id,
+                note_label="Reason",
+                note=parsed_followup.remaining_item_notes.get(item_id),
+                placeholder="No reason provided by coder.",
+            )
+        )
+    if not remaining_items:
+        remaining_items = ["- None."]
+
     sections = [
         "## Coder follow-up",
         parsed_followup.summary.strip(),
