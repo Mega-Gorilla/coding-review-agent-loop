@@ -382,8 +382,6 @@ def _agent_failure_classification_text(
     """Choose the text that matches the failure being classified."""
     if phase in {"command", "empty"}:
         return result.raw_output or result.text
-    if result.text_source in {"response_file", "stdout_marker"}:
-        return result.text
     return result.text
 
 
