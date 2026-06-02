@@ -91,6 +91,11 @@ The orchestrator will post only that file's contents when it exists and is
 non-empty. Keep internal tool narration, planning notes, diagnostics, and
 scratch output out of that file. Include the required AGENT_STATE / AGENT_PR /
 AGENT_CLARIFY markers in the file, as requested above.
+
+For structured responses, the file must start directly with {{, contain exactly
+one structured JSON object, then the required footer marker and signature. Do
+not put the stdout filtering marker, headings, prose, or markdown code fences in
+the response file.
 """
 
 

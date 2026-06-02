@@ -9,6 +9,8 @@ from dataclasses import dataclass
 
 from .errors import AgentLoopError
 
+PUBLIC_RESPONSE_MARKER = "=== AGENT_LOOP_PUBLIC_RESPONSE_BELOW ==="
+
 HUMAN_REQUIREMENTS_ADDRESSED_MARKER = "<!-- HUMAN_REQUIREMENTS_ADDRESSED -->"
 HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK = (
     "checked the relevant GitHub discussion directly before responding"
@@ -532,6 +534,23 @@ def _extract_structured_response_object(text: str) -> dict[str, object] | None:
     return payload
 
 
+def normalize_response_file_structured_text(text: str) -> tuple[str, str | None]:
+    """Recover a public-response stdout marker only when it leaked at the front.
+
+    The public response file is already authoritative, so the stdout filtering
+    marker is invalid there.  This helper is intentionally narrow: it only strips
+    a leading marker after whitespace when the remaining body begins like the
+    required structured response.
+    """
+    stripped = text.lstrip()
+    if not stripped.startswith(PUBLIC_RESPONSE_MARKER):
+        return text, None
+    remainder = stripped[len(PUBLIC_RESPONSE_MARKER) :].lstrip()
+    if remainder.startswith("{"):
+        return remainder, "leading-public-response-marker-recovered"
+    return text, "leading-public-response-marker-not-recoverable"
+
+
 def _extract_json_object_prefix(text: str) -> tuple[dict[str, object], str] | None:
     stripped = text.lstrip()
     if not stripped.startswith("{"):
@@ -597,6 +616,7 @@ def _consume_structured_footer_and_signature(
 
 
 def _extract_structured_pr_review_payload(text: str) -> dict[str, object] | None:
+    text, _status = normalize_response_file_structured_text(text)
     extracted = _extract_json_object_prefix(text)
     if extracted is None:
         return None
@@ -617,6 +637,7 @@ def _extract_structured_pr_review_payload(text: str) -> dict[str, object] | None
 
 
 def _extract_structured_plan_review_payload(text: str) -> dict[str, object] | None:
+    text, _status = normalize_response_file_structured_text(text)
     extracted = _extract_json_object_prefix(text)
     if extracted is None:
         return None
@@ -631,6 +652,7 @@ def _extract_structured_plan_review_payload(text: str) -> dict[str, object] | No
 
 
 def _extract_structured_plan_revision_payload(text: str) -> dict[str, object] | None:
+    text, _status = normalize_response_file_structured_text(text)
     extracted = _extract_json_object_prefix(text)
     if extracted is None:
         return None
@@ -646,6 +668,7 @@ def _extract_structured_plan_revision_payload(text: str) -> dict[str, object] | 
 
 
 def _extract_structured_coder_followup_payload(text: str) -> dict[str, object] | None:
+    text, _status = normalize_response_file_structured_text(text)
     extracted = _extract_json_object_prefix(text)
     if extracted is None:
         return None
