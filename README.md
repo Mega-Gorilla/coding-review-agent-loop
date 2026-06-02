@@ -265,8 +265,9 @@ stale visible item IDs from older heads, superseded plans, or replayed rounds.
 Structured JSON is also the preferred coder format for follow-up and plan
 revision rounds. Coder follow-up responses use `kind: "coder_followup"` with
 `state`, `summary`, `addressed_items`, `remaining_items`,
-`human_requirements`, and optional `tests_run`; every carried reviewer item ID
-must appear exactly once in either `addressed_items` or `remaining_items`.
+`human_requirements`, optional `addressed_item_notes` / `remaining_item_notes`,
+and optional `tests_run`; every carried reviewer item ID must appear exactly
+once in either `addressed_items` or `remaining_items`.
 Plan-revision responses use `kind: "plan_revision"` with `state: "blocking"`,
 `summary`, `prior_plan_item_dispositions`, and `plan_steps`. Structured
 responses must start with one top-level JSON object, place the matching

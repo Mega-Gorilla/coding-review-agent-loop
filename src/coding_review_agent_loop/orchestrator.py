@@ -2136,6 +2136,7 @@ def run_pr_loop(
                 public_comment = _render_public_coder_followup_comment(
                     coder_response.marker_value,
                     signature=agent_signature(config.coder),
+                    prior_items=tuple(unresolved_items),
                 )
 
             unresolved_items = _reconcile_human_requirements_ack_item(
