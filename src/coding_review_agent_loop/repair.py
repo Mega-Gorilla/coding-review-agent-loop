@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+from collections.abc import Sequence
 
 from .agents.gemini import _parse_gemini_payload
 
@@ -29,6 +30,8 @@ _REPAIR_PROMPT = """\
 You are a format-repair assistant. An AI agent produced a code review, plan review, plan revision, or coder follow-up that failed strict schema validation. Extract its intent and reformat it into one of these four valid formats.
 
 {expected_kind_instruction}
+
+{coder_followup_required_items_instruction}
 
 ## Valid Format A — PR Review:
 
@@ -114,6 +117,8 @@ You are a format-repair assistant. An AI agent produced a code review, plan revi
 - human_requirements.addressed_ids -> human REQUIREMENT LABELS like "Requirement 1", "Requirement 2"
   These are different from item IDs and may contain spaces.
 - Every reviewer item ID from the original must appear in EITHER addressed_items OR remaining_items, not both.
+- If a "Required coder follow-up item IDs" block is provided above, every listed ID must appear in exactly one of addressed_items or remaining_items even if the malformed markdown omitted it.
+- Legacy markdown markers like <!-- HUMAN_REQUIREMENTS_ADDRESSED --> and a ### Human requirements section are evidence for human_requirements.addressed_ids and checked_discussion_directly only; they do not classify regular reviewer or orchestrator-injected item-N records.
 - Do NOT include human requirement labels in addressed_items or remaining_items.
 
 ## STATE RULES (Format A/B):
@@ -288,7 +293,32 @@ _REPAIR_MODEL = "gemini-3.1-flash-lite"
 _SUPPORTED_EXPECTED_KINDS = {"pr_review", "plan_review", "coder_followup", "plan_revision"}
 
 
-def attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None) -> str | None:
+def _coder_followup_required_items_instruction(
+    expected_kind: str | None,
+    unresolved_item_ids: Sequence[str] | None,
+) -> str:
+    if unresolved_item_ids is None:
+        return ""
+    if expected_kind != "coder_followup":
+        raise ValueError("unresolved_item_ids may only be used for coder_followup repair")
+    rendered_ids = "\n".join(f"- `{item_id}`" for item_id in unresolved_item_ids)
+    return (
+        "## Required coder follow-up item IDs:\n"
+        "The repaired coder_followup must classify every ID below in exactly one of "
+        "`addressed_items` or `remaining_items`, even if the malformed response does "
+        "not mention the ID:\n"
+        f"{rendered_ids or '- (none)'}\n"
+        "Do not put human requirement labels such as `Requirement 1` in these arrays.\n"
+    )
+
+
+def attempt_repair(
+    raw: str,
+    gemini_cmd: str,
+    *,
+    expected_kind: str | None = None,
+    unresolved_item_ids: Sequence[str] | None = None,
+) -> str | None:
     """Call gemini-3.1-flash-lite via the Gemini CLI to reformat a malformed review response.
 
     Uses the same CLI invocation path as the reviewer so no extra auth is needed.
@@ -297,6 +327,10 @@ def attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = Non
     """
     if expected_kind is not None and expected_kind not in _SUPPORTED_EXPECTED_KINDS:
         raise ValueError(f"Unsupported expected repair kind: {expected_kind}")
+    coder_followup_required_items_instruction = _coder_followup_required_items_instruction(
+        expected_kind,
+        unresolved_item_ids,
+    )
     expected_kind_instruction = (
         "## Expected response kind:\n"
         f"You MUST repair this response as `{expected_kind}`. Output no other `kind` value.\n"
@@ -304,6 +338,11 @@ def attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = Non
         else "## Expected response kind:\nNo expected response kind was provided; choose from the format-selection rules.\n"
     )
     prompt = _REPAIR_PROMPT.replace("{expected_kind_instruction}", expected_kind_instruction, 1)
+    prompt = prompt.replace(
+        "{coder_followup_required_items_instruction}",
+        coder_followup_required_items_instruction,
+        1,
+    )
     prompt = prompt.replace("{raw_response}", raw, 1)
     try:
         result = subprocess.run(

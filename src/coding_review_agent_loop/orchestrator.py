@@ -66,6 +66,7 @@ from .prompts import (
 from .protocol import (
     ParsedPlanReview,
     ParsedReview,
+    PUBLIC_RESPONSE_MARKER,
     ReviewItemDisposition,
     StructuredCoderFollowup,
     StructuredPlanRevision,
@@ -79,6 +80,7 @@ from .protocol import (
     parse_structured_plan_review,
     parse_pr_number,
     review_freeform_summary_text,
+    normalize_response_file_structured_text,
     validate_human_requirements_acknowledgement,
     validate_structured_plan_revision,
 )
@@ -203,6 +205,10 @@ PUBLIC_RESPONSE_ARTIFACT_PREFIX_RE = re.compile(
 )
 STRUCTURED_PUBLIC_RESPONSE_KINDS = frozenset(
     {"plan_review", "pr_review", "coder_followup", "plan_revision"}
+)
+STRUCTURED_FENCE_RE = re.compile(
+    r"```(?:json)?[ \t]*\n(?P<body>\s*\{.*?\}\s*)```",
+    re.I | re.S,
 )
 PUBLIC_RESPONSE_TRANSIENT_DIAGNOSTIC_RE = re.compile(
     r"\A\s*(?:\[[^\]]*(?:error|fatal)[^\]]*\]\s*)?"
@@ -403,6 +409,121 @@ def _failure_category(text: str, *, public_response: bool = False) -> str:
     return "deterministic"  # no transient signal — may need code fix
 
 
+def _response_file_structured_status(text: str) -> str:
+    normalized, status = normalize_response_file_structured_text(text)
+    if status is not None:
+        return status
+    if normalized.lstrip().startswith("{"):
+        return "structured-prefix"
+    if normalized.lstrip().startswith("```"):
+        return "fenced-or-markdown"
+    return "markdown-or-prose"
+
+
+def _candidate_source_texts(result: AgentResult) -> list[tuple[str, str]]:
+    sources: list[tuple[str, str]] = []
+    if result.message_text:
+        sources.append(("message_text", result.message_text))
+    if result.raw_output:
+        raw = result.raw_output
+        if PUBLIC_RESPONSE_MARKER in raw:
+            sources.append(("stdout_marker", raw.rsplit(PUBLIC_RESPONSE_MARKER, 1)[1].lstrip()))
+        sources.append(("raw_output", raw))
+    seen: set[tuple[str, str]] = set()
+    unique: list[tuple[str, str]] = []
+    for source, text in sources:
+        key = (source, text)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append((source, text))
+    return unique
+
+
+def _unfence_structured_json_blocks(text: str) -> str:
+    return STRUCTURED_FENCE_RE.sub(lambda match: match.group("body").strip(), text)
+
+
+def _structured_response_candidates(text: str) -> list[str]:
+    candidates: list[str] = []
+    seen: set[str] = set()
+    decoder = json.JSONDecoder()
+    for variant in (text, _unfence_structured_json_blocks(text)):
+        for match in re.finditer(r"\{", variant):
+            start = match.start()
+            try:
+                payload, end = decoder.raw_decode(variant[start:])
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            absolute_end = start + end
+            trailing = variant[absolute_end:]
+            for signature in re.finditer(r"(?m)^--\s+\S[^\n]*(?:\n)?", trailing):
+                candidate = variant[start : absolute_end + signature.end()]
+                if candidate not in seen:
+                    seen.add(candidate)
+                    candidates.append(candidate)
+                break
+    return candidates
+
+
+def _recover_valid_structured_candidate(
+    result: AgentResult,
+    *,
+    validate: Callable[[str], object],
+    expected_kind: str | None,
+    config: AgentLoopConfig,
+    agent_name: str,
+) -> tuple[str, object] | None:
+    if expected_kind not in STRUCTURED_PUBLIC_RESPONSE_KINDS:
+        return None
+    valid: list[tuple[str, str, object]] = []
+    invalid_count = 0
+    for source, text in _candidate_source_texts(result):
+        for candidate in _structured_response_candidates(text):
+            try:
+                marker_value = validate(candidate)
+            except AgentLoopError:
+                invalid_count += 1
+                continue
+            valid.append((source, candidate, marker_value))
+    unique_valid: list[tuple[str, str, object]] = []
+    seen_candidates: set[str] = set()
+    for item in valid:
+        if item[1] in seen_candidates:
+            continue
+        seen_candidates.add(item[1])
+        unique_valid.append(item)
+    if len(unique_valid) == 1:
+        source, candidate, marker_value = unique_valid[0]
+        log(
+            config,
+            f"{agent_name}: public response file was not structured; recovered valid "
+            f"{expected_kind} from {source}",
+        )
+        return candidate, marker_value
+    if len(unique_valid) > 1:
+        log(
+            config,
+            f"{agent_name}: refused stdout/result recovery because multiple structured "
+            f"{expected_kind} candidates were present",
+        )
+    elif invalid_count:
+        log(
+            config,
+            f"{agent_name}: stdout/result contained structured-looking output, but no "
+            f"candidate passed {expected_kind} validation",
+        )
+    else:
+        log(
+            config,
+            f"{agent_name}: stdout/result did not contain a recoverable structured "
+            f"{expected_kind} response",
+        )
+    return None
+
+
 def _retry_delay(config: AgentLoopConfig, retry_index: int) -> int:
     delays = config.agent_retry_backoff_seconds
     if not delays:
@@ -492,6 +613,7 @@ def _run_validated_agent(
     usage_context: RunUsageContext | None = None,
     use_repair: bool = False,
     repair_expected_kind: str | None = None,
+    repair_unresolved_item_ids: Sequence[str] | None = None,
 ) -> ValidatedAgentResponse:
     agent_name = agent_display_name(agent)
     log_paths: list[object] = []
@@ -539,6 +661,16 @@ def _run_validated_agent(
             should_retry = _is_transient_agent_output(classification_text)
             last_failure_category = _failure_category(classification_text)
         else:
+            response_file_pre_status = (
+                _response_file_structured_status(result.response_file_text)
+                if result.response_file_text
+                else None
+            )
+            if response_file_pre_status == "leading-public-response-marker-recovered":
+                log(
+                    config,
+                    f"{agent_name}: response file contained stdout filtering marker and was recovered",
+                )
             try:
                 marker_value = validate(text)
             except AgentLoopError as exc:
@@ -568,12 +700,53 @@ def _run_validated_agent(
                         config,
                         f"{agent_name}: transient diagnostics were present outside the public response",
                     )
+                response_file_status = None
+                if result.response_file_text:
+                    response_file_status = response_file_pre_status
+                    if response_file_status == "leading-public-response-marker-not-recoverable":
+                        log(
+                            config,
+                            f"{agent_name}: response file contained stdout filtering marker but "
+                            "the remainder was not recoverable",
+                        )
+                    elif response_file_status in {"markdown-or-prose", "fenced-or-markdown"}:
+                        log(
+                            config,
+                            f"{agent_name}: public response file was not structured "
+                            f"({response_file_status})",
+                        )
+                response_file_not_structured = response_file_status in {
+                    "leading-public-response-marker-not-recoverable",
+                    "markdown-or-prose",
+                    "fenced-or-markdown",
+                }
+                if result.response_file_text and response_file_not_structured:
+                    recovered = _recover_valid_structured_candidate(
+                        result,
+                        validate=validate,
+                        expected_kind=repair_expected_kind,
+                        config=config,
+                        agent_name=agent_name,
+                    )
+                    if recovered is not None:
+                        recovered_text, marker_value = recovered
+                        if usage_record is not None:
+                            usage_record.validation_status = "validated"
+                        return ValidatedAgentResponse(
+                            text=recovered_text,
+                            session_id=result.session_id,
+                            marker_value=marker_value,
+                            usage=usage,
+                        )
                 if use_repair and not public_text_is_transient:
                     log(config, f"{agent_name}: schema validation failed ({exc}); attempting repair pass")
+                    repair_kwargs: dict[str, object] = {"expected_kind": repair_expected_kind}
+                    if repair_unresolved_item_ids is not None:
+                        repair_kwargs["unresolved_item_ids"] = tuple(repair_unresolved_item_ids)
                     repaired = attempt_repair(
                         text,
                         config.gemini_cmd,
-                        expected_kind=repair_expected_kind,
+                        **repair_kwargs,
                     )
                     if repaired is not None:
                         try:
@@ -1931,6 +2104,11 @@ def run_pr_loop(
                     human_requirements_context=coder_human_requirements_context,
                 )
             log(config, f"Round {round_number}: {coder_name} addressing reviewer feedback")
+            repair_unresolved_item_ids = tuple(
+                item.item_id
+                for item in unresolved_items
+                if item.item_id != HUMAN_REQUIREMENTS_ACK_ITEM_ID
+            )
             coder_response = _run_validated_agent(
                 runner,
                 agent=config.coder,
@@ -1946,6 +2124,7 @@ def run_pr_loop(
                 usage_context=usage_context,
                 use_repair=True,
                 repair_expected_kind="coder_followup",
+                repair_unresolved_item_ids=repair_unresolved_item_ids,
             )
             coder_output = coder_response.text
             coder_session_id = coder_response.session_id

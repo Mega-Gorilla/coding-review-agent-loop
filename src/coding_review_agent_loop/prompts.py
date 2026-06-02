@@ -376,7 +376,7 @@ def _structured_coder_followup_guidance(
         "}",
         "",
         "Required structured fields: `schema_version`, `kind`, `state`, `summary`, `addressed_items`, `remaining_items`, and `human_requirements`. `tests_run` is optional.",
-        "Your response must begin with exactly one top-level JSON object and must not include prose or code fences before or between the JSON and footer.",
+        "Your response and public response file must start directly with `{`, contain exactly one top-level JSON object, and must not include stdout filtering markers, prose, headings, or code fences before or between the JSON and footer.",
         "After the JSON object, add exactly one footer `<!-- AGENT_STATE: approved|blocking -->`, then only your standalone signature. The JSON `state` must match the `AGENT_STATE` footer exactly.",
         "Use `addressed_items` and `remaining_items` to classify the unresolved reviewer item IDs shown in this prompt. Do not omit any listed reviewer item ID and do not list any item ID more than once.",
     ]

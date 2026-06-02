@@ -120,8 +120,11 @@ from coding_review_agent_loop.prompts import (
 from coding_review_agent_loop.protocol import (
     ApprovedFollowup,
     _expect_string_list,
+    _extract_structured_coder_followup_payload,
     _extract_structured_plan_review_payload,
     _extract_structured_plan_revision_payload,
+    _extract_structured_pr_review_payload,
+    normalize_response_file_structured_text,
     parse_approved_followups,
     parse_human_requirements_acknowledgement,
     parse_pr_review,
@@ -3399,6 +3402,61 @@ def test_extract_structured_plan_review_payload_rejects_embedded_json_markdown()
     assert _extract_structured_plan_review_payload(review) is None
 
 
+@pytest.mark.parametrize(
+    ("builder", "extractor"),
+    [
+        (lambda: structured_plan_review(reviewer="Google Gemini"), _extract_structured_plan_review_payload),
+        (lambda: structured_pr_review(reviewer="Google Gemini"), _extract_structured_pr_review_payload),
+        (lambda: structured_coder_followup(reviewer="Anthropic Claude"), _extract_structured_coder_followup_payload),
+        (lambda: structured_plan_revision(reviewer="Anthropic Claude"), _extract_structured_plan_revision_payload),
+    ],
+)
+def test_structured_extractors_recover_leading_public_response_marker(builder, extractor):
+    text = f"\n\n{PUBLIC_RESPONSE_MARKER}\n{builder()}"
+
+    payload = extractor(text)
+
+    assert payload is not None
+
+
+def test_response_file_marker_normalization_reports_unrecoverable_marker():
+    text = f"{PUBLIC_RESPONSE_MARKER}\n### Review\nLooks good."
+
+    normalized, status = normalize_response_file_structured_text(text)
+
+    assert normalized == text
+    assert status == "leading-public-response-marker-not-recoverable"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": "approved",
+                "summary": PUBLIC_RESPONSE_MARKER,
+                "blocking_plan_issues": [],
+                "same_plan_followups": [],
+                "future_followups": [],
+                "prior_plan_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- Google Gemini",
+        "Some prose first.\n"
+        + PUBLIC_RESPONSE_MARKER
+        + "\n"
+        + structured_plan_review(reviewer="Google Gemini"),
+    ],
+)
+def test_response_file_marker_not_stripped_inside_json_or_mid_prose(text):
+    normalized, status = normalize_response_file_structured_text(text)
+
+    assert normalized == text
+    assert status is None
+
+
 def test_extract_structured_plan_review_payload_rejects_footer_state_mismatch():
     payload = json.dumps(
         {
@@ -3993,6 +4051,38 @@ def test_validate_coder_followup_response_rejects_marker_only_markdown():
         _validate_coder_followup_response(
             "Updated the PR.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
             unresolved_items=(),
+            human_requirements=(),
+        )
+
+
+def test_validate_coder_followup_response_requires_regular_synthetic_human_requirement_item():
+    unresolved_items = (
+        UnresolvedReviewItem(
+            item_id="item-8",
+            reviewer="Orchestrator",
+            source_round=4,
+            text="Reviewers approved without acknowledging signed human requirements.",
+            status="blocking",
+        ),
+        UnresolvedReviewItem(
+            item_id=HUMAN_REQUIREMENTS_ACK_ITEM_ID,
+            reviewer="Orchestrator",
+            source_round=4,
+            text="Internal human requirements acknowledgement pseudo-item.",
+            status="blocking",
+        ),
+    )
+    response = structured_coder_followup(
+        state="approved",
+        addressed_items=[],
+        remaining_items=[],
+        reviewer="Anthropic Claude",
+    )
+
+    with pytest.raises(AgentLoopError, match="item-8"):
+        _validate_coder_followup_response(
+            response,
+            unresolved_items=unresolved_items,
             human_requirements=(),
         )
 
@@ -5284,7 +5374,7 @@ def test_gemini_pre_marker_429_does_not_suppress_structured_review_repair(tmp_pa
     config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
     captured_repairs = []
 
-    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
         captured_repairs.append(raw)
         assert expected_kind == "pr_review"
         return repaired_review
@@ -5328,7 +5418,7 @@ def test_gemini_response_file_repair_ignores_raw_stdout_transient_diagnostics(tm
     config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
     captured_repairs = []
 
-    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
         captured_repairs.append(raw)
         return repaired_review
 
@@ -5612,6 +5702,186 @@ def test_structured_coder_followup_transient_terms_before_footer_runs_repair(tmp
         expected_kind="coder_followup",
     )
     assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
+
+
+def test_run_validated_agent_recovers_coder_followup_from_message_text_when_response_file_markdown(tmp_path):
+    unresolved_items = (
+        UnresolvedReviewItem(
+            item_id="item-8",
+            reviewer="Orchestrator",
+            source_round=4,
+            text="Acknowledge signed human requirements.",
+            status="blocking",
+        ),
+    )
+    valid_followup = structured_coder_followup(
+        state="approved",
+        summary="Acknowledged the signed human requirements.",
+        addressed_items=["item-8"],
+        remaining_items=[],
+        reviewer="OpenAI Codex",
+    )
+    markdown_response_file = (
+        "### Human requirements\n\n"
+        "Acknowledged.\n\n"
+        "<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n"
+        "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+    )
+    runner = FakeRunner(
+        codex_outputs=[{"public_response": valid_followup, "stdout": "diagnostic output"}],
+        public_response_outputs=[{"text": markdown_response_file}],
+    )
+    config = make_config(tmp_path, coder="codex", agent_max_retries=0)
+
+    response = _run_validated_agent(
+        runner,
+        agent="codex",
+        config=config,
+        prompt="Address feedback.",
+        marker_description="<!-- AGENT_STATE: approved|blocking -->",
+        validate=lambda text: _validate_coder_followup_response(
+            text,
+            unresolved_items=unresolved_items,
+            human_requirements=(),
+        ),
+        repair_expected_kind="coder_followup",
+    )
+
+    assert response.text == valid_followup
+    assert response.marker_value.addressed_items == ("item-8",)
+
+
+def test_run_validated_agent_recovers_fenced_coder_followup_from_raw_stdout(tmp_path):
+    unresolved_items = (
+        UnresolvedReviewItem(
+            item_id="item-1",
+            reviewer="OpenAI Codex",
+            source_round=1,
+            text="Fix the bug.",
+            status="blocking",
+        ),
+    )
+    valid_followup = structured_coder_followup(
+        state="approved",
+        addressed_items=["item-1"],
+        remaining_items=[],
+        reviewer="OpenAI Codex",
+    )
+    json_part, footer = valid_followup.split("\n<!-- AGENT_STATE:", 1)
+    fenced_stdout = f"tool diagnostic\n```json\n{json_part}\n```\n<!-- AGENT_STATE:{footer}"
+    runner = FakeRunner(
+        codex_outputs=[{"public_response": "legacy markdown", "stdout": fenced_stdout}],
+        public_response_outputs=[{"text": "### Update\nFixed it.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"}],
+    )
+    config = make_config(tmp_path, coder="codex", agent_max_retries=0)
+
+    response = _run_validated_agent(
+        runner,
+        agent="codex",
+        config=config,
+        prompt="Address feedback.",
+        marker_description="<!-- AGENT_STATE: approved|blocking -->",
+        validate=lambda text: _validate_coder_followup_response(
+            text,
+            unresolved_items=unresolved_items,
+            human_requirements=(),
+        ),
+        repair_expected_kind="coder_followup",
+    )
+
+    assert response.text == valid_followup
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        structured_pr_review(reviewer="OpenAI Codex"),
+        "diagnostic output without a structured response",
+    ],
+)
+def test_run_validated_agent_refuses_unrecoverable_stdout_when_response_file_markdown(tmp_path, stdout):
+    runner = FakeRunner(
+        codex_outputs=[{"public_response": "legacy markdown", "stdout": stdout}],
+        public_response_outputs=[{"text": "### Update\nFixed it.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"}],
+    )
+    config = make_config(tmp_path, coder="codex", agent_max_retries=0)
+
+    with pytest.raises(AgentLoopError, match="No review result was recorded"):
+        _run_validated_agent(
+            runner,
+            agent="codex",
+            config=config,
+            prompt="Address feedback.",
+            marker_description="<!-- AGENT_STATE: approved|blocking -->",
+            validate=lambda text: _validate_coder_followup_response(
+                text,
+                unresolved_items=(),
+                human_requirements=(),
+            ),
+            repair_expected_kind="coder_followup",
+        )
+
+
+def test_run_validated_agent_refuses_multiple_stdout_structured_candidates(tmp_path):
+    first = structured_coder_followup(
+        state="approved",
+        summary="First candidate.",
+        reviewer="OpenAI Codex",
+    )
+    second = structured_coder_followup(
+        state="approved",
+        summary="Second candidate.",
+        reviewer="OpenAI Codex",
+    )
+    runner = FakeRunner(
+        codex_outputs=[{"public_response": "legacy markdown", "stdout": first + "\n\n" + second}],
+        public_response_outputs=[{"text": "### Update\nFixed it.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"}],
+    )
+    config = make_config(tmp_path, coder="codex", agent_max_retries=0)
+
+    with pytest.raises(AgentLoopError, match="No review result was recorded"):
+        _run_validated_agent(
+            runner,
+            agent="codex",
+            config=config,
+            prompt="Address feedback.",
+            marker_description="<!-- AGENT_STATE: approved|blocking -->",
+            validate=lambda text: _validate_coder_followup_response(
+                text,
+                unresolved_items=(),
+                human_requirements=(),
+            ),
+            repair_expected_kind="coder_followup",
+        )
+
+
+def test_run_validated_agent_keeps_valid_response_file_authoritative_over_noisy_stdout(tmp_path):
+    valid_followup = structured_coder_followup(
+        state="approved",
+        summary="Response file wins.",
+        reviewer="OpenAI Codex",
+    )
+    runner = FakeRunner(
+        codex_outputs=[{"public_response": "ignored message", "stdout": "unrelated noisy diagnostics"}],
+        public_response_outputs=[{"text": valid_followup}],
+    )
+    config = make_config(tmp_path, coder="codex", agent_max_retries=0)
+
+    response = _run_validated_agent(
+        runner,
+        agent="codex",
+        config=config,
+        prompt="Address feedback.",
+        marker_description="<!-- AGENT_STATE: approved|blocking -->",
+        validate=lambda text: _validate_coder_followup_response(
+            text,
+            unresolved_items=(),
+            human_requirements=(),
+        ),
+        repair_expected_kind="coder_followup",
+    )
+
+    assert response.text == valid_followup
 
 
 def test_structured_plan_revision_transient_terms_before_footer_runs_repair(tmp_path):
@@ -9904,7 +10174,7 @@ def test_issue_loop_plan_revision_repair_preserves_signed_human_requirements(tmp
     config = make_config(tmp_path, agent_max_retries=0)
     captured_repairs = []
 
-    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
         captured_repairs.append((raw, expected_kind))
         return repaired_revision
 
@@ -9971,7 +10241,7 @@ def test_issue_loop_plan_revision_repair_rejects_wrong_kind_from_human_requireme
     config = make_config(tmp_path, agent_max_retries=0)
     captured_kinds = []
 
-    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
         captured_kinds.append(expected_kind)
         return wrong_kind_repair
 
@@ -11586,6 +11856,45 @@ def test_attempt_repair_includes_expected_kind_instruction():
     assert "Output no other `kind` value" in prompt
 
 
+def test_attempt_repair_includes_coder_followup_required_item_ids():
+    repaired = structured_coder_followup(
+        state="approved",
+        addressed_items=["item-8"],
+        remaining_items=[],
+        reviewer="Gemini",
+    )
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = repaired
+
+    with patch("coding_review_agent_loop.repair.subprocess.run", return_value=mock_result) as mock_run:
+        result = attempt_repair(
+            "### Human requirements\nAcknowledged.\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->",
+            "gemini",
+            expected_kind="coder_followup",
+            unresolved_item_ids=["item-8"],
+        )
+
+    assert result == repaired
+    cmd = mock_run.call_args.args[0]
+    prompt = cmd[cmd.index("--prompt") + 1]
+    assert "Required coder follow-up item IDs" in prompt
+    assert "`item-8`" in prompt
+    assert "exactly one of `addressed_items` or `remaining_items`" in prompt
+    assert "HUMAN_REQUIREMENTS_ADDRESSED" in prompt
+    assert "do not classify regular reviewer or orchestrator-injected item-N records" in prompt
+
+
+def test_attempt_repair_rejects_unresolved_item_ids_for_non_coder_kind():
+    with pytest.raises(ValueError, match="unresolved_item_ids"):
+        attempt_repair(
+            "malformed plan review",
+            "gemini",
+            expected_kind="plan_review",
+            unresolved_item_ids=["item-1"],
+        )
+
+
 def test_attempt_repair_handles_json_wrapped_cli_output():
     repaired_text = (
         '{"schema_version":1,"kind":"pr_review","state":"approved","summary":"OK",'
@@ -11635,7 +11944,7 @@ def test_run_pr_loop_uses_repair_pass_on_format_failure(tmp_path):
 
     captured_repairs = []
 
-    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
         captured_repairs.append(raw)
         assert expected_kind == "pr_review"
         return repaired_review
@@ -11668,7 +11977,7 @@ def test_run_pr_loop_repairs_format_failure_with_5xx_source_line_reference(tmp_p
 
     captured_repairs = []
 
-    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
         captured_repairs.append(raw)
         assert expected_kind == "pr_review"
         return repaired_review
@@ -11692,7 +12001,7 @@ def test_run_pr_loop_falls_back_to_error_when_repair_also_fails(tmp_path):
     )
     config = make_config(tmp_path, coder="claude", reviewer="codex", agent_max_retries=0)
 
-    def fake_attempt_repair_fails(raw: str, gemini_cmd: str, *, expected_kind: str | None = None) -> str | None:
+    def fake_attempt_repair_fails(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
         assert expected_kind == "pr_review"
         return "still broken output without valid schema"
 
@@ -11746,9 +12055,11 @@ def test_run_pr_loop_uses_repair_pass_on_coder_followup_format_failure(tmp_path)
     config = make_config(tmp_path, coder="claude", reviewer="codex", max_rounds=2, agent_max_retries=0)
 
     captured_repairs = []
+    captured_unresolved_item_ids = []
 
-    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
         captured_repairs.append(raw)
+        captured_unresolved_item_ids.append(tuple(unresolved_item_ids or ()))
         assert expected_kind == "coder_followup"
         return repaired_followup
 
@@ -11758,6 +12069,7 @@ def test_run_pr_loop_uses_repair_pass_on_coder_followup_format_failure(tmp_path)
     assert result == 0
     assert len(captured_repairs) == 1
     assert "pr_review" in captured_repairs[0]
+    assert captured_unresolved_item_ids == [("item-1",)]
 
 
 def test_run_pr_loop_falls_back_to_error_when_coder_followup_repair_also_fails(tmp_path):
