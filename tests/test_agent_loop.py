@@ -68,6 +68,10 @@ from coding_review_agent_loop.github import (
     get_issue_context,
     get_pr_checks,
 )
+from coding_review_agent_loop.followups import (
+    MAX_APPROVED_FOLLOWUP_ISSUES,
+    reconcile_approved_followups,
+)
 from coding_review_agent_loop.migrations import MigrationValidationResult, validate_pr_migration_topology
 from coding_review_agent_loop.orchestrator import (
     ITEM_SUMMARY_LIMIT,
@@ -112,6 +116,7 @@ from coding_review_agent_loop.prompts import (
     render_coder_human_requirements_prompt_context,
 )
 from coding_review_agent_loop.protocol import (
+    ApprovedFollowup,
     _expect_string_list,
     _extract_structured_plan_review_payload,
     _extract_structured_plan_revision_payload,
@@ -6562,6 +6567,8 @@ def test_pr_loop_creates_issues_for_approved_followups(tmp_path):
                 "Reviewer: Codex\n\n"
                 "Follow-up:\n"
                 "- Add cleanup docs.\n\n"
+                "Original reviewer notes:\n"
+                "- Codex: Add cleanup docs.\n\n"
                 "This was mentioned in an approved review as future work and did not block merge readiness."
             ),
         },
@@ -6572,6 +6579,8 @@ def test_pr_loop_creates_issues_for_approved_followups(tmp_path):
                 "Reviewer: Claude\n\n"
                 "Follow-up:\n"
                 "- Add regression coverage.\n\n"
+                "Original reviewer notes:\n"
+                "- Claude: Add regression coverage.\n\n"
                 "This was mentioned in an approved review as future work and did not block merge readiness."
             ),
         },
@@ -6626,6 +6635,227 @@ def test_pr_loop_deduplicates_approved_followup_issues_across_reviewers(tmp_path
     assert "- https://github.com/OWNER/REPO/issues/99" in issue_summary
     assert "- https://github.com/OWNER/REPO/issues/100" in issue_summary
     assert "- https://github.com/OWNER/REPO/issues/101" in issue_summary
+
+
+def test_reconcile_approved_followups_groups_semantic_duplicates_and_preserves_distinct_items():
+    reconciliation = reconcile_approved_followups(
+        [
+            ApprovedFollowup(
+                reviewer="Claude",
+                text="Clarify repair-pass ownership across the flowchart and sequence diagram.",
+            ),
+            ApprovedFollowup(
+                reviewer="Gemini",
+                text="Document repair pass ownership in the flowchart and sequence diagram so the handoff is clear.",
+            ),
+            ApprovedFollowup(
+                reviewer="Codex",
+                text="Add memory freshness checks before planning starts.",
+            ),
+            ApprovedFollowup(
+                reviewer="Claude",
+                text="Add sync-before-planning coverage for reviewer workdirs.",
+            ),
+        ],
+        issue_limit=MAX_APPROVED_FOLLOWUP_ISSUES,
+    )
+
+    assert len(reconciliation.groups) == 3
+    assert reconciliation.deduplicated_count == 1
+    assert reconciliation.skipped_by_cap == 0
+    grouped_reviewers = [group.reviewers for group in reconciliation.groups]
+    assert ("Claude", "Gemini") in grouped_reviewers
+    assert any("memory freshness" in group.text for group in reconciliation.groups)
+    assert any("sync-before-planning" in group.text for group in reconciliation.groups)
+
+
+def test_reconcile_approved_followups_selects_more_specific_canonical_wording_and_caps():
+    reconciliation = reconcile_approved_followups(
+        [
+            ApprovedFollowup(reviewer="Claude", text="Clarify repair-pass ownership."),
+            ApprovedFollowup(
+                reviewer="Gemini",
+                text="Clarify repair-pass ownership in `docs/local_agent_loop.md` and the sequence diagram.",
+            ),
+            ApprovedFollowup(reviewer="Codex", text="Follow up two."),
+            ApprovedFollowup(reviewer="Claude", text="Follow up three."),
+            ApprovedFollowup(reviewer="Gemini", text="Follow up four."),
+        ],
+        issue_limit=3,
+    )
+
+    assert reconciliation.groups[0].text == (
+        "Clarify repair-pass ownership in `docs/local_agent_loop.md` and the sequence diagram."
+    )
+    assert len(reconciliation.selected_groups) == 3
+    assert reconciliation.skipped_by_cap == 1
+    assert reconciliation.deduplicated_count == 1
+
+
+def test_pr_loop_files_earlier_future_followup_not_repeated_in_final_round(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(
+                state="approved",
+                summary="Codex approves with a later cleanup.",
+                future_followups=["Add memory freshness checks before planning starts."],
+                reviewer="OpenAI Codex",
+            ),
+            structured_pr_review(
+                state="approved",
+                summary="Codex final approval.",
+                prior_item_dispositions=[
+                    {
+                        "item_id": "item-1",
+                        "disposition": "future",
+                        "note": "Still useful as separate tracking.",
+                    },
+                    {"item_id": "item-2", "disposition": "resolved"},
+                ],
+                reviewer="OpenAI Codex",
+            ),
+        ],
+        claude_outputs=[
+            structured_pr_review(
+                state="blocking",
+                summary="Need one current-PR fix.",
+                blocking_items=["Fix the current sync regression."],
+                reviewer="Anthropic Claude",
+            ),
+            structured_coder_followup(
+                addressed_items=["item-2"],
+                remaining_items=["item-1"],
+                reviewer="Anthropic Claude",
+            ),
+            structured_pr_review(
+                state="approved",
+                summary="Claude final approval.",
+                prior_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "future", "note": "Still valid."},
+                    {"item_id": "item-2", "disposition": "resolved"},
+                ],
+                reviewer="Anthropic Claude",
+            ),
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        reviewer=("codex", "claude"),
+        approved_followups="issue",
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert len(runner.issues) == 1
+    assert runner.issues[0]["title"] == (
+        "Follow up future review note: Add memory freshness checks before planning starts."
+    )
+    assert "Update from Codex: Still useful as separate tracking." in runner.issues[0]["body"]
+
+
+def test_pr_loop_does_not_file_resolved_earlier_future_followup(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(
+                state="approved",
+                summary="Codex approves with a later cleanup.",
+                future_followups=["Remove stale final-round-only follow-up handling."],
+                reviewer="OpenAI Codex",
+            ),
+            structured_pr_review(
+                state="approved",
+                summary="Codex final approval.",
+                prior_item_dispositions=[
+                    {
+                        "item_id": "item-1",
+                        "disposition": "resolved",
+                        "note": "Fixed in the second commit.",
+                    },
+                    {"item_id": "item-2", "disposition": "resolved"},
+                ],
+                reviewer="OpenAI Codex",
+            ),
+        ],
+        claude_outputs=[
+            structured_pr_review(
+                state="blocking",
+                summary="Need one current-PR fix.",
+                blocking_items=["Fix the current sync regression."],
+                reviewer="Anthropic Claude",
+            ),
+            structured_coder_followup(
+                addressed_items=["item-2"],
+                remaining_items=["item-1"],
+                reviewer="Anthropic Claude",
+            ),
+            structured_pr_review(
+                state="approved",
+                summary="Claude final approval.",
+                prior_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "resolved", "note": "Fixed."},
+                    {"item_id": "item-2", "disposition": "resolved"},
+                ],
+                reviewer="Anthropic Claude",
+            ),
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        reviewer=("codex", "claude"),
+        approved_followups="issue",
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert runner.issues == []
+    assert not any(comment.startswith("Created approved-review future follow-up issues") for comment in runner.comments)
+
+
+def test_pr_loop_semantically_deduplicates_followup_issues_and_keeps_provenance(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(
+                state="approved",
+                summary="Codex approves.",
+                reviewer="OpenAI Codex",
+            )
+        ],
+        claude_outputs=[
+            structured_pr_review(
+                state="approved",
+                summary="Claude approves.",
+                future_followups=[
+                    "Clarify repair-pass ownership across the flowchart and sequence diagram."
+                ],
+                reviewer="Anthropic Claude",
+            )
+        ],
+        gemini_outputs=[
+            structured_pr_review(
+                state="approved",
+                summary="Gemini approves.",
+                future_followups=[
+                    "Document repair pass ownership in the flowchart and sequence diagram so the handoff is clear."
+                ],
+                reviewer="Google Gemini",
+            )
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        reviewer=("codex", "claude", "gemini"),
+        approved_followups="issue",
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert len(runner.issues) == 1
+    body = runner.issues[0]["body"]
+    assert "Reviewers:\n- Claude\n- Gemini" in body
+    assert "Original reviewer notes:" in body
+    assert "- Claude: Clarify repair-pass ownership" in body
+    assert "- Gemini: Document repair pass ownership" in body
+    assert "Reconciliation: 1 filed, 1 deduplicated, 0 skipped by cap." in runner.comments[-1]
 
 
 def test_pr_loop_suppresses_followup_issue_summary_when_no_urls_returned(tmp_path):

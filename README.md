@@ -323,8 +323,17 @@ larger redesigns and independent work belong under Future follow-ups. Approved
 future follow-ups remain in the round-to-round
 ledger so later reviewers can explicitly confirm they are still future work,
 resolved, or should be promoted back to same-PR or blocking status. The final
-summary or issue creation uses the remaining future items from that ledger. The
-issue modes create at most three follow-up issues to avoid issue noise.
+summary or issue creation uses the remaining future items from that reconciled
+ledger, not only the final round's newly written Future follow-ups.
+
+Before posting summaries or creating issues, the loop deduplicates the remaining
+future items across reviewers using deterministic topic keys from headings,
+code identifiers, docs/files, and normalized wording. The selected issue body
+keeps the canonical wording plus an `Original reviewer notes` section so
+reviewer provenance and later disposition notes are not lost. The issue modes
+create at most three follow-up issues to avoid issue noise, and the final PR
+comment reports how many items were filed or summarized, deduplicated, or
+skipped by the cap.
 
 Plan reviews follow the same rule: approved plan reviews may include Future
 follow-ups only. Blocking plan issues, Same-plan follow-ups, or carried-forward
