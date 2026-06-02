@@ -154,6 +154,8 @@ def _reconcile_human_requirements_ack_item(
         return list(unresolved_items)
 
     prompt_context = render_coder_human_requirements_prompt_context(human_requirements)
+    if not prompt_context.surfaced_requirement_ids and not prompt_context.requires_direct_discussion_ack:
+        return _clear_human_requirements_ack_item(unresolved_items)
     try:
         structured_followup = validate_structured_coder_followup(coder_output)
         if structured_followup is not None:

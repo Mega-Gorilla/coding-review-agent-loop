@@ -33,6 +33,8 @@ You are a format-repair assistant. An AI agent produced a code review, plan revi
 
 {coder_followup_required_items_instruction}
 
+{coder_followup_human_requirements_instruction}
+
 ## Valid Format A — PR Review:
 
 {
@@ -118,6 +120,10 @@ You are a format-repair assistant. An AI agent produced a code review, plan revi
   NEVER put human requirement labels ("Requirement 1") here — they contain spaces and will fail.
 - human_requirements.addressed_ids -> human REQUIREMENT LABELS like "Requirement 1", "Requirement 2"
   These are different from item IDs and may contain spaces.
+- human_requirements.addressed_ids may contain only exact signed labels surfaced in the original prompt/response context.
+- If no signed human requirement labels are surfaced in the repair context, use "addressed_ids": [].
+- Never convert issue numbers, issue acceptance criteria, reviewer item IDs, reviewer comments, summaries, or arbitrary labels into signed human requirements.
+- In mixed cases, keep valid surfaced Requirement N labels and drop invalid extras.
 - Every reviewer item ID from the original must appear in EITHER addressed_items OR remaining_items, not both.
 - If a "Required coder follow-up item IDs" block is provided above, every listed ID must appear in exactly one of addressed_items or remaining_items even if the malformed markdown omitted it.
 - Legacy markdown markers like <!-- HUMAN_REQUIREMENTS_ADDRESSED --> and a ### Human requirements section are evidence for human_requirements.addressed_ids and checked_discussion_directly only; they do not classify regular reviewer or orchestrator-injected item-N records.
@@ -280,6 +286,31 @@ Notes:
 - When repairing plan_revision, do not output coder_followup even if the original contains a Human requirements section.
 - If the original plan revision includes <!-- HUMAN_REQUIREMENTS_ADDRESSED --> and a ### Human requirements section, preserve both after the JSON and before <!-- AGENT_PLAN_STATE: blocking -->.
 
+## WORKED EXAMPLE 5 — coder follow-up with no signed human requirements:
+
+Original (malformed): coder_followup includes "Issue #221 acceptance criteria" in human_requirements.addressed_ids, but the repair context has no surfaced signed human requirement labels.
+
+CORRECT repair — keep reviewer items separate and rewrite human_requirements.addressed_ids to []:
+{
+  "schema_version": 1,
+  "kind": "coder_followup",
+  "state": "blocking",
+  "summary": "Updated the implementation and left one reviewer item pending.",
+  "addressed_items": ["item-1"],
+  "remaining_items": ["item-2"],
+  "human_requirements": {
+    "addressed_ids": [],
+    "checked_discussion_directly": false
+  }
+}
+<!-- AGENT_STATE: blocking -->
+-- OpenAI Codex
+
+Notes:
+- Issue acceptance criteria are not signed human requirements.
+- Reviewer items belong in addressed_items / remaining_items, never in human_requirements.addressed_ids.
+- If surfaced signed labels include "Requirement 1" and the malformed response has ["Requirement 1", "Issue #221 acceptance criteria"], keep ["Requirement 1"] and drop "Issue #221 acceptance criteria".
+
 ## FORMAT:
 1. Start DIRECTLY with { — no prose, no markdown fences.
 2. After }: optional signed human requirements acknowledgement for plan_revision only, then <!-- AGENT_STATE: X --> (pr_review or coder_followup) OR <!-- AGENT_PLAN_STATE: X --> (plan_review or plan_revision). DIFFERENT MARKERS.
@@ -314,12 +345,34 @@ def _coder_followup_required_items_instruction(
     )
 
 
+def _coder_followup_human_requirements_instruction(
+    expected_kind: str | None,
+    surfaced_requirement_ids: Sequence[str] | None,
+) -> str:
+    if surfaced_requirement_ids is None:
+        return ""
+    if expected_kind != "coder_followup":
+        raise ValueError("surfaced_requirement_ids may only be used for coder_followup repair")
+    rendered_ids = "\n".join(f"- `{item_id}`" for item_id in surfaced_requirement_ids)
+    if not surfaced_requirement_ids:
+        rendered_ids = "- (none)"
+    return (
+        "## Surfaced signed human requirement labels for coder follow-up:\n"
+        f"{rendered_ids}\n"
+        "Only the exact labels above may appear in `human_requirements.addressed_ids`.\n"
+        "When the list is `(none)`, set `human_requirements.addressed_ids` to `[]`. "
+        "Do not use issue numbers, issue acceptance criteria, reviewer item IDs, reviewer comments, "
+        "summaries, or arbitrary labels as human requirement IDs.\n"
+    )
+
+
 def attempt_repair(
     raw: str,
     gemini_cmd: str,
     *,
     expected_kind: str | None = None,
     unresolved_item_ids: Sequence[str] | None = None,
+    surfaced_requirement_ids: Sequence[str] | None = None,
 ) -> str | None:
     """Call gemini-3.1-flash-lite via the Gemini CLI to reformat a malformed review response.
 
@@ -333,6 +386,10 @@ def attempt_repair(
         expected_kind,
         unresolved_item_ids,
     )
+    coder_followup_human_requirements_instruction = _coder_followup_human_requirements_instruction(
+        expected_kind,
+        surfaced_requirement_ids,
+    )
     expected_kind_instruction = (
         "## Expected response kind:\n"
         f"You MUST repair this response as `{expected_kind}`. Output no other `kind` value.\n"
@@ -343,6 +400,11 @@ def attempt_repair(
     prompt = prompt.replace(
         "{coder_followup_required_items_instruction}",
         coder_followup_required_items_instruction,
+        1,
+    )
+    prompt = prompt.replace(
+        "{coder_followup_human_requirements_instruction}",
+        coder_followup_human_requirements_instruction,
         1,
     )
     prompt = prompt.replace("{raw_response}", raw, 1)

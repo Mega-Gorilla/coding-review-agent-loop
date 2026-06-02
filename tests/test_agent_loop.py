@@ -4223,6 +4223,123 @@ def test_validate_coder_followup_response_accepts_structured_item_partition():
     assert parsed.remaining_items == ("item-2",)
 
 
+def test_validate_coder_followup_response_rejects_issue_acceptance_criteria_as_human_requirement():
+    response = structured_coder_followup(
+        state="blocking",
+        addressed_items=["item-1"],
+        remaining_items=[],
+        human_requirement_ids=["Issue #221 acceptance criteria"],
+        reviewer="OpenAI Codex",
+    )
+
+    with pytest.raises(AgentLoopError, match="issue acceptance criteria.*not signed human requirements"):
+        _validate_coder_followup_response(
+            response,
+            unresolved_items=(
+                UnresolvedReviewItem(
+                    item_id="item-1",
+                    reviewer="Anthropic Claude",
+                    source_round=1,
+                    text="Add a regression test.",
+                    status="blocking",
+                ),
+            ),
+            human_requirements=(),
+        )
+
+
+def test_validate_coder_followup_response_rejects_requirement_label_when_none_surfaced():
+    response = structured_coder_followup(
+        state="blocking",
+        addressed_items=["item-1"],
+        remaining_items=[],
+        human_requirement_ids=["Requirement 1"],
+        reviewer="OpenAI Codex",
+    )
+
+    with pytest.raises(AgentLoopError, match="no signed human requirements were surfaced"):
+        _validate_coder_followup_response(
+            response,
+            unresolved_items=(
+                UnresolvedReviewItem(
+                    item_id="item-1",
+                    reviewer="Anthropic Claude",
+                    source_round=1,
+                    text="Add a regression test.",
+                    status="blocking",
+                ),
+            ),
+            human_requirements=(),
+        )
+
+
+def test_validate_coder_followup_response_accepts_surfaced_requirement_label():
+    response = structured_coder_followup(
+        state="blocking",
+        addressed_items=["item-1"],
+        remaining_items=[],
+        human_requirement_ids=["Requirement 1"],
+        reviewer="OpenAI Codex",
+    )
+
+    parsed = _validate_coder_followup_response(
+        response,
+        unresolved_items=(
+            UnresolvedReviewItem(
+                item_id="item-1",
+                reviewer="Anthropic Claude",
+                source_round=1,
+                text="Add a regression test.",
+                status="blocking",
+            ),
+        ),
+        human_requirements=(
+            HumanReviewRequirement(
+                source_type="PR comment",
+                author="maintainer",
+                created_at="2026-06-02T12:00:00Z",
+                url="https://github.com/OWNER/REPO/pull/1#issuecomment-1",
+                body="Add coverage for the rejected label case.",
+            ),
+        ),
+    )
+
+    assert parsed.human_requirements.addressed_ids == ("Requirement 1",)
+
+
+def test_validate_coder_followup_response_rejects_mixed_valid_and_invalid_requirement_labels():
+    response = structured_coder_followup(
+        state="blocking",
+        addressed_items=["item-1"],
+        remaining_items=[],
+        human_requirement_ids=["Requirement 1", "Issue #221 acceptance criteria"],
+        reviewer="OpenAI Codex",
+    )
+
+    with pytest.raises(AgentLoopError, match="issue acceptance criteria.*not signed human requirements"):
+        _validate_coder_followup_response(
+            response,
+            unresolved_items=(
+                UnresolvedReviewItem(
+                    item_id="item-1",
+                    reviewer="Anthropic Claude",
+                    source_round=1,
+                    text="Add a regression test.",
+                    status="blocking",
+                ),
+            ),
+            human_requirements=(
+                HumanReviewRequirement(
+                    source_type="PR comment",
+                    author="maintainer",
+                    created_at="2026-06-02T12:00:00Z",
+                    url="https://github.com/OWNER/REPO/pull/1#issuecomment-1",
+                    body="Add coverage for the rejected label case.",
+                ),
+            ),
+        )
+
+
 @pytest.mark.parametrize(
     ("addressed_items", "remaining_items", "message"),
     [
@@ -5019,6 +5136,24 @@ def test_issue_and_plan_prompts_surface_signed_human_requirements_before_issue_c
     assert prompt.index("Signed Human Reviewer Requirements") < prompt.index("Issue context from GitHub")
 
 
+def test_followup_prompt_with_no_human_requirements_guides_empty_addressed_ids(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    prompt = build_followup_prompt(
+        222,
+        2,
+        "item-1: Add a regression test.",
+        config,
+        human_requirements=(),
+    )
+
+    assert '"human_requirements": {' in prompt
+    assert '"addressed_ids": []' in prompt
+    assert '"addressed_ids": ["Requirement 1"]' not in prompt
+    assert "No signed human requirements are surfaced in this prompt" in prompt
+    assert "issue acceptance criteria" in prompt
+    assert "reviewer item IDs" in prompt
+
+
 def test_plan_review_prompt_surfaces_signed_issue_requirements_as_approval_critical(tmp_path):
     config = make_config(tmp_path, reviewer=("codex", "gemini"))
     issue_context = IssueContext(
@@ -5606,7 +5741,7 @@ def test_gemini_pre_marker_429_does_not_suppress_structured_review_repair(tmp_pa
     config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
     captured_repairs = []
 
-    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None, surfaced_requirement_ids=None) -> str | None:
         captured_repairs.append(raw)
         assert expected_kind == "pr_review"
         return repaired_review
@@ -5650,7 +5785,7 @@ def test_gemini_response_file_repair_ignores_raw_stdout_transient_diagnostics(tm
     config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
     captured_repairs = []
 
-    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None, surfaced_requirement_ids=None) -> str | None:
         captured_repairs.append(raw)
         return repaired_review
 
@@ -7092,11 +7227,12 @@ def test_blocking_followup_prompt_reinjects_issue_context(tmp_path):
             + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
         ],
         claude_outputs=[
-            "Fixed review.\n"
-            f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
-            "### Human requirements\n"
-            "- Requirement 1: used the absolute URL.\n"
-            "<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+            structured_coder_followup(
+                state="approved",
+                addressed_items=["item-1"],
+                remaining_items=[],
+                reviewer="Anthropic Claude",
+            )
         ],
     )
     config = make_config(tmp_path)
@@ -10410,7 +10546,7 @@ def test_issue_loop_plan_revision_repair_preserves_signed_human_requirements(tmp
     config = make_config(tmp_path, agent_max_retries=0)
     captured_repairs = []
 
-    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None, surfaced_requirement_ids=None) -> str | None:
         captured_repairs.append((raw, expected_kind))
         return repaired_revision
 
@@ -10477,7 +10613,7 @@ def test_issue_loop_plan_revision_repair_rejects_wrong_kind_from_human_requireme
     config = make_config(tmp_path, agent_max_retries=0)
     captured_kinds = []
 
-    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None, surfaced_requirement_ids=None) -> str | None:
         captured_kinds.append(expected_kind)
         return wrong_kind_repair
 
@@ -12121,6 +12257,66 @@ def test_attempt_repair_includes_coder_followup_required_item_ids():
     assert "do not classify regular reviewer or orchestrator-injected item-N records" in prompt
 
 
+def test_attempt_repair_includes_empty_surfaced_requirement_guidance():
+    repaired = structured_coder_followup(
+        state="blocking",
+        addressed_items=["item-1"],
+        remaining_items=[],
+        human_requirement_ids=[],
+        reviewer="Gemini",
+    )
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = repaired
+
+    with patch("coding_review_agent_loop.repair.subprocess.run", return_value=mock_result) as mock_run:
+        result = attempt_repair(
+            '"human_requirements":{"addressed_ids":["Issue #221 acceptance criteria"],'
+            '"checked_discussion_directly":false}',
+            "gemini",
+            expected_kind="coder_followup",
+            unresolved_item_ids=["item-1"],
+            surfaced_requirement_ids=[],
+        )
+
+    assert result == repaired
+    cmd = mock_run.call_args.args[0]
+    prompt = cmd[cmd.index("--prompt") + 1]
+    assert "Surfaced signed human requirement labels for coder follow-up" in prompt
+    assert "- (none)" in prompt
+    assert "set `human_requirements.addressed_ids` to `[]`" in prompt
+    assert "Issue #221 acceptance criteria" in prompt
+    assert '"addressed_ids": []' in prompt
+
+
+def test_attempt_repair_includes_surfaced_requirement_labels_for_mixed_repairs():
+    repaired = structured_coder_followup(
+        state="blocking",
+        addressed_items=["item-1"],
+        remaining_items=[],
+        human_requirement_ids=["Requirement 1"],
+        reviewer="Gemini",
+    )
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = repaired
+
+    with patch("coding_review_agent_loop.repair.subprocess.run", return_value=mock_result) as mock_run:
+        result = attempt_repair(
+            '"addressed_ids":["Requirement 1","Issue #221 acceptance criteria"]',
+            "gemini",
+            expected_kind="coder_followup",
+            unresolved_item_ids=["item-1"],
+            surfaced_requirement_ids=["Requirement 1"],
+        )
+
+    assert result == repaired
+    cmd = mock_run.call_args.args[0]
+    prompt = cmd[cmd.index("--prompt") + 1]
+    assert "`Requirement 1`" in prompt
+    assert "keep [\"Requirement 1\"] and drop \"Issue #221 acceptance criteria\"" in prompt
+
+
 def test_attempt_repair_rejects_unresolved_item_ids_for_non_coder_kind():
     with pytest.raises(ValueError, match="unresolved_item_ids"):
         attempt_repair(
@@ -12180,7 +12376,7 @@ def test_run_pr_loop_uses_repair_pass_on_format_failure(tmp_path):
 
     captured_repairs = []
 
-    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None, surfaced_requirement_ids=None) -> str | None:
         captured_repairs.append(raw)
         assert expected_kind == "pr_review"
         return repaired_review
@@ -12213,7 +12409,7 @@ def test_run_pr_loop_repairs_format_failure_with_5xx_source_line_reference(tmp_p
 
     captured_repairs = []
 
-    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None, surfaced_requirement_ids=None) -> str | None:
         captured_repairs.append(raw)
         assert expected_kind == "pr_review"
         return repaired_review
@@ -12237,7 +12433,7 @@ def test_run_pr_loop_falls_back_to_error_when_repair_also_fails(tmp_path):
     )
     config = make_config(tmp_path, coder="claude", reviewer="codex", agent_max_retries=0)
 
-    def fake_attempt_repair_fails(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
+    def fake_attempt_repair_fails(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None, surfaced_requirement_ids=None) -> str | None:
         assert expected_kind == "pr_review"
         return "still broken output without valid schema"
 
@@ -12293,7 +12489,7 @@ def test_run_pr_loop_uses_repair_pass_on_coder_followup_format_failure(tmp_path)
     captured_repairs = []
     captured_unresolved_item_ids = []
 
-    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None) -> str | None:
+    def fake_attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = None, unresolved_item_ids=None, surfaced_requirement_ids=None) -> str | None:
         captured_repairs.append(raw)
         captured_unresolved_item_ids.append(tuple(unresolved_item_ids or ()))
         assert expected_kind == "coder_followup"
