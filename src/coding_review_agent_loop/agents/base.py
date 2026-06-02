@@ -15,11 +15,14 @@ if TYPE_CHECKING:
     from ..config import AgentLoopConfig
 
 AgentName = Literal["claude", "codex", "gemini"]
+AgentTextSource = Literal["response_file", "stdout_marker", "stdout"]
 
 
 @dataclass(frozen=True)
 class AgentResult:
     text: str
+    raw_output: str = ""
+    text_source: AgentTextSource = "stdout"
     response_file_text: str | None = None
     message_text: str | None = None
     session_id: str | None = None

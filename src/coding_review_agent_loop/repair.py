@@ -318,5 +318,5 @@ def attempt_repair(raw: str, gemini_cmd: str, *, expected_kind: str | None = Non
     if result.returncode != 0:
         _logger.debug("repair pass CLI exited with code %d", result.returncode)
         return None
-    text, _, _, _ = _parse_gemini_payload(result.stdout.strip())
+    text, _, _, _, _ = _parse_gemini_payload(result.stdout.strip())
     return text or None

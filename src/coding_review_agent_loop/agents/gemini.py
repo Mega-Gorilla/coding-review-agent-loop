@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 from .base import (
     AgentName,
     AgentResult,
+    AgentTextSource,
     public_response_path,
     read_public_response_file,
     with_public_response_file_instruction,
@@ -43,29 +44,29 @@ until you are done with all internal reasoning, tool use, and review work.
 """
 
 
-def _strip_public_response_marker(raw: str) -> str:
+def _strip_public_response_marker(raw: str) -> tuple[str, bool]:
     if PUBLIC_RESPONSE_MARKER not in raw:
-        return raw
-    return raw.rsplit(PUBLIC_RESPONSE_MARKER, 1)[1].lstrip("\n")
+        return raw, False
+    return raw.rsplit(PUBLIC_RESPONSE_MARKER, 1)[1].lstrip("\n"), True
 
 
-def _strip_gemini_preamble(raw: str) -> str:
+def _strip_gemini_preamble(raw: str) -> tuple[str, AgentTextSource]:
     """Drop Gemini CLI diagnostics that can appear before the final response."""
-    marker_stripped = _strip_public_response_marker(raw)
-    if marker_stripped != raw:
-        return marker_stripped
+    marker_stripped, used_marker = _strip_public_response_marker(raw)
+    if used_marker:
+        return marker_stripped, "stdout_marker"
 
     marker_matches = [*STATE_RE.finditer(raw), *PLAN_STATE_RE.finditer(raw), *CLARIFY_RE.finditer(raw)]
     if not marker_matches:
-        return raw
+        return raw, "stdout"
 
     public_end = max(match.start() for match in marker_matches)
     separator = "\n---\n"
     separator_at = raw.find(separator, 0, public_end)
     if separator_at == -1:
-        return raw
+        return raw, "stdout"
 
-    return raw[separator_at + len(separator) :].lstrip("\n")
+    return raw[separator_at + len(separator) :].lstrip("\n"), "stdout"
 
 def _normalize_gemini_usage(payload: object) -> UsageMetadata | None:
     if not isinstance(payload, dict):
@@ -98,8 +99,8 @@ def _normalize_gemini_usage(payload: object) -> UsageMetadata | None:
 
 def _parse_gemini_payload(
     raw: str,
-) -> tuple[str, str | None, UsageMetadata | None, object | None]:
-    """Extract (text, session_id, usage, raw_usage) from Gemini output."""
+) -> tuple[str, str | None, UsageMetadata | None, object | None, AgentTextSource]:
+    """Extract (text, session_id, usage, raw_usage, text_source) from Gemini output."""
     try:
         data = json.loads(raw)
         if isinstance(data, dict):
@@ -108,15 +109,18 @@ def _parse_gemini_payload(
                 text = raw
             session_id = data.get("session_id")
             raw_usage = first_present(data, "stats", "usage", "usageMetadata")
+            message_text, text_source = _strip_gemini_preamble(text)
             return (
-                _strip_gemini_preamble(text),
+                message_text,
                 session_id if isinstance(session_id, str) else None,
                 _normalize_gemini_usage(raw_usage),
                 raw_usage,
+                text_source,
             )
     except (json.JSONDecodeError, ValueError):
         pass
-    return _strip_gemini_preamble(raw), None, None, None
+    message_text, text_source = _strip_gemini_preamble(raw)
+    return message_text, None, None, None, text_source
 
 
 def _gemini_public_response_root(gemini_dir: Path) -> Path:
@@ -187,10 +191,12 @@ class GeminiBackend:
             check=False,
         )
         log(config, f"Gemini finished; log: {log_path}")
-        message_text, new_session_id, usage, raw_usage = _parse_gemini_payload(result.stdout)
+        message_text, new_session_id, usage, raw_usage, message_source = _parse_gemini_payload(result.stdout)
         response_file_text = read_public_response_file(response_path)
         return AgentResult(
             text=response_file_text or message_text,
+            raw_output=result.stdout,
+            text_source="response_file" if response_file_text is not None else message_source,
             response_file_text=response_file_text,
             message_text=message_text,
             session_id=new_session_id,
