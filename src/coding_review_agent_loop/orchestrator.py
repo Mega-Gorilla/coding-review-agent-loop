@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import json
 import re
 import sys
 from collections.abc import Callable, Sequence
@@ -197,6 +198,26 @@ NEAR_MISS_AGENT_MARKER_RE = re.compile(
     r"(?m)^[ \t]*AGENT_(?:PLAN_)?STATE:[ \t]*(?:approved|blocking)[ \t.]*$",
     re.I,
 )
+PUBLIC_RESPONSE_ARTIFACT_PREFIX_RE = re.compile(
+    r"\A\s*(?:=== AGENT_LOOP_PUBLIC_RESPONSE_BELOW ===\s*)+"
+)
+STRUCTURED_PUBLIC_RESPONSE_KINDS = frozenset(
+    {"plan_review", "pr_review", "coder_followup", "plan_revision"}
+)
+PUBLIC_RESPONSE_TRANSIENT_DIAGNOSTIC_RE = re.compile(
+    r"\A\s*(?:\[[^\]]*(?:error|fatal)[^\]]*\]\s*)?"
+    r"(?:"
+    r"invalid stream|empty response|malformed tool call|"
+    r"(?:http|status)\s*[:=]?\s*429\b|429\s+too many requests\b|too many requests\b|"
+    r"rate.?limit(?:ed)?\b|quota\b.{0,40}\b(?:exceeded|exhausted)\b|"
+    r"resource[_-]?exhausted\b|ratelimitexceeded\b|retry[- ]after\b|retry[_-]?delay\b|"
+    r"no capacity available\b|model_capacity_exhausted\b|"
+    r"capacity\b.{0,80}\b(?:unavailable|exceeded|exhausted)\b|"
+    r"(?:gemini|claude|codex|provider|cli)\b.{0,120}"
+    r"(?:429|rate.?limit|resource.?exhausted|no capacity|overloaded)"
+    r")",
+    re.I | re.S,
+)
 
 # Threshold above which a rate-limit reset time causes an immediate exit
 # rather than a silent wait (5 minutes).
@@ -321,18 +342,62 @@ def _is_transient_agent_output(text: str) -> bool:
     )
 
 
+def _decode_public_response_json_prefix(text: str) -> object | None:
+    stripped = text.lstrip()
+    stripped = PUBLIC_RESPONSE_ARTIFACT_PREFIX_RE.sub("", stripped)
+    try:
+        payload, _end = json.JSONDecoder().raw_decode(stripped)
+    except json.JSONDecodeError:
+        return None
+    return payload
+
+
+def _is_error_shaped_json_payload(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    error_keys = {"error", "errors", "code", "status", "message", "type"}
+    return bool(error_keys.intersection(payload))
+
+
+def _is_transient_public_response(text: str, *, repair_expected_kind: str | None = None) -> bool:
+    """Classify extracted public responses without matching transient terms in content."""
+    if NON_RETRYABLE_AGENT_OUTPUT_RE.search(text):
+        return False
+
+    payload = _decode_public_response_json_prefix(text)
+    if isinstance(payload, dict):
+        kind = payload.get("kind")
+        if (
+            kind in STRUCTURED_PUBLIC_RESPONSE_KINDS
+            and (
+                repair_expected_kind is None
+                or repair_expected_kind in STRUCTURED_PUBLIC_RESPONSE_KINDS
+            )
+        ):
+            return False
+        if _is_error_shaped_json_payload(payload):
+            return _is_transient_agent_output(json.dumps(payload, sort_keys=True))
+
+    stripped = text.strip()
+    return bool(PUBLIC_RESPONSE_TRANSIENT_DIAGNOSTIC_RE.search(stripped))
+
+
 def _is_retryable_marker_near_miss(text: str) -> bool:
     return bool(NEAR_MISS_AGENT_MARKER_RE.search(text)) and not bool(
         NON_RETRYABLE_AGENT_OUTPUT_RE.search(text)
     )
 
 
-def _failure_category(text: str) -> str:
+def _failure_category(text: str, *, public_response: bool = False) -> str:
     """Classify a failure for logging: helps users decide whether to rerun or fix config/code."""
     if not text.strip():
         return "empty-response"
     if NON_RETRYABLE_AGENT_OUTPUT_RE.search(text):
         return "non-retryable"  # auth/billing — fix configuration
+    if public_response:
+        if _is_transient_public_response(text):
+            return "transient"  # extracted provider diagnostic — rerun may help
+        return "deterministic"  # public response protocol/content issue
     if TRANSIENT_AGENT_OUTPUT_RE.search(text):
         return "transient"  # rate-limit/infra — rerun may help
     return "deterministic"  # no transient signal — may need code fix
@@ -434,6 +499,7 @@ def _run_validated_agent(
     last_error = f"{agent_name} produced no output."
     last_result: AgentResult | None = None
     last_classification_text = ""
+    last_failure_category = "empty-response"
 
     for attempt in range(1, max_attempts + 1):
         result = run_agent_result(
@@ -465,11 +531,13 @@ def _run_validated_agent(
             classification_text = _agent_failure_classification_text(result, phase="command")
             last_classification_text = classification_text
             should_retry = _is_transient_agent_output(classification_text)
+            last_failure_category = _failure_category(classification_text)
         elif not text.strip():
             last_error = "agent response was empty"
             classification_text = _agent_failure_classification_text(result, phase="empty")
             last_classification_text = classification_text
             should_retry = _is_transient_agent_output(classification_text)
+            last_failure_category = _failure_category(classification_text)
         else:
             try:
                 marker_value = validate(text)
@@ -477,7 +545,16 @@ def _run_validated_agent(
                 last_error = str(exc)
                 classification_text = _agent_failure_classification_text(result, phase="validation")
                 last_classification_text = classification_text
-                public_text_is_transient = _is_transient_agent_output(classification_text)
+                public_text_is_transient = _is_transient_public_response(
+                    classification_text,
+                    repair_expected_kind=repair_expected_kind,
+                )
+                last_failure_category = _failure_category(
+                    classification_text,
+                    public_response=True,
+                )
+                # Marker near-misses are a separate first-attempt nudge for common footer typos;
+                # structured JSON protocol drift still remains repairable when retries are exhausted.
                 should_retry = public_text_is_transient or (
                     attempt == 1 and _is_retryable_marker_near_miss(classification_text)
                 )
@@ -539,7 +616,7 @@ def _run_validated_agent(
                     )
             if attempt < max_attempts:
                 delay = _retry_delay(config, attempt)
-                category = _failure_category(classification_text)
+                category = last_failure_category
                 log(
                     config,
                     f"{agent_name}: {category} failure ({last_error}); "
@@ -556,7 +633,7 @@ def _run_validated_agent(
             reason=last_error,
             result=last_result,
             log_paths=log_paths,
-            category=_failure_category(last_classification_text),
+            category=last_failure_category,
         )
     )
 

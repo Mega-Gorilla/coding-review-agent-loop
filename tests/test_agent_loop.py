@@ -42,7 +42,9 @@ from coding_review_agent_loop.orchestrator import (
     _format_reset_duration,
     _failure_category,
     _is_transient_agent_output,
+    _is_transient_public_response,
     _parse_rate_limit_reset_seconds,
+    _run_validated_agent,
 )
 from coding_review_agent_loop.config import (
     default_agent_memory_dir,
@@ -5418,7 +5420,7 @@ def test_pr_loop_retries_gemini_no_capacity(tmp_path):
     assert len(sleep_commands) == 1
 
 
-def test_gemini_transient_text_inside_public_response_suppresses_repair(tmp_path):
+def test_diagnostic_shaped_public_response_remains_transient(tmp_path):
     public_response = (
         f"{PUBLIC_RESPONSE_MARKER}\n"
         "HTTP 429 Too Many Requests: rate limit exceeded.\n"
@@ -5433,6 +5435,233 @@ def test_gemini_transient_text_inside_public_response_suppresses_repair(tmp_path
 
     repair_mock.assert_not_called()
     assert "Failure category: transient" in str(exc_info.value)
+
+
+def test_public_response_error_payload_remains_transient():
+    assert _is_transient_public_response(
+        json.dumps(
+            {
+                "error": {
+                    "code": 429,
+                    "status": "RESOURCE_EXHAUSTED",
+                    "message": "Quota exceeded. Retry-After: 60",
+                }
+            }
+        )
+    )
+
+
+def test_public_response_structured_json_after_known_artifact_is_not_transient():
+    text = (
+        f"{PUBLIC_RESPONSE_MARKER}\n"
+        + structured_pr_review(
+            summary="Wrong structured kind discusses 429, quota, capacity, and transient behavior.",
+            reviewer="Google Gemini",
+        )
+    )
+
+    assert not _is_transient_public_response(text, repair_expected_kind="coder_followup")
+
+
+def test_structured_plan_review_transient_terms_with_trailing_prose_runs_repair(tmp_path):
+    malformed_review = (
+        structured_plan_review(
+            state="approved",
+            summary=(
+                "The plan discusses 429, quota, resource exhausted, timeout, capacity, "
+                "and transient retry handling as domain text."
+            ),
+            reviewer="Google Gemini",
+        )
+        + "\nTrailing prose after the signature should be repaired."
+    )
+    repaired_review = structured_plan_review(
+        state="approved",
+        summary="Plan review repaired.",
+        reviewer="Google Gemini",
+    )
+    runner = FakeRunner(gemini_outputs=[malformed_review])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=repaired_review) as repair_mock:
+        response = _run_validated_agent(
+            runner,
+            agent="gemini",
+            config=config,
+            prompt="Review the plan.",
+            marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+            validate=lambda text: _validate_plan_review_response(
+                text,
+                reviewer="Google Gemini",
+                unresolved_items=(),
+            ),
+            use_repair=True,
+            repair_expected_kind="plan_review",
+        )
+
+    assert response.text == repaired_review
+    repair_mock.assert_called_once_with(
+        malformed_review,
+        config.gemini_cmd,
+        expected_kind="plan_review",
+    )
+    assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
+
+
+def test_structured_pr_review_transient_terms_duplicate_footer_fails_deterministically(tmp_path):
+    malformed_review = (
+        structured_pr_review(
+            state="approved",
+            summary=(
+                "The review covers capacity, timeout, 429, quota, resource-exhausted, "
+                "and transient classifier behavior."
+            ),
+            reviewer="Google Gemini",
+        )
+        + "\n\n<!-- AGENT_STATE: approved -->"
+    )
+    runner = FakeRunner(gemini_outputs=[malformed_review])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value="still invalid") as repair_mock:
+        with pytest.raises(AgentLoopError) as exc_info:
+            _run_validated_agent(
+                runner,
+                agent="gemini",
+                config=config,
+                prompt="Review the PR.",
+                marker_description="<!-- AGENT_STATE: approved|blocking -->",
+                validate=lambda text: _validate_review_response(
+                    text,
+                    reviewer="Google Gemini",
+                    unresolved_items=(),
+                ),
+                use_repair=True,
+                repair_expected_kind="pr_review",
+            )
+
+    repair_mock.assert_called_once_with(
+        malformed_review,
+        config.gemini_cmd,
+        expected_kind="pr_review",
+    )
+    message = str(exc_info.value)
+    assert "Failure category: deterministic" in message
+    assert "Failure category: transient" not in message
+    assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
+
+
+def test_structured_coder_followup_transient_terms_before_footer_runs_repair(tmp_path):
+    unresolved_items = (
+        UnresolvedReviewItem(
+            item_id="item-1",
+            reviewer="OpenAI Codex",
+            source_round=1,
+            text="Add timeout regression coverage.",
+            status="blocking",
+        ),
+    )
+    malformed_followup = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "approved",
+                "summary": "Updated timeout and capacity handling without treating prose as transient.",
+                "addressed_items": ["item-1"],
+                "remaining_items": [],
+                "human_requirements": {
+                    "addressed_ids": [],
+                    "checked_discussion_directly": False,
+                },
+            }
+        )
+        + "\n## Changes made\nMentioned timeout and capacity in prose before the footer.\n"
+        "<!-- AGENT_STATE: approved -->\n-- Anthropic Claude"
+    )
+    repaired_followup = structured_coder_followup(
+        state="approved",
+        summary="Updated timeout and capacity handling.",
+        addressed_items=["item-1"],
+        remaining_items=[],
+        reviewer="Anthropic Claude",
+    )
+    runner = FakeRunner(claude_outputs=[malformed_followup])
+    config = make_config(tmp_path, coder="claude", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=repaired_followup) as repair_mock:
+        response = _run_validated_agent(
+            runner,
+            agent="claude",
+            config=config,
+            prompt="Address review feedback.",
+            marker_description="<!-- AGENT_STATE: approved|blocking -->",
+            validate=lambda text: _validate_coder_followup_response(
+                text,
+                unresolved_items=unresolved_items,
+                human_requirements=(),
+            ),
+            use_repair=True,
+            repair_expected_kind="coder_followup",
+        )
+
+    assert response.text == repaired_followup
+    repair_mock.assert_called_once_with(
+        malformed_followup,
+        config.gemini_cmd,
+        expected_kind="coder_followup",
+    )
+    assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
+
+
+def test_structured_plan_revision_transient_terms_before_footer_runs_repair(tmp_path):
+    malformed_revision = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_revision",
+                "state": "blocking",
+                "summary": "Revise handling for 429, quota, resource exhausted, transient, and timeout.",
+                "prior_plan_item_dispositions": [],
+                "plan_steps": [
+                    "Separate public-response validation from transient raw diagnostics.",
+                    "Keep capacity and quota retry handling for raw provider failures.",
+                ],
+            }
+        )
+        + "\n## Revised plan\nProse before the AGENT_PLAN_STATE footer is invalid.\n"
+        "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    repaired_revision = structured_plan_revision(
+        summary="Revised transient classifier plan.",
+        plan_steps=[
+            "Separate public-response validation from transient raw diagnostics.",
+            "Keep capacity and quota retry handling for raw provider failures.",
+        ],
+        reviewer="Anthropic Claude",
+    )
+    runner = FakeRunner(claude_outputs=[malformed_revision])
+    config = make_config(tmp_path, coder="claude", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=repaired_revision) as repair_mock:
+        response = _run_validated_agent(
+            runner,
+            agent="claude",
+            config=config,
+            prompt="Revise the plan.",
+            marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+            validate=_validate_plan_revision_response,
+            use_repair=True,
+            repair_expected_kind="plan_revision",
+        )
+
+    assert response.text == repaired_revision
+    repair_mock.assert_called_once_with(
+        malformed_revision,
+        config.gemini_cmd,
+        expected_kind="plan_revision",
+    )
+    assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
 
 
 def test_gemini_duplicate_trailing_agent_state_marker_is_repairable(tmp_path):
