@@ -831,6 +831,31 @@ def _dedupe_same_pr_against_blocking(
     )
 
 
+def _dedupe_followups_against(
+    items: tuple[ApprovedFollowup, ...],
+    *authoritative_groups: tuple[ApprovedFollowup, ...],
+) -> tuple[ApprovedFollowup, ...]:
+    authoritative_texts = {
+        normalized
+        for group in authoritative_groups
+        for item in group
+        if (normalized := _normalized_review_item_text(item.text))
+    }
+    if not authoritative_texts:
+        return items
+    return tuple(
+        item for item in items if _normalized_review_item_text(item.text) not in authoritative_texts
+    )
+
+
+def _dedupe_plan_review_items(items: PlanReviewItems) -> PlanReviewItems:
+    same_plan = _dedupe_followups_against(items.same_plan, items.blocking)
+    future = _dedupe_followups_against(items.future, items.blocking, same_plan)
+    if same_plan is items.same_plan and future is items.future:
+        return items
+    return PlanReviewItems(blocking=items.blocking, same_plan=same_plan, future=future)
+
+
 def parse_structured_pr_review(text: str, *, reviewer: str) -> ParsedReview | None:
     payload = _extract_structured_pr_review_payload(text)
     if payload is None:
@@ -950,14 +975,17 @@ def parse_structured_plan_review(text: str, *, reviewer: str) -> ParsedPlanRevie
     )
     if state == "blocking" and future_followups:
         raise AgentLoopError("Blocking structured plan reviews may not include future follow-ups.")
-    return _finalize_parsed_plan_review(
-        state=state,
-        summary=summary,
-        items=PlanReviewItems(
+    items = _dedupe_plan_review_items(
+        PlanReviewItems(
             blocking=_structured_followups(blocking_items, reviewer=reviewer),
             same_plan=_structured_followups(same_plan_followups, reviewer=reviewer),
             future=_structured_followups(future_followups, reviewer=reviewer),
-        ),
+        )
+    )
+    return _finalize_parsed_plan_review(
+        state=state,
+        summary=summary,
+        items=items,
         dispositions=dispositions,
     )
 
@@ -1268,10 +1296,12 @@ def parse_plan_review_items(text: str, *, reviewer: str) -> PlanReviewItems:
         empty_item_re=EMPTY_PLAN_SECTION_RE,
         reviewer=reviewer,
     )
-    return PlanReviewItems(
-        blocking=tuple(blocking),
-        same_plan=tuple(same_plan),
-        future=tuple(future),
+    return _dedupe_plan_review_items(
+        PlanReviewItems(
+            blocking=tuple(blocking),
+            same_plan=tuple(same_plan),
+            future=tuple(future),
+        )
     )
 
 

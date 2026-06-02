@@ -120,6 +120,12 @@ You are a format-repair assistant. An AI agent produced a code review, plan revi
 ### APPROVED: blocking_items=[], same_pr_followups=[], prior dispositions only "resolved"/"future"
 ### BLOCKING: future_followups=[], prior dispositions MUST NOT use "future"
 
+## DEDUPE RULES (Format B):
+- Same-plan follow-ups and Future follow-ups are mutually exclusive.
+- If the same plan-review concern or paraphrase appears in blocking_plan_issues and same_plan_followups, keep blocking_plan_issues and drop the duplicate same_plan_followups entry.
+- If the same plan-review concern or paraphrase appears in same_plan_followups and future_followups, keep same_plan_followups/current-plan work and drop the duplicate future_followups entry.
+- If the same plan-review concern or paraphrase appears in blocking_plan_issues and future_followups, keep blocking_plan_issues and drop the duplicate future_followups entry.
+
 ## STATE RULES (Format C):
 ### APPROVED: remaining_items=[]
 ### BLOCKING: remaining_items is non-empty
