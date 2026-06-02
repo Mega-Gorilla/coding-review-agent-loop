@@ -2631,6 +2631,33 @@ def test_legacy_plan_review_helpers_populate_summary_from_markdown():
     assert [item.text for item in items.same_plan] == ["Add a regression test matrix."]
 
 
+def test_parse_plan_review_items_dedupes_plan_buckets_by_normalized_text():
+    review = """
+    Plan still needs cleanup.
+
+    ### Blocking plan issues
+    - Add `retry` coverage.
+
+    ### Same-plan follow-ups
+    - *add retry coverage!*
+    - Add parser comment.
+
+    ### Future follow-ups
+    - ADD RETRY COVERAGE.
+    - add `parser` comment
+    - Add parser documentation later.
+
+    <!-- AGENT_PLAN_STATE: blocking -->
+    -- OpenAI Codex
+    """
+
+    items = parse_plan_review_items(review, reviewer="OpenAI Codex")
+
+    assert [item.text for item in items.blocking] == ["Add `retry` coverage."]
+    assert [item.text for item in items.same_plan] == ["Add parser comment."]
+    assert [item.text for item in items.future] == ["Add parser documentation later."]
+
+
 def test_parse_structured_pr_review_normalizes_v1_payload_with_footer_contract():
     payload = (
         json.dumps(
@@ -3057,6 +3084,35 @@ def test_parse_structured_plan_review_strips_verdict_and_sections_from_json_summ
 
     assert parsed is not None
     assert parsed.summary == "Need clearer rollback coverage."
+
+
+def test_parse_structured_plan_review_dedupes_same_plan_against_blocking_items():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": "blocking",
+                "summary": "Still blocked.",
+                "blocking_plan_issues": ["Add `retry` coverage."],
+                "same_plan_followups": [
+                    "*add retry coverage!*",
+                    "Add retry coverage for timeout handling.",
+                ],
+                "future_followups": [],
+                "prior_plan_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"
+    )
+
+    parsed = parse_structured_plan_review(payload, reviewer="OpenAI Codex")
+
+    assert parsed is not None
+    assert [item.text for item in parsed.items.blocking] == ["Add `retry` coverage."]
+    assert [item.text for item in parsed.items.same_plan] == [
+        "Add retry coverage for timeout handling."
+    ]
 
 
 def test_parse_structured_plan_review_rejects_blocking_future_followups():
@@ -3537,8 +3593,13 @@ def test_plan_review_prompt_includes_structured_sections_and_prior_items(tmp_pat
     assert "Contradictory forms like `same-plan: none`, `still blocking: none`, and `future follow-up: none` are invalid" in prompt
     assert "Only items listed under `Prior unresolved plan items from earlier rounds`" in prompt
     assert "same-round findings from other\nreviewers appear elsewhere in the issue discussion" in prompt
-    assert "Same-plan\nfollow-ups may appear only in blocking plan reviews" in prompt
-    assert "do not use structured Future follow-ups" in prompt
+    assert "Same-plan\nfollow-ups are small current-plan refinements" in prompt
+    assert "must be incorporated before\nimplementation starts" in prompt
+    assert "they may appear only in blocking plan reviews" in prompt
+    assert "Future\nfollow-ups are independent later work" in prompt
+    assert "A concern or\nparaphrase belongs in exactly one current-round list" in prompt
+    assert "Do not duplicate or reclassify\nthe same concern across Same-plan and Future follow-up lists" in prompt
+    assert "do not use structured Future\nfollow-ups" in prompt
     assert "no blocking plan issues, no Same-plan\nfollow-ups, and no carried-forward plan items left active" in prompt
     assert '"kind": "plan_review"' in prompt
     assert '"prior_plan_item_dispositions"' in prompt
@@ -11350,6 +11411,16 @@ def test_repair_prompt_distinguishes_item_ids_from_requirement_labels():
     assert "addressed_ids" in _REPAIR_PROMPT
     # The prompt must explicitly state item IDs cannot contain spaces
     assert "spaces" in _REPAIR_PROMPT or "DO NOT CONFUSE" in _REPAIR_PROMPT or "NEVER put" in _REPAIR_PROMPT
+
+
+def test_repair_prompt_includes_plan_review_dedupe_guidance():
+    assert "Same-plan follow-ups and Future follow-ups are mutually exclusive" in _REPAIR_PROMPT
+    assert "keep blocking_plan_issues and drop the duplicate same_plan_followups entry" in _REPAIR_PROMPT
+    assert (
+        "keep same_plan_followups/current-plan work and drop the duplicate future_followups entry"
+        in _REPAIR_PROMPT
+    )
+    assert "keep blocking_plan_issues and drop the duplicate future_followups entry" in _REPAIR_PROMPT
 
 
 def test_repair_prompt_includes_skip_trust_in_cli_invocation():

@@ -680,13 +680,18 @@ strategy, and ambiguity. Use this mandatory structured JSON response format:
 -- {reviewer_signature}
 
 Blocking plan issues and Same-plan follow-ups both prevent approval. Same-plan
-follow-ups may appear only in blocking plan reviews. Future follow-ups are
-allowed only in approved plan reviews. Approved means there are no blocking
-plan issues, no Same-plan follow-ups, and no carried-forward plan items left
-active for this planning round. If you return `<!-- AGENT_PLAN_STATE:
-blocking -->`, do not use structured Future follow-ups; keep all required
-current-round issues in the main blocking content so they are not missed
-during plan revision.
+follow-ups are small current-plan refinements that must be incorporated before
+implementation starts; they may appear only in blocking plan reviews. Future
+follow-ups are independent later work that remains valid after the current
+plan is approved; they are allowed only in approved plan reviews. A concern or
+paraphrase belongs in exactly one current-round list: `blocking_plan_issues`,
+`same_plan_followups`, or `future_followups`. Do not duplicate or reclassify
+the same concern across Same-plan and Future follow-up lists.
+Approved means there are no blocking plan issues, no Same-plan follow-ups, and
+no carried-forward plan items left active for this planning round. If you
+return `<!-- AGENT_PLAN_STATE: blocking -->`, do not use structured Future
+follow-ups; keep all required current-round issues in the main blocking
+content so they are not missed during plan revision.
 Only items listed under `Prior unresolved plan items from earlier rounds` are
 eligible for dispositions in this round. If same-round findings from other
 reviewers appear elsewhere in the issue discussion, treat them as
