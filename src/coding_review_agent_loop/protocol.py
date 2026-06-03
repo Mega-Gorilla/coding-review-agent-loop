@@ -253,7 +253,11 @@ def human_requirements_resolved(text: str) -> bool:
 def _normalize_requirement_label(text: str) -> str:
     match = re.fullmatch(r"\s*Requirement\s+(\d+)\s*", text, re.I)
     if not match:
-        raise AgentLoopError(f"Invalid human requirement label: {text}")
+        raise AgentLoopError(
+            f"Invalid human requirement label: {text}. Only exact surfaced signed labels like "
+            "`Requirement 1` are valid; issue acceptance criteria, reviewer item IDs, reviewer "
+            "comments, and arbitrary labels are not signed human requirements."
+        )
     return f"Requirement {match.group(1)}"
 
 
@@ -319,6 +323,13 @@ def validate_structured_human_requirements_acknowledgement(
     section_present: bool = True,
 ) -> None:
     if not surfaced_requirement_ids and not requires_direct_discussion_ack:
+        if addressed_ids:
+            raise AgentLoopError(
+                "Coder response listed signed human requirement IDs even though no signed human "
+                "requirements were surfaced. Use `human_requirements.addressed_ids: []`; issue "
+                "acceptance criteria, reviewer item IDs, reviewer comments, and arbitrary labels "
+                "are not signed human requirements."
+            )
         return
 
     if not marker_present:

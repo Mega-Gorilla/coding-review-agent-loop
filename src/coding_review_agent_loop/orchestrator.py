@@ -614,6 +614,7 @@ def _run_validated_agent(
     use_repair: bool = False,
     repair_expected_kind: str | None = None,
     repair_unresolved_item_ids: Sequence[str] | None = None,
+    repair_surfaced_requirement_ids: Sequence[str] | None = None,
 ) -> ValidatedAgentResponse:
     agent_name = agent_display_name(agent)
     log_paths: list[object] = []
@@ -743,6 +744,8 @@ def _run_validated_agent(
                     repair_kwargs: dict[str, object] = {"expected_kind": repair_expected_kind}
                     if repair_unresolved_item_ids is not None:
                         repair_kwargs["unresolved_item_ids"] = tuple(repair_unresolved_item_ids)
+                    if repair_surfaced_requirement_ids is not None:
+                        repair_kwargs["surfaced_requirement_ids"] = tuple(repair_surfaced_requirement_ids)
                     repaired = attempt_repair(
                         text,
                         config.gemini_cmd,
@@ -2125,6 +2128,7 @@ def run_pr_loop(
                 use_repair=True,
                 repair_expected_kind="coder_followup",
                 repair_unresolved_item_ids=repair_unresolved_item_ids,
+                repair_surfaced_requirement_ids=coder_human_requirements_context.surfaced_requirement_ids,
             )
             coder_output = coder_response.text
             coder_session_id = coder_response.session_id

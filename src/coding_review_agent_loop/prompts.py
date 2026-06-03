@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from textwrap import indent
@@ -358,6 +359,12 @@ def _structured_coder_followup_guidance(
     reviewer_name: str,
     human_requirements_context: CoderHumanRequirementsPromptContext,
 ) -> str:
+    example_human_requirement_ids = (
+        list(human_requirements_context.surfaced_requirement_ids[:1])
+        if human_requirements_context.surfaced_requirement_ids
+        else []
+    )
+    example_human_requirement_ids_json = json.dumps(example_human_requirement_ids)
     lines = [
         f"Use this mandatory structured JSON follow-up format so {reviewer_name} and the orchestrator can validate your response deterministically:",
         "",
@@ -371,7 +378,7 @@ def _structured_coder_followup_guidance(
         '  "addressed_item_notes": {"item-1": "Updated the parser and added regression coverage."},',
         '  "remaining_item_notes": {"item-2": "Deferred because it requires a separate UI change."},',
         '  "human_requirements": {',
-        '    "addressed_ids": ["Requirement 1"],',
+        f'    "addressed_ids": {example_human_requirement_ids_json},',
         '    "checked_discussion_directly": false',
         "  },",
         '  "tests_run": ["python -m pytest tests/test_agent_loop.py -k followup"]',
@@ -383,17 +390,20 @@ def _structured_coder_followup_guidance(
         "Use `addressed_items` and `remaining_items` to classify the unresolved reviewer item IDs shown in this prompt. Do not omit any listed reviewer item ID and do not list any item ID more than once.",
         "Use `addressed_item_notes` to summarize how each addressed item was resolved, and use `remaining_item_notes` to give a visible reason for each intentionally deferred remaining item.",
     ]
-    if human_requirements_context.block:
-        if human_requirements_context.surfaced_requirement_ids:
-            surfaced = ", ".join(f"`{item}`" for item in human_requirements_context.surfaced_requirement_ids)
-            lines.append(
-                "In structured replies, set `human_requirements.addressed_ids` to exactly the surfaced signed human requirement IDs you addressed in this prompt: "
-                f"{surfaced}."
-            )
-        elif human_requirements_context.requires_direct_discussion_ack:
-            lines.append(
-                "If the prompt omitted detailed signed human requirements, set `human_requirements.addressed_ids` to `[]` and `human_requirements.checked_discussion_directly` to `true` only after checking the GitHub discussion directly."
-            )
+    if human_requirements_context.surfaced_requirement_ids:
+        surfaced = ", ".join(f"`{item}`" for item in human_requirements_context.surfaced_requirement_ids)
+        lines.append(
+            "In structured replies, set `human_requirements.addressed_ids` to exactly the surfaced signed human requirement IDs you addressed in this prompt: "
+            f"{surfaced}. Only exact surfaced labels such as `Requirement 1` are valid."
+        )
+    elif human_requirements_context.requires_direct_discussion_ack:
+        lines.append(
+            "If the prompt omitted detailed signed human requirements, set `human_requirements.addressed_ids` to `[]` and `human_requirements.checked_discussion_directly` to `true` only after checking the GitHub discussion directly. Do not put issue numbers, issue acceptance criteria, reviewer item IDs, reviewer comments, summaries, or arbitrary labels in `addressed_ids`."
+        )
+    else:
+        lines.append(
+            "No signed human requirements are surfaced in this prompt, so structured replies must set `human_requirements.addressed_ids` to `[]`. Do not put issue numbers, issue acceptance criteria, reviewer item IDs, reviewer comments, summaries, or arbitrary labels in `addressed_ids`; only exact surfaced signed requirement labels are valid when such labels are actually shown."
+        )
     return "\n".join(lines) + "\n"
 
 
