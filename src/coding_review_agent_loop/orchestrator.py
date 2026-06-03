@@ -31,7 +31,7 @@ from .decomposition import (
     post_decomposition_parent_summary,
     post_phase_implementation_handoff_comment,
 )
-from .errors import AgentLoopError, QuotaResetExceededError
+from .errors import AgentLoopError, QuotaResetExceededError, UnknownPriorItemDispositionError
 from .github import (
     IssueContext,
     PullRequestReviewContext,
@@ -682,6 +682,8 @@ def _run_validated_agent(
     repair_expected_kind: str | None = None,
     repair_unresolved_item_ids: Sequence[str] | None = None,
     repair_surfaced_requirement_ids: Sequence[str] | None = None,
+    repair_allowed_prior_item_ids: Sequence[str] | None = None,
+    ledger_incomplete: bool = False,
 ) -> ValidatedAgentResponse:
     agent_name = agent_display_name(agent)
     log_paths: list[object] = []
@@ -806,13 +808,26 @@ def _run_validated_agent(
                             marker_value=marker_value,
                             usage=usage,
                         )
-                if use_repair and not public_text_is_transient:
+                if (
+                    use_repair
+                    and not public_text_is_transient
+                    and not (
+                        isinstance(exc, UnknownPriorItemDispositionError)
+                        and ledger_incomplete
+                    )
+                ):
                     log(config, f"{agent_name}: schema validation failed ({exc}); attempting repair pass")
                     repair_kwargs: dict[str, object] = {"expected_kind": repair_expected_kind}
                     if repair_unresolved_item_ids is not None:
                         repair_kwargs["unresolved_item_ids"] = tuple(repair_unresolved_item_ids)
                     if repair_surfaced_requirement_ids is not None:
                         repair_kwargs["surfaced_requirement_ids"] = tuple(repair_surfaced_requirement_ids)
+                    if isinstance(exc, UnknownPriorItemDispositionError):
+                        repair_kwargs["allowed_prior_item_ids"] = exc.allowed_ids
+                        repair_kwargs["unknown_prior_item_ids"] = exc.unknown_ids
+                        repair_kwargs["same_round_context"] = exc.same_round_description
+                    elif repair_allowed_prior_item_ids is not None:
+                        repair_kwargs["allowed_prior_item_ids"] = tuple(repair_allowed_prior_item_ids)
                     repaired = attempt_repair(
                         text,
                         config.gemini_cmd,
@@ -828,7 +843,16 @@ def _run_validated_agent(
                                 f"{agent_name}: repair pass produced invalid output ({repair_exc})",
                             )
                         else:
-                            log(config, f"{agent_name}: repair pass recovered malformed response")
+                            if isinstance(exc, UnknownPriorItemDispositionError):
+                                removed = ", ".join(sorted(exc.unknown_ids))
+                                allowed = ", ".join(sorted(exc.allowed_ids)) or "(none)"
+                                log(
+                                    config,
+                                    f"{agent_name}: repair pass removed unknown prior-item "
+                                    f"disposition ID(s) {removed}; allowed carried prior IDs: {allowed}",
+                                )
+                            else:
+                                log(config, f"{agent_name}: repair pass recovered malformed response")
                             if usage_record is not None:
                                 usage_record.validation_status = "validated"
                             return ValidatedAgentResponse(
@@ -934,9 +958,27 @@ def _merge_human_requirements(
     return tuple(sorted(combined, key=lambda requirement: requirement.created_at or ""))
 
 
-def _validate_plan_revision_response(text: str) -> StructuredPlanRevision | str:
+def _validate_plan_revision_response(
+    text: str,
+    *,
+    unresolved_items: Sequence[UnresolvedReviewItem] = (),
+) -> StructuredPlanRevision | str:
     parsed = validate_structured_plan_revision(text)
     if parsed is not None:
+        allowed_ids = {item.item_id for item in unresolved_items}
+        unknown = {
+            disposition.item_id
+            for disposition in parsed.prior_plan_item_dispositions
+        } - allowed_ids
+        if unknown:
+            raise UnknownPriorItemDispositionError(
+                unknown_ids=tuple(sorted(unknown)),
+                allowed_ids=tuple(sorted(allowed_ids)),
+                same_round_description=(
+                    "Same-round findings are informational only and must not be "
+                    "dispositioned as prior carried items."
+                ),
+            )
         return parsed
     raise AgentLoopError("Plan revision did not use the required structured format.")
 
@@ -975,6 +1017,30 @@ def _describe_plan_review_outcome(parsed_review: ParsedPlanReview) -> str:
     if has_same_plan:
         return "blocking with same-plan follow-ups"
     return "blocking with blocking plan issues"
+
+
+def _round_ledger_may_be_incomplete(
+    *,
+    current_resume: ResumedReviewRound | None,
+    prior_unresolved_items: Sequence[UnresolvedReviewItem],
+    comments: Sequence[object],
+    flow: str,
+    current_subject: str,
+) -> bool:
+    same_subject_incomplete = (
+        current_resume.ledger_may_be_incomplete
+        if current_resume is not None
+        else False
+    )
+    if prior_unresolved_items:
+        return same_subject_incomplete
+    records = _extract_round_metadata_records(comments, flow=flow)
+    cross_subject_incomplete = any(
+        record.metadata.new_items
+        for record in records
+        if record.metadata.subject != current_subject
+    )
+    return same_subject_incomplete or cross_subject_incomplete
 
 
 def _implement_approved_issue(
@@ -1193,6 +1259,14 @@ def _run_plan_first_loop(
             item.item_id: [] for item in prior_unresolved_items
         }
         round_new_unresolved_items: list[UnresolvedReviewItem] = []
+        current_plan_subject = _plan_subject(current_plan)
+        round_ledger_incomplete = _round_ledger_may_be_incomplete(
+            current_resume=current_resume,
+            prior_unresolved_items=prior_unresolved_items,
+            comments=issue_context.comments,
+            flow="plan",
+            current_subject=current_plan_subject,
+        )
         round_approved_future_followups: list[ApprovedFollowup] = []
         blocking_reviews: list[tuple[str, str]] = []
         all_approved = True
@@ -1243,10 +1317,13 @@ def _run_plan_first_loop(
                         text,
                         reviewer=reviewer_name,
                         unresolved_items=items,
+                        current_round_items=round_new_unresolved_items,
                     ),
                     usage_context=usage_context,
                     use_repair=True,
                     repair_expected_kind="plan_review",
+                    repair_allowed_prior_item_ids=tuple(item.item_id for item in prior_unresolved_items),
+                    ledger_incomplete=round_ledger_incomplete,
                 )
                 review_output = review_response.text
                 reviewer_session_ids[reviewer] = review_response.session_id
@@ -1265,7 +1342,7 @@ def _run_plan_first_loop(
                     disposition,
                     flow="plan",
                     round_number=round_number,
-                    subject=_plan_subject(current_plan),
+                    subject=current_plan_subject,
                     reviewer_name=reviewer_name,
                 )
             if review_state == "blocking":
@@ -1484,9 +1561,12 @@ def _run_plan_first_loop(
             ),
             session_id=coder_session_id,
             marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
-            validate=lambda text, human_requirements=issue_context.human_requirements: _validate_response_with_human_requirements(
+            validate=lambda text, human_requirements=issue_context.human_requirements, items=tuple(must_fix_items): _validate_response_with_human_requirements(
                 text,
-                marker_validator=_validate_plan_revision_response,
+                marker_validator=lambda revised_text: _validate_plan_revision_response(
+                    revised_text,
+                    unresolved_items=items,
+                ),
                 human_requirements=human_requirements,
                 requirement_scope="planning requirements",
                 full_omission_fallback="Fetch the issue discussion directly before revising the plan.",
@@ -1494,6 +1574,8 @@ def _run_plan_first_loop(
             usage_context=usage_context,
             use_repair=True,
             repair_expected_kind="plan_revision",
+            repair_allowed_prior_item_ids=tuple(item.item_id for item in must_fix_items),
+            ledger_incomplete=round_ledger_incomplete,
         )
         canonical_plan: str | None = None
         public_comment = plan_response.text
@@ -1817,6 +1899,14 @@ def run_pr_loop(
                 item.item_id: [] for item in prior_unresolved_items
             }
             round_new_unresolved_items: list[UnresolvedReviewItem] = []
+            current_pr_subject = str(pr_metadata.head_sha or "unknown")
+            round_ledger_incomplete = _round_ledger_may_be_incomplete(
+                current_resume=current_resume,
+                prior_unresolved_items=prior_unresolved_items,
+                comments=pr_comments,
+                flow="pr",
+                current_subject=current_pr_subject,
+            )
             approved_review_outputs: list[tuple[str, str]] = []
             pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
             resumed_by_name = {
@@ -1863,10 +1953,13 @@ def run_pr_loop(
                             text,
                             reviewer=reviewer_name,
                             unresolved_items=items,
+                            current_round_items=round_new_unresolved_items,
                         ),
                         usage_context=usage_context,
                         use_repair=True,
                         repair_expected_kind="pr_review",
+                        repair_allowed_prior_item_ids=tuple(item.item_id for item in prior_unresolved_items),
+                        ledger_incomplete=round_ledger_incomplete,
                     )
                     review_output = review_response.text
                     reviewer_session_ids[reviewer] = review_response.session_id
@@ -1881,7 +1974,7 @@ def run_pr_loop(
                         disposition,
                         flow="pr",
                         round_number=round_number,
-                        subject=str(pr_metadata.head_sha or "unknown"),
+                        subject=current_pr_subject,
                         reviewer_name=reviewer_name,
                     )
                 blocking_summary = parsed_review.summary
@@ -1959,7 +2052,7 @@ def run_pr_loop(
                                     role="reviewer",
                                     agent=reviewer_name,
                                     round_number=round_number,
-                                    subject=str(pr_metadata.head_sha or "unknown"),
+                                    subject=current_pr_subject,
                                     prior_items=prior_unresolved_items,
                                     dispositions=parsed_review.dispositions,
                                     new_items=tuple(reviewer_new_unresolved_items),
@@ -2004,7 +2097,7 @@ def run_pr_loop(
                                 role="reviewer",
                                 agent=reviewer_name,
                                 round_number=round_number,
-                                subject=str(pr_metadata.head_sha or "unknown"),
+                                    subject=current_pr_subject,
                                 prior_items=prior_unresolved_items,
                                 dispositions=parsed_review.dispositions,
                                 new_items=tuple(reviewer_new_unresolved_items),
