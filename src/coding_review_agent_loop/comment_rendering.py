@@ -6,6 +6,7 @@ import json
 import re
 from collections.abc import Sequence
 
+from .errors import AgentLoopError
 from .agents.registry import agent_display_name, agent_signature
 from .protocol import (
     ANY_HEADING_RE,
@@ -96,7 +97,12 @@ def _render_prior_dispositions_section(
     item_by_id = {item.item_id: item for item in prior_items}
     lines = [heading]
     for disposition in dispositions:
-        item = item_by_id[disposition.item_id]
+        item = item_by_id.get(disposition.item_id)
+        if item is None:
+            raise AgentLoopError(
+                f"Renderer encountered unknown prior item ID {disposition.item_id!r}; "
+                f"allowed IDs: {sorted(item_by_id)}"
+            )
         lines.append(
             f"- [{disposition.item_id}] {_format_unresolved_item_label(item)}"
             f" -> {_render_disposition_status(disposition)}"

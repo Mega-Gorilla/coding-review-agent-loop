@@ -16,6 +16,10 @@ from .agents.gemini import _parse_gemini_payload
 
 _logger = logging.getLogger(__name__)
 
+# v12 prompt — adds explicit prior-item disposition repair context:
+#   - lists carried prior IDs that may be dispositioned
+#   - lists unknown prior-item disposition IDs that must be removed
+#   - reminds agents that same-round findings are informational only
 # v11 prompt — constrains repair to the caller's expected response kind when supplied
 # and preserves signed human-requirements acknowledgements on plan revisions:
 #   - expected_kind prevents plan_revision repair from drifting into coder_followup
@@ -34,6 +38,8 @@ You are a format-repair assistant. An AI agent produced a code review, plan revi
 {coder_followup_required_items_instruction}
 
 {coder_followup_human_requirements_instruction}
+
+{prior_item_dispositions_instruction}
 
 ## Valid Format A — PR Review:
 
@@ -366,6 +372,33 @@ def _coder_followup_human_requirements_instruction(
     )
 
 
+def _repair_prior_item_ids_instruction(
+    allowed_prior_item_ids: Sequence[str] | None,
+    unknown_prior_item_ids: Sequence[str] | None,
+    same_round_context: str | None,
+) -> str:
+    if (
+        allowed_prior_item_ids is None
+        and unknown_prior_item_ids is None
+        and same_round_context is None
+    ):
+        return ""
+    allowed = ", ".join(sorted(allowed_prior_item_ids or ())) or "(none)"
+    unknown = ", ".join(sorted(unknown_prior_item_ids or ())) or "(none)"
+    context = (
+        same_round_context
+        or "Same-round findings are informational only and must not be dispositioned as prior carried items."
+    )
+    return (
+        "## Prior item disposition repair:\n"
+        "Same-round findings are informational only and must not be dispositioned as prior carried items.\n"
+        f"Allowed carried prior item IDs: {allowed}\n"
+        f"Unknown prior item disposition IDs to remove: {unknown}\n"
+        f"Context: {context}\n"
+        "Preserve valid dispositions for allowed IDs. Remove only unknown prior-item disposition entries.\n"
+    )
+
+
 def attempt_repair(
     raw: str,
     gemini_cmd: str,
@@ -373,6 +406,9 @@ def attempt_repair(
     expected_kind: str | None = None,
     unresolved_item_ids: Sequence[str] | None = None,
     surfaced_requirement_ids: Sequence[str] | None = None,
+    allowed_prior_item_ids: Sequence[str] | None = None,
+    unknown_prior_item_ids: Sequence[str] | None = None,
+    same_round_context: str | None = None,
 ) -> str | None:
     """Call gemini-3.1-flash-lite via the Gemini CLI to reformat a malformed review response.
 
@@ -390,6 +426,11 @@ def attempt_repair(
         expected_kind,
         surfaced_requirement_ids,
     )
+    prior_item_dispositions_instruction = _repair_prior_item_ids_instruction(
+        allowed_prior_item_ids,
+        unknown_prior_item_ids,
+        same_round_context,
+    )
     expected_kind_instruction = (
         "## Expected response kind:\n"
         f"You MUST repair this response as `{expected_kind}`. Output no other `kind` value.\n"
@@ -405,6 +446,11 @@ def attempt_repair(
     prompt = prompt.replace(
         "{coder_followup_human_requirements_instruction}",
         coder_followup_human_requirements_instruction,
+        1,
+    )
+    prompt = prompt.replace(
+        "{prior_item_dispositions_instruction}",
+        prior_item_dispositions_instruction,
         1,
     )
     prompt = prompt.replace("{raw_response}", raw, 1)

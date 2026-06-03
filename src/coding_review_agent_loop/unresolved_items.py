@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 
-from .errors import AgentLoopError
+from .errors import AgentLoopError, UnknownPriorItemDispositionError
 from .prompts import render_coder_human_requirements_prompt_context
 from .protocol import (
     ParsedPlanReview,
@@ -73,15 +73,49 @@ def _next_unresolved_item(
     )
 
 
+def _same_round_prior_disposition_description(
+    unknown: Sequence[str],
+    current_round_items: Sequence[UnresolvedReviewItem],
+) -> str:
+    same_round_ids = {item.item_id for item in current_round_items}
+    same_round_description = (
+        "Same-round findings are informational only and must not be dispositioned "
+        "as prior carried items."
+    )
+    same_round_matches = [item_id for item_id in unknown if item_id in same_round_ids]
+    if same_round_matches:
+        same_round_description += (
+            " Unknown ID(s) matching same-round findings: "
+            + ", ".join(same_round_matches)
+            + "."
+        )
+    return same_round_description
+
+
+def _raise_unknown_prior_item_disposition(
+    unknown: Sequence[str],
+    *,
+    allowed_ids: Sequence[str],
+    current_round_items: Sequence[UnresolvedReviewItem],
+) -> None:
+    raise UnknownPriorItemDispositionError(
+        unknown_ids=tuple(sorted(unknown)),
+        allowed_ids=tuple(sorted(allowed_ids)),
+        same_round_description=_same_round_prior_disposition_description(
+            tuple(sorted(unknown)),
+            current_round_items,
+        ),
+    )
+
+
 def _validate_review_response(
     text: str,
     *,
     reviewer: str,
     unresolved_items: Sequence[UnresolvedReviewItem],
+    current_round_items: Sequence[UnresolvedReviewItem] = (),
 ) -> ParsedReview:
     parsed = parse_pr_review(text, reviewer=reviewer)
-    if not unresolved_items:
-        return parsed
 
     unresolved_by_id = {item.item_id: item for item in unresolved_items}
     dispositions = _maybe_fill_resolved_dispositions_from_prose(
@@ -89,6 +123,8 @@ def _validate_review_response(
         reviewer=reviewer,
         unresolved_items=unresolved_items,
     )
+    if not dispositions and not unresolved_items:
+        return parsed
     disposition_ids = [item.item_id for item in dispositions]
     duplicates = sorted({item_id for item_id in disposition_ids if disposition_ids.count(item_id) > 1})
     if duplicates:
@@ -97,14 +133,17 @@ def _validate_review_response(
         )
     unknown = sorted(set(disposition_ids) - set(unresolved_by_id))
     if unknown:
-        raise AgentLoopError(
-            "Review referenced unknown prior unresolved item IDs: " + ", ".join(unknown)
+        _raise_unknown_prior_item_disposition(
+            unknown,
+            allowed_ids=tuple(unresolved_by_id),
+            current_round_items=current_round_items,
         )
-    missing = sorted(set(unresolved_by_id) - set(disposition_ids))
-    if missing:
-        raise AgentLoopError(
-            "Review did not evaluate all prior unresolved items: " + ", ".join(missing)
-        )
+    if unresolved_items:
+        missing = sorted(set(unresolved_by_id) - set(disposition_ids))
+        if missing:
+            raise AgentLoopError(
+                "Review did not evaluate all prior unresolved items: " + ", ".join(missing)
+            )
     return ParsedReview(
         state=parsed.state,
         summary=parsed.summary,
@@ -310,10 +349,9 @@ def _validate_plan_review_response(
     *,
     reviewer: str,
     unresolved_items: Sequence[UnresolvedReviewItem],
+    current_round_items: Sequence[UnresolvedReviewItem] = (),
 ) -> ParsedPlanReview:
     parsed = parse_plan_review(text, reviewer=reviewer)
-    if not unresolved_items:
-        return parsed
 
     unresolved_by_id = {item.item_id: item for item in unresolved_items}
     dispositions = _maybe_fill_resolved_dispositions_from_prose(
@@ -321,6 +359,8 @@ def _validate_plan_review_response(
         reviewer=reviewer,
         unresolved_items=unresolved_items,
     )
+    if not dispositions and not unresolved_items:
+        return parsed
     disposition_ids = [item.item_id for item in dispositions]
     duplicates = sorted({item_id for item_id in disposition_ids if disposition_ids.count(item_id) > 1})
     if duplicates:
@@ -330,16 +370,18 @@ def _validate_plan_review_response(
         )
     unknown = sorted(set(disposition_ids) - set(unresolved_by_id))
     if unknown:
-        raise AgentLoopError(
-            "Plan review referenced unknown prior unresolved plan item IDs: "
-            + ", ".join(unknown)
+        _raise_unknown_prior_item_disposition(
+            unknown,
+            allowed_ids=tuple(unresolved_by_id),
+            current_round_items=current_round_items,
         )
-    missing = sorted(set(unresolved_by_id) - set(disposition_ids))
-    if missing:
-        raise AgentLoopError(
-            "Plan review did not evaluate all prior unresolved plan items: "
-            + ", ".join(missing)
-        )
+    if unresolved_items:
+        missing = sorted(set(unresolved_by_id) - set(disposition_ids))
+        if missing:
+            raise AgentLoopError(
+                "Plan review did not evaluate all prior unresolved plan items: "
+                + ", ".join(missing)
+            )
     return ParsedPlanReview(
         state=parsed.state,
         summary=parsed.summary,

@@ -57,6 +57,7 @@ class ResumedReviewRound:
     coder_output: str | None
     completed_reviews: tuple[PostedRoundRecord, ...]
     next_unresolved_item_number: int
+    ledger_may_be_incomplete: bool = False
 
 
 def _serialize_unresolved_item(item: UnresolvedReviewItem) -> dict[str, object]:
@@ -312,6 +313,15 @@ def _resume_pr_round(
         return None
     prior_items = anchor_metadata.prior_items
     round_number = anchor_metadata.round_number
+    ledger_may_be_incomplete = (
+        len(anchor_metadata.prior_items) == 0
+        and any(
+            record.metadata.new_items
+            for record in records
+            if record.metadata.subject == anchor_metadata.subject
+            and record.metadata.round_number < anchor_metadata.round_number
+        )
+    )
     return ResumedReviewRound(
         round_number=round_number,
         prior_items=prior_items,
@@ -326,6 +336,7 @@ def _resume_pr_round(
             [record for record in records if record.metadata.subject == head_sha]
         )
         + 1,
+        ledger_may_be_incomplete=ledger_may_be_incomplete,
     )
 
 
@@ -347,6 +358,15 @@ def _resume_plan_round(
     anchor_metadata = selection.anchor_record.metadata
     current_plan = latest_coder_record.metadata.canonical_plan or latest_coder_record.body
     coder_output = latest_coder_record.metadata.raw_structured_coder_response or current_plan
+    ledger_may_be_incomplete = (
+        len(anchor_metadata.prior_items) == 0
+        and any(
+            record.metadata.new_items
+            for record in records
+            if record.metadata.subject == anchor_metadata.subject
+            and record.metadata.round_number < anchor_metadata.round_number
+        )
+    )
     reviewer_records: dict[str, PostedRoundRecord] = {}
     configured_reviewer_names = {agent_display_name(agent) for agent in configured_reviewers}
     for record in current_round_records:
@@ -365,5 +385,6 @@ def _resume_plan_round(
                 [record for record in records if record.metadata.subject == anchor_metadata.subject]
             )
             + 1,
+            ledger_may_be_incomplete=ledger_may_be_incomplete,
         ),
     )
