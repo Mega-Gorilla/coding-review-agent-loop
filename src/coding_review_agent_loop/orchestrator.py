@@ -6,6 +6,7 @@ import datetime
 import json
 import re
 import sys
+import zoneinfo
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -265,6 +266,15 @@ _RESET_IN_RE = re.compile(
 _ISO_TIMESTAMP_RE = re.compile(
     r"(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?)"
 )
+# Parse Claude Code session-limit messages such as
+# "resets 1:30am (America/Los_Angeles)".
+_ABSOLUTE_RESET_TIME_RE = re.compile(
+    r"\brese(?:t|ts)(?:\s+at)?\s+"
+    r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*"
+    r"(?P<ampm>a\.?m\.?|p\.?m\.?)\s*"
+    r"\((?P<timezone>[A-Za-z0-9_./+-]+)\)",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -275,7 +285,55 @@ class ValidatedAgentResponse:
     usage: UsageMetadata | None = None
 
 
-def _parse_rate_limit_reset_seconds(text: str) -> int | None:
+def _parse_absolute_reset_seconds(
+    text: str,
+    *,
+    now_utc: datetime.datetime | None = None,
+) -> int | None:
+    m = _ABSOLUTE_RESET_TIME_RE.search(text)
+    if not m:
+        return None
+
+    try:
+        tz = zoneinfo.ZoneInfo(m.group("timezone"))
+    except zoneinfo.ZoneInfoNotFoundError:
+        return None
+
+    if now_utc is None:
+        now_utc = datetime.datetime.now(datetime.timezone.utc)
+    elif now_utc.tzinfo is None:
+        now_utc = now_utc.replace(tzinfo=datetime.timezone.utc)
+    else:
+        now_utc = now_utc.astimezone(datetime.timezone.utc)
+
+    hour = int(m.group("hour"))
+    minute = int(m.group("minute") or 0)
+    ampm = m.group("ampm").lower().replace(".", "")
+    if not 1 <= hour <= 12 or not 0 <= minute <= 59:
+        return None
+    if ampm == "am":
+        hour = 0 if hour == 12 else hour
+    else:
+        hour = 12 if hour == 12 else hour + 12
+
+    now_local = now_utc.astimezone(tz)
+    reset_local = now_local.replace(
+        hour=hour,
+        minute=minute,
+        second=0,
+        microsecond=0,
+    )
+    if reset_local <= now_local:
+        reset_local += datetime.timedelta(days=1)
+
+    return int((reset_local.astimezone(datetime.timezone.utc) - now_utc).total_seconds())
+
+
+def _parse_rate_limit_reset_seconds(
+    text: str,
+    *,
+    now_utc: datetime.datetime | None = None,
+) -> int | None:
     """Extract the reset wait time in seconds from a rate-limit error message.
 
     Returns None if the reset time cannot be reliably parsed.
@@ -309,11 +367,20 @@ def _parse_rate_limit_reset_seconds(text: str) -> int | None:
             if not ts_str.endswith("Z"):
                 ts_str += "Z"
             ts = datetime.datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
-            delta = int((ts - datetime.datetime.now(datetime.timezone.utc)).total_seconds())
+            base_now = now_utc or datetime.datetime.now(datetime.timezone.utc)
+            if base_now.tzinfo is None:
+                base_now = base_now.replace(tzinfo=datetime.timezone.utc)
+            else:
+                base_now = base_now.astimezone(datetime.timezone.utc)
+            delta = int((ts - base_now).total_seconds())
             if delta > 0:
                 return delta
         except (ValueError, OverflowError):
             pass
+
+    reset_secs = _parse_absolute_reset_seconds(text, now_utc=now_utc)
+    if reset_secs is not None:
+        return reset_secs
 
     return None
 
