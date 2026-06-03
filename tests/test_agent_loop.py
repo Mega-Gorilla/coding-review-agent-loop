@@ -1,4 +1,5 @@
 import base64
+import datetime
 import json
 import re
 import subprocess
@@ -6,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import coding_review_agent_loop.orchestrator as orchestrator
 from coding_review_agent_loop.agents.claude import (
     BACKEND as CLAUDE_BACKEND,
     _normalize_claude_usage,
@@ -6431,6 +6433,37 @@ def test_pr_loop_exits_immediately_on_long_reset_rate_limit(tmp_path):
     assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
 
 
+def test_pr_loop_exits_immediately_on_claude_session_limit_reset(tmp_path, monkeypatch):
+    class FixedDateTime(datetime.datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = cls(2026, 6, 3, 5, 33, 48, tzinfo=datetime.timezone.utc)
+            if tz is None:
+                return fixed.replace(tzinfo=None)
+            return fixed.astimezone(tz)
+
+    monkeypatch.setattr(orchestrator.datetime, "datetime", FixedDateTime)
+    session_limit_output = json.dumps(
+        {
+            "type": "result",
+            "is_error": True,
+            "api_error_status": 429,
+            "result": "You've hit your session limit · resets 1:30am (America/Los_Angeles)",
+        }
+    )
+    runner = FakeRunner(claude_outputs=[(session_limit_output, 1)])
+    config = make_config(tmp_path, reviewer="claude")
+
+    with pytest.raises(QuotaResetExceededError) as exc_info:
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    message = str(exc_info.value)
+    assert "Claude quota exhausted" in message
+    assert "2h 56m" in message
+    assert "Rerun when quota resets" in message
+    assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
+
+
 def test_pr_loop_retries_on_short_reset_rate_limit(tmp_path):
     # "Retry-After: 60" → 60 s reset ≤ 300 s threshold → retry automatically.
     rate_limit_output = "HTTP 429: rate limit exceeded. Retry-After: 60"
@@ -6468,6 +6501,13 @@ def test_pr_loop_retries_on_rate_limit_without_reset_time(tmp_path):
 ])
 def test_parse_rate_limit_reset_seconds(text, expected_secs):
     assert _parse_rate_limit_reset_seconds(text) == expected_secs
+
+
+def test_parse_rate_limit_reset_seconds_claude_absolute_time():
+    now = datetime.datetime(2026, 6, 3, 5, 33, 48, tzinfo=datetime.timezone.utc)
+    text = "You've hit your session limit · resets 1:30am (America/Los_Angeles)"
+
+    assert _parse_rate_limit_reset_seconds(text, now_utc=now) == 10572
 
 
 @pytest.mark.parametrize("text", [
