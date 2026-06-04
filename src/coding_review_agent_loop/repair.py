@@ -16,6 +16,10 @@ from .agents.gemini import _parse_gemini_payload
 
 _logger = logging.getLogger(__name__)
 
+# v14 prompt — makes blocking review future_followups a hard repair constraint:
+#   - any repaired blocking PR/plan review must set future_followups=[]
+#   - current-round future_followups become blocking/same-* items; independent futures are dropped
+#   - adds a focused plan-review example for blocking+future_followups repair
 # v13 prompt — adds repair guidance for human-requirements marker, active approved dispositions,
 # blocking+future dispositions, approved+current-plan future_followups, and same-round confusion:
 #   - _reviewer_human_requirements_instruction for pr_review/plan_review missing HUMAN_REQUIREMENTS_RESOLVED
@@ -145,6 +149,13 @@ You are a format-repair assistant. An AI agent produced a code review, plan revi
 - Do NOT include human requirement labels in addressed_items or remaining_items.
 
 ## STATE RULES (Format A/B):
+### HARD CONSTRAINT FOR BLOCKING REVIEWS:
+  - If the repaired state is "blocking", `future_followups` MUST be [].
+  - This applies even when the malformed response included future_followups.
+  - Current-plan/PR concerns from future_followups must move to blocking_plan_issues/blocking_items
+    or same_plan_followups/same_pr_followups.
+  - Genuinely independent later work must be dropped from the blocking repair. It can be raised again
+    in a later approved review, but it must not remain in a blocking review.
 ### APPROVED: blocking_items=[], same_pr_followups=[], prior dispositions only "resolved" or "future"
 ### APPROVED + active same-pr/same-plan/blocking prior dispositions:
   - If the note clearly says the current PR/plan already covers the item: change disposition to "resolved"
@@ -482,6 +493,31 @@ blocking_plan_issues, change state to "blocking".
 item-1 is removed because it was a same-round finding, not an eligible carried prior item.
 The future_followups entry is moved to blocking_plan_issues because it concerns current-plan correctness.
 Only genuinely independent later work should remain in future_followups on an approved review.
+
+## WORKED EXAMPLE 13 — blocking plan_review with future_followups:
+
+Original (malformed): blocking plan_review with a real blocking issue, an invalid object-shaped
+same_plan_followups entry, and future_followups.
+
+CORRECT repair: keep the blocking issue, stringify or move current-plan same-plan work, and set
+future_followups to [].
+{
+  "schema_version": 1, "kind": "plan_review", "state": "blocking",
+  "summary": "...",
+  "blocking_plan_issues": [
+    "The compact context must include the PR body before implementation starts."
+  ],
+  "same_plan_followups": [
+    "Document the compact-context helper import in the plan."
+  ],
+  "future_followups": [],
+  "prior_plan_item_dispositions": []
+}
+<!-- AGENT_PLAN_STATE: blocking -->
+-- Reviewer
+
+Do not preserve any future_followups in a blocking plan_review. Move current-plan concerns to
+blocking_plan_issues or same_plan_followups. Drop genuinely later work from the blocking repair.
 
 ## FORMAT:
 1. Start DIRECTLY with { — no prose, no markdown fences.

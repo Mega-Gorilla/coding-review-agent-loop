@@ -13796,9 +13796,9 @@ def test_repair_prompt_includes_approved_future_followups_current_plan_rule():
            "future_followups" in _REPAIR_PROMPT and "required for the current plan" in _REPAIR_PROMPT
 
 
-def test_repair_prompt_includes_worked_example_6_to_12():
-    """Examples 6-12 must be present."""
-    for n in range(6, 13):
+def test_repair_prompt_includes_worked_example_6_to_13():
+    """Examples 6-13 must be present."""
+    for n in range(6, 14):
         assert f"WORKED EXAMPLE {n}" in _REPAIR_PROMPT
 
 
@@ -13807,6 +13807,15 @@ def test_repair_prompt_example_12_same_round_confusion_case():
     assert "WORKED EXAMPLE 12" in _REPAIR_PROMPT
     assert "same-round" in _REPAIR_PROMPT.lower() or "same-round finding" in _REPAIR_PROMPT.lower()
     assert "future_followups" in _REPAIR_PROMPT
+
+
+def test_repair_prompt_blocking_reviews_drop_future_followups():
+    """Blocking PR/plan review repairs must not preserve future_followups."""
+    assert "HARD CONSTRAINT FOR BLOCKING REVIEWS" in _REPAIR_PROMPT
+    assert "If the repaired state is \"blocking\", `future_followups` MUST be []" in _REPAIR_PROMPT
+    assert "Move current-plan concerns to" in _REPAIR_PROMPT
+    assert "Drop genuinely later work from the blocking repair" in _REPAIR_PROMPT
+    assert "WORKED EXAMPLE 13" in _REPAIR_PROMPT
 
 
 # --- _reviewer_human_requirements_instruction tests ---
