@@ -287,6 +287,7 @@ def _render_public_plan_review_comment(
     reviewer: str,
     prior_items: Sequence[UnresolvedReviewItem],
     dispositions: Sequence[ReviewItemDisposition],
+    human_requirements_resolved_flag: bool = False,
 ) -> str:
     sections: list[str] = [f"**Review verdict:** {parsed_review.state.title()}"]
     if parsed_review.summary and parsed_review.summary.strip() != "Plan review complete.":
@@ -326,10 +327,15 @@ def _render_public_plan_review_comment(
                 dispositions=dispositions,
             )
         )
-    footer = [
-        f"<!-- AGENT_PLAN_STATE: {parsed_review.state} -->",
-        f"-- {_public_reviewer_name(reviewer)}",
-    ]
+    footer: list[str] = []
+    if human_requirements_resolved_flag:
+        footer.append("<!-- HUMAN_REQUIREMENTS_RESOLVED -->")
+    footer.extend(
+        [
+            f"<!-- AGENT_PLAN_STATE: {parsed_review.state} -->",
+            f"-- {_public_reviewer_name(reviewer)}",
+        ]
+    )
     return "\n\n".join(section for section in sections if section) + (
         ("\n\n" if sections else "") + "\n".join(footer)
     )

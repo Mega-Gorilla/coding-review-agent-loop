@@ -1286,6 +1286,7 @@ def _run_plan_first_loop(
         ) else ""
         round_approved_future_followups: list[ApprovedFollowup] = []
         blocking_reviews: list[tuple[str, str]] = []
+        approved_review_outputs: list[tuple[str, str]] = []
         all_approved = True
         resumed_by_name = {
             record.metadata.agent: record for record in (current_resume.completed_reviews if current_resume is not None else ())
@@ -1378,6 +1379,8 @@ def _run_plan_first_loop(
             if review_state == "blocking":
                 all_approved = False
                 blocking_reviews.append((reviewer_name, review_output))
+            else:
+                approved_review_outputs.append((reviewer_name, review_output))
             if resumed_record is None:
                 for item in parsed_review.items.blocking:
                     tracked_item = _next_unresolved_item(
@@ -1423,6 +1426,9 @@ def _run_plan_first_loop(
                             reviewer=reviewer_name,
                             prior_items=prior_unresolved_items,
                             dispositions=parsed_review.dispositions,
+                            human_requirements_resolved_flag=human_requirements_resolved(
+                                review_output
+                            ),
                         ),
                         PostedRoundMetadata(
                             flow="plan",
@@ -1465,6 +1471,48 @@ def _run_plan_first_loop(
         approved_future_followups.extend(
             _approved_followup_from_unresolved_item(item) for item in future_from_prior_items
         )
+        if all_approved and not must_fix_items and issue_context.human_requirements:
+            missing_acknowledgements = [
+                reviewer_name
+                for reviewer_name, review_output in approved_review_outputs
+                if not human_requirements_resolved(review_output)
+            ]
+            if missing_acknowledgements:
+                log(
+                    config,
+                    f"Planning round {round_number}: reviewer(s) {', '.join(missing_acknowledgements)} "
+                    "approved without acknowledging signed human requirements; "
+                    "re-injecting as blocking plan item",
+                )
+                synthetic_review = (
+                    "Orchestrator plan review:\n\n"
+                    f"Reviewer(s) {', '.join(missing_acknowledgements)} approved without "
+                    "acknowledging the signed human requirements. Coder must address the "
+                    "human requirements and ensure the reviewer explicitly resolves them "
+                    "before plan approval."
+                )
+                blocking_reviews.append(("Orchestrator", synthetic_review))
+                round_new_unresolved_items.append(
+                    _next_unresolved_item(
+                        item_number=next_unresolved_item_number,
+                        reviewer="Orchestrator",
+                        source_round=round_number,
+                        text=(
+                            f"Reviewer(s) {', '.join(missing_acknowledgements)} approved without "
+                            "acknowledging the signed human requirements. Coder must address the "
+                            "human requirements and ensure the reviewer explicitly resolves them "
+                            "before plan approval."
+                        ),
+                        status="blocking",
+                    )
+                )
+                next_unresolved_item_number += 1
+                unresolved_items = [*unresolved_items, round_new_unresolved_items[-1]]
+                must_fix_items = [
+                    item for item in unresolved_items if item.status in {"blocking", "same-plan"}
+                ]
+                all_approved = False
+
         if all_approved:
             approved_future_followups.extend(round_approved_future_followups)
 

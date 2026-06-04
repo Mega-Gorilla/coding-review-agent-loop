@@ -568,6 +568,12 @@ Use this mandatory structured JSON response format:
 <!-- AGENT_PLAN_STATE: approved -->
 -- reviewer signature shown in the volatile tail
 
+If signed human requirements are present in the stable prefix and are fully
+addressed or explicitly resolved, include exactly this marker before the
+`AGENT_PLAN_STATE` footer:
+
+<!-- HUMAN_REQUIREMENTS_RESOLVED -->
+
 Blocking plan issues and Same-plan follow-ups both prevent approval. Same-plan
 follow-ups are small current-plan refinements that must be incorporated before
 implementation starts; they may appear only in blocking plan reviews. Future

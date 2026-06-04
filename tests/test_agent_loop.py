@@ -76,6 +76,7 @@ from coding_review_agent_loop.followups import (
     MAX_APPROVED_FOLLOWUP_ISSUES,
     reconcile_approved_followups,
 )
+from coding_review_agent_loop.memory import AgentMemoryContext
 from coding_review_agent_loop.migrations import MigrationValidationResult, validate_pr_migration_topology
 from coding_review_agent_loop.orchestrator import (
     ITEM_SUMMARY_LIMIT,
@@ -342,6 +343,7 @@ class FakeRunner(Runner):
                     for item in parse_plan_item_dispositions(output, reviewer="OpenAI Codex")
                 ],
                 reviewer=signature,
+                human_requirements_resolved="<!-- HUMAN_REQUIREMENTS_RESOLVED -->" in output,
             )
         if '"kind": "plan_revision"' in prompt and "<!-- AGENT_PLAN_STATE:" in output:
             return structured_plan_revision(
@@ -715,6 +717,7 @@ def structured_plan_review(
     future_followups: list[str] | None = None,
     prior_plan_item_dispositions: list[dict[str, str]] | None = None,
     reviewer: str = "OpenAI Codex",
+    human_requirements_resolved: bool = False,
 ) -> str:
     return (
         json.dumps(
@@ -729,6 +732,7 @@ def structured_plan_review(
                 "prior_plan_item_dispositions": prior_plan_item_dispositions or [],
             }
         )
+        + ("\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->" if human_requirements_resolved else "")
         + f"\n<!-- AGENT_PLAN_STATE: {state} -->\n-- {reviewer}"
     )
 
@@ -3949,6 +3953,19 @@ def _compact_issue_context() -> IssueContext:
     )
 
 
+def _compact_memory_context(tmp_path: Path) -> AgentMemoryContext:
+    return AgentMemoryContext(
+        memory_dir=tmp_path / "memory",
+        current_commit="abc123",
+        last_analyzed_commit="def456",
+        changed_files=("src/coding_review_agent_loop/prompts.py",),
+        repo_summary="Repo memory summary for compact prefix.",
+        architecture_map=None,
+        test_profile="Run `python -m pytest`.",
+        toolchain=None,
+    )
+
+
 def test_config_and_cli_default_to_compact_planning_context(tmp_path):
     assert make_config(tmp_path).planning_context_mode == "compact"
 
@@ -4082,13 +4099,23 @@ def test_full_plan_prompt_still_includes_raw_issue_comments(tmp_path):
 def test_compact_review_prompt_stable_prefix_is_byte_identical_across_rounds(tmp_path):
     config = make_config(tmp_path)
     issue_context = _compact_issue_context()
+    memory = _compact_memory_context(tmp_path)
+    unresolved_item = UnresolvedReviewItem(
+        item_id="item-2",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Active ledger item remains approval-critical.",
+        status="blocking",
+    )
     first = build_plan_review_prompt(
         56,
         2,
         "Plan tail A.",
         config,
         reviewer="codex",
+        memory=memory,
         issue_context=issue_context,
+        unresolved_items=(unresolved_item,),
         compact_context=True,
         compact_prior=CompactPriorContext(("[item-1] resolved: unchanged",)),
         compact_tail=CompactPlanTailContext(subject="subject-a", action="Review A."),
@@ -4099,7 +4126,9 @@ def test_compact_review_prompt_stable_prefix_is_byte_identical_across_rounds(tmp
         "Plan tail B.",
         config,
         reviewer="codex",
+        memory=memory,
         issue_context=issue_context,
+        unresolved_items=(unresolved_item,),
         compact_context=True,
         compact_prior=CompactPriorContext(("[item-1] resolved: unchanged",)),
         compact_tail=CompactPlanTailContext(subject="subject-b", action="Review B."),
@@ -4109,6 +4138,14 @@ def test_compact_review_prompt_stable_prefix_is_byte_identical_across_rounds(tmp
     second_prefix, second_tail = second.split(COMPACT_PLANNING_VOLATILE_TAIL_MARKER, 1)
     assert first_prefix.encode() == second_prefix.encode()
     assert first_tail != second_tail
+    assert "Plan review response protocol" in first_prefix
+    assert '"kind": "plan_review"' in first_prefix
+    assert "Repo memory summary for compact prefix." in first_prefix
+    assert "Original acceptance criteria: preserve requirements" in first_prefix
+    assert "Compact mode must use a stable prefix and volatile tail." in first_prefix
+    assert "Active ledger item remains approval-critical." in first_prefix
+    assert "[item-1] resolved: unchanged" in first_prefix
+    assert "<!-- HUMAN_REQUIREMENTS_RESOLVED -->" in first_prefix
     for volatile in ("Planning round: 2", "Plan tail A.", "subject-a", "Review A."):
         assert volatile not in first_prefix
         assert volatile in first_tail
@@ -4117,13 +4154,23 @@ def test_compact_review_prompt_stable_prefix_is_byte_identical_across_rounds(tmp
 def test_compact_revision_prompt_stable_prefix_is_byte_identical_across_rounds(tmp_path):
     config = make_config(tmp_path)
     issue_context = _compact_issue_context()
+    memory = _compact_memory_context(tmp_path)
+    unresolved_item = UnresolvedReviewItem(
+        item_id="item-2",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Active revision ledger item remains approval-critical.",
+        status="same-plan",
+    )
     first = build_plan_revision_prompt(
         56,
         2,
         "Previous plan A.",
         "Review A.",
         config,
+        memory=memory,
         issue_context=issue_context,
+        unresolved_items=(unresolved_item,),
         compact_context=True,
         compact_prior=CompactPriorContext(("[item-1] resolved: unchanged",)),
         compact_tail=CompactPlanTailContext(subject="subject-a", action="Revision A."),
@@ -4134,7 +4181,9 @@ def test_compact_revision_prompt_stable_prefix_is_byte_identical_across_rounds(t
         "Previous plan B.",
         "Review B.",
         config,
+        memory=memory,
         issue_context=issue_context,
+        unresolved_items=(unresolved_item,),
         compact_context=True,
         compact_prior=CompactPriorContext(("[item-1] resolved: unchanged",)),
         compact_tail=CompactPlanTailContext(subject="subject-b", action="Revision B."),
@@ -4144,9 +4193,33 @@ def test_compact_revision_prompt_stable_prefix_is_byte_identical_across_rounds(t
     second_prefix, second_tail = second.split(COMPACT_PLANNING_VOLATILE_TAIL_MARKER, 1)
     assert first_prefix.encode() == second_prefix.encode()
     assert first_tail != second_tail
+    assert "Plan revision response protocol" in first_prefix
+    assert '"kind": "plan_revision"' in first_prefix
+    assert "Repo memory summary for compact prefix." in first_prefix
+    assert "Original acceptance criteria: preserve requirements" in first_prefix
+    assert "Compact mode must use a stable prefix and volatile tail." in first_prefix
+    assert "Active revision ledger item remains approval-critical." in first_prefix
+    assert "[item-1] resolved: unchanged" in first_prefix
     for volatile in ("Planning round: 2", "Previous plan A.", "Review A.", "subject-a", "Revision A."):
         assert volatile not in first_prefix
         assert volatile in first_tail
+
+
+def test_structured_plan_review_preserves_human_requirements_resolution_marker():
+    review = structured_plan_review(human_requirements_resolved=True)
+
+    assert _extract_structured_plan_review_payload(review) is not None
+    parsed = parse_plan_review(review, reviewer="OpenAI Codex")
+    public = _render_public_plan_review_comment(
+        parsed,
+        reviewer="OpenAI Codex",
+        prior_items=(),
+        dispositions=(),
+        human_requirements_resolved_flag=True,
+    )
+
+    assert "<!-- HUMAN_REQUIREMENTS_RESOLVED -->" in public
+    assert public.index("<!-- HUMAN_REQUIREMENTS_RESOLVED -->") < public.index("<!-- AGENT_PLAN_STATE: approved -->")
 
 
 def test_render_canonical_plan_steps_numbers_items():
@@ -11109,7 +11182,7 @@ def test_issue_loop_plan_first_accepts_initial_plan_human_requirements_acknowled
             "- Requirement 1: the plan keeps the public API unchanged.\n"
             "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
         ],
-        codex_outputs=[structured_plan_review(summary="Plan looks sound.")],
+        codex_outputs=[structured_plan_review(summary="Plan looks sound.", human_requirements_resolved=True)],
     )
     config = make_config(tmp_path)
 
@@ -11250,6 +11323,7 @@ def test_issue_loop_plan_revision_accepts_human_requirements_acknowledgement(tmp
             structured_plan_review(
                 summary="Plan looks sound.",
                 prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+                human_requirements_resolved=True,
             ),
         ],
     )
@@ -11315,6 +11389,7 @@ def test_issue_loop_plan_revision_repair_preserves_signed_human_requirements(tmp
             structured_plan_review(
                 summary="Plan looks sound.",
                 prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+                human_requirements_resolved=True,
             ),
         ],
     )
@@ -11634,6 +11709,62 @@ def test_issue_loop_plan_first_uses_compact_context_after_round_one(tmp_path, ca
     assert "Planning issue #56: invoking Claude (context mode: full)" in captured.err
     assert "Planning round 2: Codex reviewing issue #56 (context mode: compact)" in captured.err
     assert "Planning round 2: Claude revising the plan (context mode: compact)" in captured.err
+
+
+def test_issue_loop_plan_first_requires_reviewer_human_requirements_resolution(tmp_path, capsys):
+    runner = FakeRunner(
+        issue_payload={
+            "body": "Keep compact context cache-aware.\n\n-- Human Reviewer",
+        },
+        claude_outputs=[
+            "Initial plan covers cache-aware compact context.\n"
+            "<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n\n"
+            "### Human requirements\n"
+            "- Requirement 1: The plan keeps compact context cache-aware.\n"
+            "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            structured_plan_revision(
+                summary="Revised plan requires explicit reviewer acknowledgement.",
+                prior_plan_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "resolved", "note": "Reviewer must acknowledge."}
+                ],
+                plan_steps=["Keep the compact context cache-aware and require reviewer acknowledgement."],
+                human_requirements=(
+                    "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n\n"
+                    "### Human requirements\n"
+                    "- Requirement 1: The revised plan covers the cache-aware compact context requirement."
+                ),
+            ),
+        ],
+        codex_outputs=[
+            structured_plan_review(state="approved"),
+            structured_plan_review(
+                state="approved",
+                prior_plan_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "resolved", "note": "Acknowledged."}
+                ],
+                human_requirements_resolved=True,
+            ),
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        coder="claude",
+        reviewer=("codex",),
+        max_rounds=2,
+        plan_execution_mode="plan-only",
+        quiet=False,
+    )
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    assert "Approved plan:" in runner.comments[-1]
+    assert any(
+        "approved without acknowledging the signed human requirements" in comment
+        for comment in runner.comments
+    )
+    assert "<!-- HUMAN_REQUIREMENTS_RESOLVED -->" in runner.comments[-2]
+    captured = capsys.readouterr()
+    assert "approved without acknowledging signed human requirements" in captured.err
 
 
 def test_issue_loop_plan_first_uses_full_context_when_plan_ledger_incomplete(tmp_path, capsys):

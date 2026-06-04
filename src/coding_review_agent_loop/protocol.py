@@ -672,6 +672,11 @@ def _extract_structured_plan_review_payload(text: str) -> dict[str, object] | No
     if extracted is None:
         return None
     payload, trailing = extracted
+    trailing = trailing.lstrip()
+    if HUMAN_REQUIREMENTS_RESOLVED_RE.match(trailing):
+        marker_match = HUMAN_REQUIREMENTS_RESOLVED_RE.match(trailing)
+        assert marker_match is not None
+        trailing = trailing[marker_match.end() :]
     return _consume_structured_footer_and_signature(
         payload=payload,
         trailing=trailing,
