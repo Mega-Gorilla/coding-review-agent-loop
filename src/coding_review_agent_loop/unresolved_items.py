@@ -344,6 +344,46 @@ def _apply_unresolved_item_dispositions(
     return next_unresolved, future_items
 
 
+def _collect_prior_compact_summaries(
+    prior_items: Sequence[UnresolvedReviewItem],
+    remaining_items: Sequence[UnresolvedReviewItem],
+    future_from_prior: Sequence[UnresolvedReviewItem],
+    dispositions_by_item: dict[str, list[ReviewItemDisposition]],
+) -> tuple[str, ...]:
+    """Render append-only summaries for prior items that just left the active ledger."""
+    remaining_ids = {item.item_id for item in remaining_items}
+    future_ids = {item.item_id for item in future_from_prior}
+    summaries: list[str] = []
+    for item in sorted(prior_items, key=lambda prior: prior.item_id):
+        if item.item_id in remaining_ids:
+            continue
+        dispositions = dispositions_by_item.get(item.item_id, [])
+        if not dispositions:
+            continue
+        label = "future follow-up" if item.item_id in future_ids else "resolved"
+        lines = [
+            f"[{item.item_id}] {label}: {item.reviewer} {item.source_status or item.status} item from round {item.source_round}",
+            "Original item text:",
+            item.text,
+        ]
+        notes = list(item.notes)
+        for disposition in sorted(
+            dispositions,
+            key=lambda disposition: (disposition.reviewer, disposition.item_id, disposition.disposition, disposition.note or ""),
+        ):
+            if disposition.note:
+                note = f"{disposition.reviewer}: {disposition.disposition}: {disposition.note}"
+            else:
+                note = f"{disposition.reviewer}: {disposition.disposition}"
+            if note not in notes:
+                notes.append(note)
+        if notes:
+            lines.append("Disposition updates:")
+            lines.extend(f"- {note}" for note in notes)
+        summaries.append("\n".join(lines))
+    return tuple(summaries)
+
+
 def _validate_plan_review_response(
     text: str,
     *,

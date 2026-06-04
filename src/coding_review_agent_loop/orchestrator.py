@@ -50,6 +50,8 @@ from .logging import log, new_run_id, run_usage_summary_path
 from .memory import prepare_agent_memory
 from .migrations import validate_pr_migration_topology
 from .prompts import (
+    CompactPlanTailContext,
+    CompactPriorContext,
     build_followup_prompt,
     build_issue_implementation_prompt,
     build_issue_plan_prompt,
@@ -164,6 +166,7 @@ from .unresolved_items import (
     ALL_RESOLVED_PROSE_RE,
     HUMAN_REQUIREMENTS_ACK_ITEM_ID,
     _apply_unresolved_item_dispositions,
+    _collect_prior_compact_summaries,
     _clear_human_requirements_ack_item,
     _format_same_pr_unresolved_items,
     _format_unresolved_items_for_coder,
@@ -1199,11 +1202,12 @@ def _run_plan_first_loop(
     coder_session_id: str | None = None
     reviewer_session_ids: dict[AgentName, str | None] = {}
     unresolved_items: list[UnresolvedReviewItem] = []
+    compact_prior_summaries: list[str] = []
     approved_future_followups: list[ApprovedFollowup] = []
     next_unresolved_item_number = 1
     resume_state = _resume_plan_round(issue_context.comments, configured_reviewers=configured_reviewers)
     if resume_state is None:
-        log(config, f"Planning issue #{issue_number}: invoking {coder_name}")
+        log(config, f"Planning issue #{issue_number}: invoking {coder_name} (context mode: full)")
         plan_response = _run_validated_agent(
             runner,
             agent=config.coder,
@@ -1240,6 +1244,7 @@ def _run_plan_first_loop(
                     round_number=1,
                     subject=_plan_subject(current_plan),
                     prior_items=(),
+                    compact_prior_summaries=tuple(compact_prior_summaries),
                 ),
             ),
         )
@@ -1248,6 +1253,7 @@ def _run_plan_first_loop(
     else:
         current_plan, resumed_round = resume_state
         unresolved_items = list(resumed_round.prior_items)
+        compact_prior_summaries = list(resumed_round.compact_prior_summaries)
         next_unresolved_item_number = resumed_round.next_unresolved_item_number
         start_round_number = resumed_round.round_number
         log(config, f"Planning issue #{issue_number}: resuming round {start_round_number}")
@@ -1267,6 +1273,17 @@ def _run_plan_first_loop(
             flow="plan",
             current_subject=current_plan_subject,
         )
+        use_compact_context = (
+            config.planning_context_mode == "compact"
+            and round_number >= 2
+            and not round_ledger_incomplete
+        )
+        context_mode = "compact" if use_compact_context else "full"
+        context_reason = " (ledger incomplete)" if (
+            config.planning_context_mode == "compact"
+            and round_number >= 2
+            and round_ledger_incomplete
+        ) else ""
         round_approved_future_followups: list[ApprovedFollowup] = []
         blocking_reviews: list[tuple[str, str]] = []
         all_approved = True
@@ -1296,7 +1313,11 @@ def _run_plan_first_loop(
                 log(config, f"Planning round {round_number}: resuming {reviewer_name}'s completed review")
                 reviewer_new_unresolved_items = list(resumed_record.metadata.new_items)
             else:
-                log(config, f"Planning round {round_number}: {reviewer_name} reviewing issue #{issue_number}")
+                log(
+                    config,
+                    f"Planning round {round_number}: {reviewer_name} reviewing issue #{issue_number} "
+                    f"(context mode: {context_mode}{context_reason})",
+                )
                 review_response = _run_validated_agent(
                     runner,
                     agent=reviewer,
@@ -1310,6 +1331,15 @@ def _run_plan_first_loop(
                         memory=memory,
                         issue_context=issue_context,
                         unresolved_items=prior_unresolved_items,
+                        compact_context=use_compact_context,
+                        compact_prior=CompactPriorContext(tuple(compact_prior_summaries)),
+                        compact_tail=CompactPlanTailContext(
+                            subject=current_plan_subject,
+                            action=(
+                                "Review the current plan for correctness, architecture fit, "
+                                "missing edge cases, test strategy, and ambiguity."
+                            ),
+                        ),
                     ),
                     session_id=reviewer_session_ids.get(reviewer),
                     marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
@@ -1404,6 +1434,7 @@ def _run_plan_first_loop(
                             dispositions=parsed_review.dispositions,
                             new_items=tuple(reviewer_new_unresolved_items),
                             state=review_state,
+                            compact_prior_summaries=tuple(compact_prior_summaries),
                         ),
                     ),
                 )
@@ -1420,6 +1451,14 @@ def _run_plan_first_loop(
             prior_dispositions,
             same_status="same-plan",
             retain_future=False,
+        )
+        compact_prior_summaries.extend(
+            _collect_prior_compact_summaries(
+                prior_unresolved_items,
+                unresolved_items,
+                future_from_prior_items,
+                prior_dispositions,
+            )
         )
         unresolved_items = [*unresolved_items, *round_new_unresolved_items]
         must_fix_items = [item for item in unresolved_items if item.status in {"blocking", "same-plan"}]
@@ -1544,7 +1583,11 @@ def _run_plan_first_loop(
             )
 
         combined_review = "\n\n".join(f"{name} plan review:\n\n{review}" for name, review in blocking_reviews)
-        log(config, f"Planning round {round_number}: {coder_name} revising the plan")
+        log(
+            config,
+            f"Planning round {round_number}: {coder_name} revising the plan "
+            f"(context mode: {context_mode}{context_reason})",
+        )
         plan_response = _run_validated_agent(
             runner,
             agent=config.coder,
@@ -1558,6 +1601,12 @@ def _run_plan_first_loop(
                 memory,
                 issue_context=issue_context,
                 unresolved_items=must_fix_items,
+                compact_context=use_compact_context,
+                compact_prior=CompactPriorContext(tuple(compact_prior_summaries)),
+                compact_tail=CompactPlanTailContext(
+                    subject=current_plan_subject,
+                    action="Revise the implementation plan to address the blocking plan review.",
+                ),
             ),
             session_id=coder_session_id,
             marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
@@ -1608,6 +1657,7 @@ def _run_plan_first_loop(
                     prior_items=tuple(must_fix_items),
                     canonical_plan=canonical_plan,
                     raw_structured_coder_response=raw_structured_coder_response,
+                    compact_prior_summaries=tuple(compact_prior_summaries),
                 ),
             ),
         )

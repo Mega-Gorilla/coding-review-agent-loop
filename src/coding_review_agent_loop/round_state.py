@@ -35,6 +35,7 @@ class PostedRoundMetadata:
     state: str | None = None
     canonical_plan: str | None = None
     raw_structured_coder_response: str | None = None
+    compact_prior_summaries: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,7 @@ class ResumedReviewRound:
     completed_reviews: tuple[PostedRoundRecord, ...]
     next_unresolved_item_number: int
     ledger_may_be_incomplete: bool = False
+    compact_prior_summaries: tuple[str, ...] = ()
 
 
 def _serialize_unresolved_item(item: UnresolvedReviewItem) -> dict[str, object]:
@@ -121,6 +123,7 @@ def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
         "state": metadata.state,
         "canonical_plan": metadata.canonical_plan,
         "raw_structured_coder_response": metadata.raw_structured_coder_response,
+        "compact_prior_summaries": list(metadata.compact_prior_summaries),
     }
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -153,6 +156,9 @@ def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
                 str(payload["raw_structured_coder_response"])
                 if payload.get("raw_structured_coder_response") is not None
                 else None
+            ),
+            compact_prior_summaries=tuple(
+                str(summary) for summary in payload.get("compact_prior_summaries", [])
             ),
         )
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
@@ -337,6 +343,11 @@ def _resume_pr_round(
         )
         + 1,
         ledger_may_be_incomplete=ledger_may_be_incomplete,
+        compact_prior_summaries=(
+            latest_coder_record.metadata.compact_prior_summaries
+            if latest_coder_record is not None
+            else ()
+        ),
     )
 
 
@@ -386,5 +397,6 @@ def _resume_plan_round(
             )
             + 1,
             ledger_may_be_incomplete=ledger_may_be_incomplete,
+            compact_prior_summaries=latest_coder_record.metadata.compact_prior_summaries,
         ),
     )

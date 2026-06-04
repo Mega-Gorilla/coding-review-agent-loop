@@ -105,6 +105,9 @@ from coding_review_agent_loop.orchestrator import (
     render_canonical_plan_steps,
 )
 from coding_review_agent_loop.prompts import (
+    COMPACT_PLANNING_VOLATILE_TAIL_MARKER,
+    CompactPlanTailContext,
+    CompactPriorContext,
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
     HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK,
     build_followup_prompt,
@@ -3913,6 +3916,237 @@ def test_plan_revision_prompt_includes_unresolved_ledger_and_required_dispositio
     assert "normalize structured plan revisions into canonical\nmarkdown for stored plan state" in prompt
     assert "Use this mandatory structured JSON response format" in prompt
     assert "fall back to markdown" not in prompt.lower()
+
+
+def _compact_issue_context() -> IssueContext:
+    return IssueContext(
+        number=56,
+        repo="OWNER/REPO",
+        title="Add compact planning context",
+        body="Original acceptance criteria: preserve requirements and known reproductions.",
+        url="https://github.com/OWNER/REPO/issues/56",
+        comments=(
+            IssueComment(
+                author="reviewer",
+                created_at="2026-06-01T00:00:00Z",
+                body="UNRELATED RAW PRIOR COMMENT PROSE should not be replayed in compact mode.",
+            ),
+            IssueComment(
+                author="reviewer",
+                created_at="2026-06-01T00:05:00Z",
+                body="Unrelated future-only comment that was never elevated.",
+            ),
+        ),
+        human_requirements=(
+            HumanReviewRequirement(
+                source_type="Issue comment",
+                author="wwind123",
+                created_at="2026-06-04T06:47:03Z",
+                url="https://github.com/OWNER/REPO/issues/56#issuecomment-1",
+                body="Compact mode must use a stable prefix and volatile tail.",
+            ),
+        ),
+    )
+
+
+def test_config_and_cli_default_to_compact_planning_context(tmp_path):
+    assert make_config(tmp_path).planning_context_mode == "compact"
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "task",
+        "Fix the bug",
+        "--repo",
+        "OWNER/REPO",
+        "--claude-dir",
+        str(tmp_path / "claude"),
+        "--codex-dir",
+        str(tmp_path / "codex"),
+    ])
+    assert config_from_args(args, FakeRunner()).planning_context_mode == "compact"
+
+    args = parser.parse_args([
+        "task",
+        "Fix the bug",
+        "--repo",
+        "OWNER/REPO",
+        "--planning-context-mode",
+        "full",
+    ])
+    assert config_from_args(args, FakeRunner()).planning_context_mode == "full"
+
+    with pytest.raises(AgentLoopError):
+        make_config(tmp_path, planning_context_mode="invalid")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["task", "Fix", "--planning-context-mode", "invalid"])
+
+
+def test_compact_plan_review_prompt_preserves_canonical_context_and_omits_raw_prose(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    long_reproduction = "Known reproduction: " + ("run plan loop after idle gap. " * 80)
+    prompt = build_plan_review_prompt(
+        56,
+        2,
+        "Current plan payload.",
+        config,
+        reviewer="codex",
+        memory=None,
+        issue_context=_compact_issue_context(),
+        unresolved_items=(
+            UnresolvedReviewItem(
+                item_id="item-1",
+                reviewer="OpenAI Codex",
+                source_round=1,
+                text=long_reproduction,
+                status="blocking",
+            ),
+        ),
+        compact_context=True,
+        compact_prior=CompactPriorContext(
+            (
+                "[item-2] resolved: Google Gemini same-plan item from round 1\n"
+                "Original item text:\nPrior resolved item full text.\n"
+                "Disposition updates:\n- Google Gemini: resolved: covered by tests.",
+                "[item-3] future follow-up: OpenAI Codex blocking item from round 1\n"
+                "Original item text:\nPrior future item text.",
+            )
+        ),
+        compact_tail=CompactPlanTailContext(subject="subject-a", action="Review action."),
+    )
+
+    prefix, tail = prompt.split(COMPACT_PLANNING_VOLATILE_TAIL_MARKER, 1)
+    assert "Original acceptance criteria: preserve requirements" in prefix
+    assert "Compact mode must use a stable prefix and volatile tail." in prefix
+    assert "Known reproduction: run plan loop after idle gap." in prefix
+    assert "run plan loop after idle gap. run plan loop after idle gap. run plan loop after idle gap." in prefix
+    assert "[item-2] resolved" in prefix
+    assert "Prior resolved item full text." in prefix
+    assert "[item-3] future follow-up" in prefix
+    assert "UNRELATED RAW PRIOR COMMENT PROSE" not in prompt
+    assert "Unrelated future-only comment that was never elevated." not in prompt
+    assert "Current plan payload." in tail
+    assert "Planning round: 2" in tail
+    assert "subject-a" in tail
+
+
+def test_compact_plan_revision_prompt_preserves_context_and_omits_raw_prose(tmp_path):
+    config = make_config(tmp_path)
+    prompt = build_plan_revision_prompt(
+        56,
+        2,
+        "Previous plan payload.",
+        "Blocking review payload.",
+        config,
+        memory=None,
+        issue_context=_compact_issue_context(),
+        unresolved_items=(
+            UnresolvedReviewItem(
+                item_id="item-4",
+                reviewer="OpenAI Codex",
+                source_round=1,
+                text="Known reproduction: resume after subject change drops resolved item.",
+                status="same-plan",
+            ),
+        ),
+        compact_context=True,
+        compact_prior=CompactPriorContext(("[item-5] resolved: stable old item text",)),
+        compact_tail=CompactPlanTailContext(subject="subject-b", action="Revision action."),
+    )
+
+    prefix, tail = prompt.split(COMPACT_PLANNING_VOLATILE_TAIL_MARKER, 1)
+    assert "Original acceptance criteria: preserve requirements" in prefix
+    assert "Compact mode must use a stable prefix and volatile tail." in prefix
+    assert "Known reproduction: resume after subject change" in prefix
+    assert "[item-5] resolved: stable old item text" in prefix
+    assert "UNRELATED RAW PRIOR COMMENT PROSE" not in prompt
+    assert "Previous plan payload." in tail
+    assert "Blocking review payload." in tail
+    assert "Planning round: 2" in tail
+    assert "subject-b" in tail
+
+
+def test_full_plan_prompt_still_includes_raw_issue_comments(tmp_path):
+    config = make_config(tmp_path)
+    prompt = build_plan_review_prompt(
+        56,
+        2,
+        "Current plan payload.",
+        config,
+        reviewer="codex",
+        issue_context=_compact_issue_context(),
+    )
+
+    assert "UNRELATED RAW PRIOR COMMENT PROSE" in prompt
+
+
+def test_compact_review_prompt_stable_prefix_is_byte_identical_across_rounds(tmp_path):
+    config = make_config(tmp_path)
+    issue_context = _compact_issue_context()
+    first = build_plan_review_prompt(
+        56,
+        2,
+        "Plan tail A.",
+        config,
+        reviewer="codex",
+        issue_context=issue_context,
+        compact_context=True,
+        compact_prior=CompactPriorContext(("[item-1] resolved: unchanged",)),
+        compact_tail=CompactPlanTailContext(subject="subject-a", action="Review A."),
+    )
+    second = build_plan_review_prompt(
+        56,
+        3,
+        "Plan tail B.",
+        config,
+        reviewer="codex",
+        issue_context=issue_context,
+        compact_context=True,
+        compact_prior=CompactPriorContext(("[item-1] resolved: unchanged",)),
+        compact_tail=CompactPlanTailContext(subject="subject-b", action="Review B."),
+    )
+
+    first_prefix, first_tail = first.split(COMPACT_PLANNING_VOLATILE_TAIL_MARKER, 1)
+    second_prefix, second_tail = second.split(COMPACT_PLANNING_VOLATILE_TAIL_MARKER, 1)
+    assert first_prefix.encode() == second_prefix.encode()
+    assert first_tail != second_tail
+    for volatile in ("Planning round: 2", "Plan tail A.", "subject-a", "Review A."):
+        assert volatile not in first_prefix
+        assert volatile in first_tail
+
+
+def test_compact_revision_prompt_stable_prefix_is_byte_identical_across_rounds(tmp_path):
+    config = make_config(tmp_path)
+    issue_context = _compact_issue_context()
+    first = build_plan_revision_prompt(
+        56,
+        2,
+        "Previous plan A.",
+        "Review A.",
+        config,
+        issue_context=issue_context,
+        compact_context=True,
+        compact_prior=CompactPriorContext(("[item-1] resolved: unchanged",)),
+        compact_tail=CompactPlanTailContext(subject="subject-a", action="Revision A."),
+    )
+    second = build_plan_revision_prompt(
+        56,
+        3,
+        "Previous plan B.",
+        "Review B.",
+        config,
+        issue_context=issue_context,
+        compact_context=True,
+        compact_prior=CompactPriorContext(("[item-1] resolved: unchanged",)),
+        compact_tail=CompactPlanTailContext(subject="subject-b", action="Revision B."),
+    )
+
+    first_prefix, first_tail = first.split(COMPACT_PLANNING_VOLATILE_TAIL_MARKER, 1)
+    second_prefix, second_tail = second.split(COMPACT_PLANNING_VOLATILE_TAIL_MARKER, 1)
+    assert first_prefix.encode() == second_prefix.encode()
+    assert first_tail != second_tail
+    for volatile in ("Planning round: 2", "Previous plan A.", "Review A.", "subject-a", "Revision A."):
+        assert volatile not in first_prefix
+        assert volatile in first_tail
 
 
 def test_render_canonical_plan_steps_numbers_items():
@@ -11339,6 +11573,132 @@ def test_issue_loop_plan_first_does_not_expose_same_round_item_ids_to_later_revi
     assert "### New tracked unresolved items" not in runner.comments[1]
 
 
+def test_issue_loop_plan_first_uses_compact_context_after_round_one(tmp_path, capsys):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Initial plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            structured_plan_revision(
+                summary="Resolve item one.",
+                prior_plan_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "resolved", "note": "Covered."}
+                ],
+                plan_steps=["Revised plan after round one."],
+            ),
+            structured_plan_revision(
+                summary="Resolve item two.",
+                prior_plan_item_dispositions=[
+                    {"item_id": "item-2", "disposition": "resolved", "note": "Covered."}
+                ],
+                plan_steps=["Revised plan after round two."],
+            ),
+        ],
+        codex_outputs=[
+            structured_plan_review(
+                state="blocking",
+                blocking_plan_issues=["Round one issue."],
+            ),
+            structured_plan_review(
+                state="blocking",
+                blocking_plan_issues=["Round two issue."],
+                prior_plan_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "resolved", "note": "Covered."}
+                ],
+            ),
+            structured_plan_review(
+                state="approved",
+                prior_plan_item_dispositions=[
+                    {"item_id": "item-2", "disposition": "resolved", "note": "Covered."}
+                ],
+            ),
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        coder="claude",
+        reviewer=("codex",),
+        max_rounds=3,
+        quiet=False,
+    )
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] in (["claude"], ["codex"])]
+    round_one_review = next(prompt for prompt in prompts if "planning round 1" in prompt)
+    round_two_review = next(prompt for prompt in prompts if "Planning round: 2" in prompt and "Role: reviewer" in prompt)
+    round_two_revision = next(prompt for prompt in prompts if "Planning round: 2" in prompt and "Role: coder" in prompt)
+    assert COMPACT_PLANNING_VOLATILE_TAIL_MARKER not in round_one_review
+    assert COMPACT_PLANNING_VOLATILE_TAIL_MARKER in round_two_review
+    assert COMPACT_PLANNING_VOLATILE_TAIL_MARKER in round_two_revision
+
+    captured = capsys.readouterr()
+    assert "Planning issue #56: invoking Claude (context mode: full)" in captured.err
+    assert "Planning round 2: Codex reviewing issue #56 (context mode: compact)" in captured.err
+    assert "Planning round 2: Claude revising the plan (context mode: compact)" in captured.err
+
+
+def test_issue_loop_plan_first_uses_full_context_when_plan_ledger_incomplete(tmp_path, capsys):
+    old_plan = "Old plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    new_plan = "New plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    old_item = UnresolvedReviewItem(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Old subject item that could be missed.",
+        status="blocking",
+        source_status="blocking",
+    )
+    old_reviewer_comment = _attach_round_metadata(
+        structured_plan_review(
+            state="blocking",
+            blocking_plan_issues=["Old subject item that could be missed."],
+        ),
+        PostedRoundMetadata(
+            flow="plan",
+            role="reviewer",
+            agent="Codex",
+            round_number=1,
+            subject=_plan_subject(old_plan),
+            new_items=(old_item,),
+            state="blocking",
+        ),
+    )
+    latest_coder_comment = _attach_round_metadata(
+        new_plan,
+        PostedRoundMetadata(
+            flow="plan",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject=_plan_subject(new_plan),
+            prior_items=(),
+        ),
+    )
+    runner = FakeRunner(
+        issue_comments=[
+            {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:00:00Z", "body": old_reviewer_comment},
+            {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:10:00Z", "body": latest_coder_comment},
+        ],
+        codex_outputs=[structured_plan_review(state="approved")],
+    )
+    config = make_config(
+        tmp_path,
+        coder="claude",
+        reviewer=("codex",),
+        quiet=False,
+    )
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    review_prompt = [
+        cmd[-1]
+        for cmd, _cwd in runner.commands
+        if cmd[:2] == ["codex", "exec"] and "planning round 2" in cmd[-1]
+    ][0]
+    assert COMPACT_PLANNING_VOLATILE_TAIL_MARKER not in review_prompt
+    captured = capsys.readouterr()
+    assert "Planning round 2: Codex reviewing issue #56 (context mode: full (ledger incomplete))" in captured.err
+
+
 def test_issue_loop_plan_first_resumes_with_only_missing_reviewer_for_current_plan(tmp_path):
     current_plan = "Revised plan.\n- Add state reconstruction.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
     coder_comment = _attach_round_metadata(
@@ -11616,6 +11976,84 @@ def test_round_metadata_round_trip_preserves_canonical_plan():
     )
 
     assert _decode_round_metadata(_encode_round_metadata(metadata)).canonical_plan == metadata.canonical_plan
+
+
+def test_round_metadata_round_trip_preserves_compact_prior_summaries():
+    metadata = PostedRoundMetadata(
+        flow="plan",
+        role="coder",
+        agent="Claude",
+        round_number=2,
+        subject="abc",
+        compact_prior_summaries=("[item-1] resolved: full prior text",),
+    )
+
+    decoded = _decode_round_metadata(_encode_round_metadata(metadata))
+
+    assert decoded.compact_prior_summaries == metadata.compact_prior_summaries
+
+
+def test_decode_old_round_metadata_defaults_compact_prior_summaries_to_empty():
+    payload = {
+        "flow": "plan",
+        "role": "coder",
+        "agent": "Claude",
+        "round_number": 2,
+        "subject": "abc",
+        "prior_items": [],
+        "dispositions": [],
+        "new_items": [],
+        "state": None,
+        "canonical_plan": None,
+        "raw_structured_coder_response": None,
+    }
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    ).decode("ascii")
+
+    assert _decode_round_metadata(encoded).compact_prior_summaries == ()
+
+
+def test_resume_plan_round_restores_compact_prior_summaries_across_subject_change():
+    old_plan = "Old plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    new_plan = "New plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    old_subject = _plan_subject(old_plan)
+    new_subject = _plan_subject(new_plan)
+    old_summary = "[item-1] resolved: old-subject resolved summary"
+    old_coder_comment = _attach_round_metadata(
+        old_plan,
+        PostedRoundMetadata(
+            flow="plan",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject=old_subject,
+            compact_prior_summaries=(old_summary,),
+        ),
+    )
+    new_coder_comment = _attach_round_metadata(
+        new_plan,
+        PostedRoundMetadata(
+            flow="plan",
+            role="coder",
+            agent="Claude",
+            round_number=3,
+            subject=new_subject,
+            compact_prior_summaries=(old_summary,),
+        ),
+    )
+
+    resumed = _resume_plan_round(
+        [
+            IssueComment(author="bot", created_at="2026-05-20T09:00:00Z", body=old_coder_comment),
+            IssueComment(author="bot", created_at="2026-05-20T09:10:00Z", body=new_coder_comment),
+        ],
+        configured_reviewers=("codex",),
+    )
+
+    assert resumed is not None
+    _current_plan, state = resumed
+    assert state.compact_prior_summaries == (old_summary,)
 
 
 @pytest.mark.parametrize(

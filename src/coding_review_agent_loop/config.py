@@ -55,11 +55,14 @@ class AgentLoopConfig:
     refresh_test_profile: bool
     approved_followups: str = "ignore"
     plan_execution_mode: str = "plan-only"
+    planning_context_mode: str = "compact"
     auto_agent_dirs: tuple[AgentName, ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.reviewer, str):
             object.__setattr__(self, "reviewer", (self.reviewer,))
+        if self.planning_context_mode not in {"full", "compact"}:
+            raise AgentLoopError("--planning-context-mode must be either 'full' or 'compact'.")
 
 
 def reviewers(config: AgentLoopConfig) -> tuple[AgentName, ...]:
@@ -514,5 +517,6 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
         refresh_test_profile=args.refresh_test_profile,
         approved_followups=args.approved_followups,
         plan_execution_mode=getattr(args, "plan_execution_mode", None) or "plan-only",
+        planning_context_mode=getattr(args, "planning_context_mode", None) or "compact",
         auto_agent_dirs=auto_agent_dirs,
     )
