@@ -13756,3 +13756,574 @@ def test_repair_prompt_does_not_suggest_ack_pseudo_item_in_addressed_items():
     # any mention of it in an addressed_items context will teach Gemini to produce
     # responses that the validator rejects.
     assert HUMAN_REQUIREMENTS_ACK_ITEM_ID not in _REPAIR_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# New tests for issue #246: repair approved reviews with active prior dispositions
+# ---------------------------------------------------------------------------
+
+from coding_review_agent_loop.repair import (
+    _reviewer_human_requirements_instruction,
+)
+from coding_review_agent_loop.orchestrator import _surfaced_reviewer_requirement_ids
+
+
+# --- repair.py prompt content tests ---
+
+def test_repair_prompt_blocking_state_rules_require_explicit_prior_dispositions():
+    """STATE RULES for BLOCKING must prohibit omitting allowed prior items."""
+    assert "ALL prior items in the allowed list must appear in prior_item_dispositions" in _REPAIR_PROMPT
+    assert "No item may be omitted" in _REPAIR_PROMPT or "no item may be omitted" in _REPAIR_PROMPT.lower()
+    assert '"future" is forbidden in blocking reviews' in _REPAIR_PROMPT or "future\" is forbidden in blocking" in _REPAIR_PROMPT
+
+
+def test_repair_example_2_no_longer_says_omit():
+    """Worked Example 2 must not instruct omission of formerly-future prior items."""
+    assert "OMIT item-1 from prior_item_dispositions entirely" not in _REPAIR_PROMPT
+    assert "WORKED EXAMPLE 2" in _REPAIR_PROMPT
+    assert "must appear" in _REPAIR_PROMPT
+
+
+def test_repair_prompt_includes_approved_plus_active_disposition_rules():
+    """STATE RULES must cover approved + active same-pr/same-plan/blocking dispositions."""
+    assert "APPROVED + active same-pr/same-plan/blocking prior dispositions" in _REPAIR_PROMPT
+    assert 'change disposition to "resolved"' in _REPAIR_PROMPT
+
+
+def test_repair_prompt_includes_approved_future_followups_current_plan_rule():
+    """STATE RULES must cover approved reviews with current-plan concerns in future_followups."""
+    assert "future_followups that are actually current-plan" in _REPAIR_PROMPT or \
+           "future_followups" in _REPAIR_PROMPT and "required for the current plan" in _REPAIR_PROMPT
+
+
+def test_repair_prompt_includes_worked_example_6_to_12():
+    """Examples 6-12 must be present."""
+    for n in range(6, 13):
+        assert f"WORKED EXAMPLE {n}" in _REPAIR_PROMPT
+
+
+def test_repair_prompt_example_12_same_round_confusion_case():
+    """Example 12 must describe the same-round disposition confusion with future_followups."""
+    assert "WORKED EXAMPLE 12" in _REPAIR_PROMPT
+    assert "same-round" in _REPAIR_PROMPT.lower() or "same-round finding" in _REPAIR_PROMPT.lower()
+    assert "future_followups" in _REPAIR_PROMPT
+
+
+# --- _reviewer_human_requirements_instruction tests ---
+
+def test_reviewer_human_requirements_instruction_pr_review():
+    result = _reviewer_human_requirements_instruction("pr_review", ["Requirement 1", "Requirement 2"])
+    assert "HUMAN_REQUIREMENTS_RESOLVED" in result
+    assert "Requirement 1" in result
+    assert "Requirement 2" in result
+    assert "AGENT_STATE" in result
+    assert "blocking_items" in result
+
+
+def test_reviewer_human_requirements_instruction_plan_review():
+    result = _reviewer_human_requirements_instruction("plan_review", ["Requirement 1"])
+    assert "HUMAN_REQUIREMENTS_RESOLVED" in result
+    assert "Requirement 1" in result
+    assert "AGENT_PLAN_STATE" in result
+    assert "blocking_plan_issues" in result
+
+
+def test_reviewer_human_requirements_instruction_empty_ids():
+    result = _reviewer_human_requirements_instruction("pr_review", [])
+    assert "(none)" in result
+    assert "HUMAN_REQUIREMENTS_RESOLVED" in result
+
+
+def test_reviewer_human_requirements_instruction_returns_empty_for_none():
+    assert _reviewer_human_requirements_instruction("pr_review", None) == ""
+    assert _reviewer_human_requirements_instruction("plan_review", None) == ""
+
+
+def test_reviewer_human_requirements_instruction_rejects_coder_kind():
+    with pytest.raises(ValueError, match="reviewer_requirement_ids"):
+        _reviewer_human_requirements_instruction("coder_followup", ["Requirement 1"])
+
+
+def test_attempt_repair_includes_reviewer_requirement_instruction():
+    """attempt_repair passes reviewer_requirement_ids into the prompt for pr_review."""
+    repaired = structured_pr_review(
+        state="approved",
+        reviewer="OpenAI Codex",
+        human_requirements_resolved=True,
+    )
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = repaired
+
+    with patch("coding_review_agent_loop.repair.subprocess.run", return_value=mock_result) as mock_run:
+        attempt_repair(
+            "malformed review",
+            "gemini",
+            expected_kind="pr_review",
+            reviewer_requirement_ids=["Requirement 1", "Requirement 2"],
+        )
+
+    cmd = mock_run.call_args.args[0]
+    prompt = cmd[cmd.index("--prompt") + 1]
+    assert "Requirement 1" in prompt
+    assert "Requirement 2" in prompt
+    assert "HUMAN_REQUIREMENTS_RESOLVED" in prompt
+    assert "AGENT_STATE" in prompt
+
+
+def test_attempt_repair_reviewer_requirement_ids_not_included_for_plan_revision():
+    """reviewer_requirement_ids raises for non pr_review/plan_review kinds."""
+    with pytest.raises(ValueError, match="reviewer_requirement_ids"):
+        attempt_repair(
+            "malformed plan revision",
+            "gemini",
+            expected_kind="plan_revision",
+            reviewer_requirement_ids=["Requirement 1"],
+        )
+
+
+# --- _surfaced_reviewer_requirement_ids tests ---
+
+def test_surfaced_reviewer_requirement_ids_pr_uses_merged_requirements():
+    """PR loop helper returns IDs using PR requirements scope."""
+    hr = (
+        HumanReviewRequirement(
+            source_type="Issue comment",
+            author="maintainer",
+            created_at="2026-01-01T00:00:00Z",
+            url="https://example.com/1",
+            body="Use absolute URLs.",
+        ),
+    )
+    ids = _surfaced_reviewer_requirement_ids(hr, requirement_scope="PR requirements")
+    assert ids == ("Requirement 1",)
+
+
+def test_surfaced_reviewer_requirement_ids_plan_uses_issue_requirements():
+    """Plan loop helper returns IDs using planning requirements scope."""
+    hr = (
+        HumanReviewRequirement(
+            source_type="Issue comment",
+            author="maintainer",
+            created_at="2026-01-01T00:00:00Z",
+            url="https://example.com/1",
+            body="Add regression tests.",
+        ),
+        HumanReviewRequirement(
+            source_type="Issue comment",
+            author="maintainer",
+            created_at="2026-01-02T00:00:00Z",
+            url="https://example.com/2",
+            body="Keep backward compatibility.",
+        ),
+    )
+    ids = _surfaced_reviewer_requirement_ids(hr, requirement_scope="planning requirements")
+    assert "Requirement 1" in ids
+    assert "Requirement 2" in ids
+
+
+def test_surfaced_reviewer_requirement_ids_empty_for_no_requirements():
+    ids = _surfaced_reviewer_requirement_ids([], requirement_scope="PR requirements")
+    assert ids == ()
+
+
+# --- PR loop repair-first tests ---
+
+def _pr_payload_with_human_requirement():
+    return {
+        "number": 77,
+        "state": "OPEN",
+        "url": "https://github.com/OWNER/REPO/pull/77",
+        "title": "Improve review prompt context",
+        "headRefName": "feature/review-context",
+        "baseRefName": "main",
+        "headRefOid": "abc123",
+        "comments": [
+            {
+                "author": {"login": "maintainer"},
+                "createdAt": "2026-05-18T10:00:00Z",
+                "url": "https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                "body": "Please use the absolute URL.\n\n-- Human Reviewer",
+            }
+        ],
+        "reviews": [],
+    }
+
+
+def test_pr_loop_repair_missing_hr_marker_recovers_approved(tmp_path):
+    """When repair returns approved + HUMAN_REQUIREMENTS_RESOLVED, no synthetic item is injected."""
+    approved_without_marker = structured_pr_review(
+        state="approved",
+        reviewer="OpenAI Codex",
+        human_requirements_resolved=False,
+    )
+    repaired_with_marker = structured_pr_review(
+        state="approved",
+        reviewer="OpenAI Codex",
+        human_requirements_resolved=True,
+    )
+    runner = FakeRunner(
+        codex_outputs=[approved_without_marker],
+        pr_payload=_pr_payload_with_human_requirement(),
+    )
+    config = make_config(tmp_path, max_rounds=1)
+
+    def fake_repair(raw, gemini_cmd, *, expected_kind=None, reviewer_requirement_ids=None, **kwargs):
+        assert expected_kind == "pr_review"
+        assert reviewer_requirement_ids == ("Requirement 1",)
+        return repaired_with_marker
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_repair):
+        result = run_pr_loop(runner, pr_number=77, config=config)
+
+    assert result == 0
+    claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert claude_calls == [], "Coder should not be woken when repair recovers the marker"
+
+
+def test_pr_loop_repair_missing_hr_marker_returns_blocking_not_synthetic(tmp_path):
+    """When repair returns valid blocking, treat as reviewer blocking — no synthetic item."""
+    approved_without_marker = structured_pr_review(
+        state="approved",
+        reviewer="OpenAI Codex",
+        human_requirements_resolved=False,
+    )
+    repaired_blocking = structured_pr_review(
+        state="blocking",
+        summary="Requirement 1 not satisfied: absolute URL missing.",
+        blocking_items=["Requirement 1 not satisfied: absolute URL missing."],
+        reviewer="OpenAI Codex",
+    )
+    # Round 2: coder addresses item-1 (the repaired blocking item) + acks human requirements
+    coder_response = structured_coder_followup(
+        state="approved",
+        addressed_items=["item-1"],
+        remaining_items=[],
+        human_requirement_ids=["Requirement 1"],
+        reviewer="Anthropic Claude",
+    )
+    runner = FakeRunner(
+        claude_outputs=[coder_response],
+        codex_outputs=[
+            approved_without_marker,
+            structured_pr_review(
+                state="approved",
+                reviewer="OpenAI Codex",
+                human_requirements_resolved=True,
+                prior_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+            ),
+        ],
+        pr_payload=_pr_payload_with_human_requirement(),
+    )
+    config = make_config(tmp_path, max_rounds=2)
+
+    pr_review_repair_calls = []
+    def fake_repair(raw, gemini_cmd, *, expected_kind=None, reviewer_requirement_ids=None, **kwargs):
+        if expected_kind == "pr_review" and reviewer_requirement_ids is not None:
+            pr_review_repair_calls.append(raw)
+            return repaired_blocking
+        return None  # don't interfere with coder_followup repair
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_repair):
+        result = run_pr_loop(runner, pr_number=77, config=config)
+
+    assert result == 0
+    assert pr_review_repair_calls, "Repair should have been attempted for the reviewer"
+    # The repaired blocking item text should appear in a coder prompt
+    claude_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert any("absolute URL missing" in p for p in claude_prompts), \
+        "Repaired blocking item should appear in coder prompt"
+    # There should be no synthetic Orchestrator item text
+    assert not any("Orchestrator" in p and "acknowledging the signed human requirements" in p
+                   for p in claude_prompts), \
+        "Synthetic orchestrator item must not appear when repair returned valid blocking"
+
+
+def test_pr_loop_repair_missing_hr_marker_failure_uses_synthetic(tmp_path):
+    """When repair fails (returns None), synthetic blocking item is injected."""
+    approved_without_marker = structured_pr_review(
+        state="approved",
+        reviewer="OpenAI Codex",
+        human_requirements_resolved=False,
+    )
+    runner = FakeRunner(
+        codex_outputs=[approved_without_marker],
+        pr_payload=_pr_payload_with_human_requirement(),
+    )
+    config = make_config(tmp_path, max_rounds=1)
+
+    def fake_repair(raw, gemini_cmd, *, expected_kind=None, **kwargs):
+        return None  # repair fails
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_repair):
+        with pytest.raises(AgentLoopError, match="blocking issues after round 1"):
+            run_pr_loop(runner, pr_number=77, config=config)
+
+
+
+# --- Plan loop repair-first tests ---
+
+def _issue_with_human_requirement():
+    return {
+        "author": {"login": "maintainer"},
+        "createdAt": "2026-05-17T08:00:00Z",
+        "body": "Keep the public API unchanged.\n\n-- Human Reviewer",
+    }
+
+
+def test_plan_loop_repair_missing_hr_marker_recovers_approved(tmp_path):
+    """Plan loop: repair returning approved+marker suppresses synthetic."""
+    plan = (
+        "Initial plan.\n"
+        f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+        "### Human requirements\n"
+        "- Requirement 1: keep the public API unchanged.\n"
+        "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    approved_without_marker = structured_plan_review(
+        state="approved",
+        reviewer="OpenAI Codex",
+        human_requirements_resolved=False,
+    )
+    repaired_with_marker = structured_plan_review(
+        state="approved",
+        reviewer="OpenAI Codex",
+        human_requirements_resolved=True,
+    )
+    runner = FakeRunner(
+        issue_payload=_issue_with_human_requirement(),
+        claude_outputs=[plan],
+        codex_outputs=[approved_without_marker],
+    )
+    config = make_config(tmp_path)
+
+    def fake_repair(raw, gemini_cmd, *, expected_kind=None, reviewer_requirement_ids=None, **kwargs):
+        assert expected_kind == "plan_review"
+        assert reviewer_requirement_ids == ("Requirement 1",)
+        return repaired_with_marker
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_repair):
+        result = run_issue_loop(runner, issue_number=56, config=config, plan_first=True)
+
+    assert result == 0
+    # No second claude call needed (no synthetic blocking item)
+    plan_revision_calls = [
+        cmd for cmd, _cwd in runner.commands
+        if cmd[:1] == ["claude"] and runner.claude_outputs == []
+    ]
+    # Verify plan approved comment was posted
+    assert any("Approved plan:" in comment for comment in runner.comments)
+
+
+def test_plan_loop_repair_missing_hr_marker_returns_blocking_not_synthetic(tmp_path):
+    """Plan loop: repair returning blocking is treated as reviewer's blocking, not synthetic."""
+    plan = (
+        "Initial plan.\n"
+        f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+        "### Human requirements\n"
+        "- Requirement 1: keep the public API unchanged.\n"
+        "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    approved_without_marker = structured_plan_review(
+        state="approved",
+        reviewer="OpenAI Codex",
+        human_requirements_resolved=False,
+    )
+    repaired_blocking = structured_plan_review(
+        state="blocking",
+        summary="Requirement 1 not satisfied: plan changes the public API.",
+        blocking_plan_issues=["Requirement 1 not satisfied: plan changes the public API."],
+        reviewer="OpenAI Codex",
+    )
+    revision = structured_plan_revision(
+        summary="Revised plan preserving the public API.",
+        prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+        human_requirements=(
+            "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n"
+            "### Human requirements\n"
+            "- Requirement 1: the plan preserves the public API.\n"
+        ),
+    )
+    runner = FakeRunner(
+        issue_payload=_issue_with_human_requirement(),
+        claude_outputs=[plan, revision],
+        codex_outputs=[
+            approved_without_marker,
+            structured_plan_review(
+                summary="Plan looks sound.",
+                human_requirements_resolved=True,
+                prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+            ),
+        ],
+    )
+    config = make_config(tmp_path, max_rounds=3)
+
+    call_count = [0]
+    def fake_repair(raw, gemini_cmd, *, expected_kind=None, reviewer_requirement_ids=None, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return repaired_blocking
+        return None  # subsequent calls not needed
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_repair):
+        result = run_issue_loop(runner, issue_number=56, config=config, plan_first=True)
+
+    assert result == 0
+    # Confirm the repaired blocking item text reached the coder
+    claude_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert any("plan changes the public API" in p for p in claude_prompts), \
+        "Repaired blocking item text must appear in coder prompt"
+    # No synthetic orchestrator text
+    assert not any("Orchestrator" in p and "acknowledging the signed human requirements" in p
+                   for p in claude_prompts), \
+        "Synthetic orchestrator item must not appear when repair returned valid blocking"
+
+
+def test_plan_loop_repair_missing_hr_marker_failure_uses_synthetic(tmp_path):
+    """Plan loop: when repair fails, synthetic blocking item is injected."""
+    plan = (
+        "Initial plan.\n"
+        f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+        "### Human requirements\n"
+        "- Requirement 1: keep the public API unchanged.\n"
+        "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    approved_without_marker = structured_plan_review(
+        state="approved",
+        reviewer="OpenAI Codex",
+        human_requirements_resolved=False,
+    )
+    revision = structured_plan_revision(
+        summary="Revised plan.",
+        prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+        human_requirements=(
+            "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n"
+            "### Human requirements\n"
+            "- Requirement 1: the plan preserves the public API.\n"
+        ),
+    )
+    runner = FakeRunner(
+        issue_payload=_issue_with_human_requirement(),
+        claude_outputs=[plan, revision],
+        codex_outputs=[
+            approved_without_marker,
+            structured_plan_review(
+                summary="Plan looks sound.",
+                human_requirements_resolved=True,
+                prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+            ),
+        ],
+    )
+    config = make_config(tmp_path, max_rounds=3)
+
+    def fake_repair(raw, gemini_cmd, *, expected_kind=None, **kwargs):
+        return None  # repair fails
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_repair):
+        result = run_issue_loop(runner, issue_number=56, config=config, plan_first=True)
+
+    assert result == 0
+    # The synthetic item must have been injected (coder was woken with it)
+    claude_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert any("acknowledging the signed human requirements" in p for p in claude_prompts), \
+        "Synthetic item must appear in coder prompt when repair fails"
+
+
+# --- Protocol regression tests ---
+
+def test_parse_pr_review_rejects_approved_with_same_pr_active_disposition():
+    """Approved PR review with active same-pr disposition must fail validation."""
+    malformed = structured_pr_review(
+        state="approved",
+        prior_item_dispositions=[{"item_id": "item-1", "disposition": "same-pr", "note": "Still needed"}],
+    )
+    with pytest.raises(AgentLoopError, match="Approved reviews must be fully complete"):
+        parse_pr_review(malformed, reviewer="OpenAI Codex")
+
+
+def test_parse_plan_review_rejects_blocking_with_future_disposition_on_prior_item():
+    """Blocking plan review with future prior disposition must fail validation."""
+    malformed = structured_plan_review(
+        state="blocking",
+        blocking_plan_issues=["Something is wrong."],
+        prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "future"}],
+    )
+    with pytest.raises(AgentLoopError, match="[Ff]uture"):
+        parse_plan_review(malformed, reviewer="OpenAI Codex")
+
+
+def test_repair_blocking_formerly_future_prior_item_explicit_disposition():
+    """Repair of blocking review with formerly-future prior item produces explicit non-future disposition."""
+    malformed = (
+        json.dumps({
+            "schema_version": 1,
+            "kind": "pr_review",
+            "state": "blocking",
+            "summary": "Fix the memory leak.",
+            "blocking_items": ["Fix the memory leak"],
+            "same_pr_followups": [],
+            "future_followups": [],
+            "prior_item_dispositions": [
+                {"item_id": "item-1", "disposition": "future"},
+            ],
+        })
+        + "\n<!-- AGENT_STATE: blocking -->\n-- Reviewer"
+    )
+    repaired = structured_pr_review(
+        state="blocking",
+        blocking_items=["Fix the memory leak"],
+        prior_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+        reviewer="Reviewer",
+    )
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = repaired
+
+    with patch("coding_review_agent_loop.repair.subprocess.run", return_value=mock_result) as mock_run:
+        result = attempt_repair(
+            malformed,
+            "gemini",
+            expected_kind="pr_review",
+            allowed_prior_item_ids=["item-1"],
+        )
+
+    assert result == repaired
+    cmd = mock_run.call_args.args[0]
+    prompt = cmd[cmd.index("--prompt") + 1]
+    # Verify the prompt contains the guidance about explicitly dispositioning prior items
+    assert "must appear in prior_item_dispositions" in prompt or "prior_item_dispositions" in prompt
+    assert "item-1" in prompt
+
+
+def test_repair_same_round_disposition_confusion_promotes_to_blocking():
+    """Repair prompt instructs removing same-round dispositions and promoting current concerns."""
+    malformed = structured_plan_review(
+        state="approved",
+        future_followups=["Reconcile repair examples and validators."],
+        prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+    )
+    repaired = structured_plan_review(
+        state="blocking",
+        blocking_plan_issues=["Reconcile repair examples and validators."],
+    )
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = repaired
+
+    with patch("coding_review_agent_loop.repair.subprocess.run", return_value=mock_result) as mock_run:
+        result = attempt_repair(
+            malformed,
+            "gemini",
+            expected_kind="plan_review",
+            allowed_prior_item_ids=[],
+            unknown_prior_item_ids=["item-1"],
+            same_round_context="item-1 matches a same-round finding, not a carried prior item.",
+        )
+
+    assert result == repaired
+    cmd = mock_run.call_args.args[0]
+    prompt = cmd[cmd.index("--prompt") + 1]
+    # The same-round context should appear in the prompt
+    assert "same-round finding" in prompt
+    # The guidance about future_followups promoting to blocking should be in STATE RULES
+    assert "future_followups" in prompt
