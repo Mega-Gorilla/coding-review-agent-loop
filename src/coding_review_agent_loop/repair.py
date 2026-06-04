@@ -16,6 +16,13 @@ from .agents.gemini import _parse_gemini_payload
 
 _logger = logging.getLogger(__name__)
 
+# v13 prompt — adds repair guidance for human-requirements marker, active approved dispositions,
+# blocking+future dispositions, approved+current-plan future_followups, and same-round confusion:
+#   - _reviewer_human_requirements_instruction for pr_review/plan_review missing HUMAN_REQUIREMENTS_RESOLVED
+#   - STATE RULES updated: blocking reviews must explicitly disposition ALL allowed prior items; future forbidden
+#   - Worked Example 2 updated: shows explicit non-future disposition instead of omission
+#   - New state rules for approved+active dispositions, blocking+future, approved+current-plan future_followups
+#   - New Examples 6-12 covering all new repair scenarios
 # v12 prompt — adds explicit prior-item disposition repair context:
 #   - lists carried prior IDs that may be dispositioned
 #   - lists unknown prior-item disposition IDs that must be removed
@@ -38,6 +45,8 @@ You are a format-repair assistant. An AI agent produced a code review, plan revi
 {coder_followup_required_items_instruction}
 
 {coder_followup_human_requirements_instruction}
+
+{reviewer_human_requirements_instruction}
 
 {prior_item_dispositions_instruction}
 
@@ -136,8 +145,22 @@ You are a format-repair assistant. An AI agent produced a code review, plan revi
 - Do NOT include human requirement labels in addressed_items or remaining_items.
 
 ## STATE RULES (Format A/B):
-### APPROVED: blocking_items=[], same_pr_followups=[], prior dispositions only "resolved"/"future"
-### BLOCKING: future_followups=[], prior dispositions MUST NOT use "future"
+### APPROVED: blocking_items=[], same_pr_followups=[], prior dispositions only "resolved" or "future"
+### APPROVED + active same-pr/same-plan/blocking prior dispositions:
+  - If the note clearly says the current PR/plan already covers the item: change disposition to "resolved"
+  - If the item is genuinely still open: change state to "blocking" and keep the active disposition
+  - Never return "approved" with active same-pr, same-plan, or blocking prior dispositions
+### APPROVED with future_followups that are actually current-plan/PR concerns:
+  - Evaluate each entry in future_followups — genuinely deferred independent work may stay
+  - If any entry is actually required for the current plan/PR to be correct (not independent future work):
+    move it to blocking_plan_issues/blocking_items and change state to "blocking"
+  - Only genuinely independent later work may remain in future_followups on an approved review
+### BLOCKING: future_followups=[], ALL prior items in the allowed list must appear in prior_item_dispositions
+  - No item may be omitted, including items that were "future" in a prior round
+  - "future" disposition is forbidden in blocking reviews
+  - Only "blocking"/"same-pr"/"same-plan"/"resolved" are valid prior dispositions in blocking reviews
+### Invalid enum values: "still blocking" → "blocking", "still same-pr" → "same-pr",
+  "still same-plan" → "same-plan" — normalize without dropping any other items
 
 ## DEDUPE RULES (Format B):
 - Same-plan follow-ups and Future follow-ups are mutually exclusive.
@@ -179,9 +202,10 @@ The future item ("Consider improving contrast ratio") is DISCARDED. It can be ra
 
 ## WORKED EXAMPLE 2 — prior item already filed as "future", now in a blocking review:
 
-Original (malformed): blocking review, prior item-1 was already "future" in a previous round.
+Original (malformed): blocking review, prior item-1 was already "future" in a previous round,
+but item-1 is in the allowed carried prior item IDs list.
 
-CORRECT repair: OMIT item-1 from prior_item_dispositions entirely. Do not include it at all.
+CORRECT repair: include item-1 explicitly with a valid non-future disposition. Never omit it.
 {
   "schema_version": 1, "kind": "pr_review", "state": "blocking",
   "summary": "...",
@@ -189,13 +213,16 @@ CORRECT repair: OMIT item-1 from prior_item_dispositions entirely. Do not includ
   "same_pr_followups": ["Fix the CLI flag in error message"],
   "future_followups": [],
   "prior_item_dispositions": [
+    {"item_id": "item-1", "disposition": "resolved", "note": "No longer relevant given current changes"},
     {"item_id": "item-2", "disposition": "same-pr", "note": "CLI flag still wrong"}
   ]
 }
 <!-- AGENT_STATE: blocking -->
 -- Reviewer
 
-item-1 is omitted because it was already "future" — it stays future without needing to be re-dispositioned.
+item-1 must appear because all allowed prior items must be explicitly dispositioned in blocking reviews.
+"future" is forbidden in blocking reviews. Use "resolved" if no longer relevant, "blocking" if it must
+be fixed now, or "same-pr"/"same-plan" if it still needs attention.
 
 ## WORKED EXAMPLE 3 — coder follow-up with JSON wrapped in fences and human requirements:
 
@@ -317,9 +344,151 @@ Notes:
 - Reviewer items belong in addressed_items / remaining_items, never in human_requirements.addressed_ids.
 - If surfaced signed labels include "Requirement 1" and the malformed response has ["Requirement 1", "Issue #221 acceptance criteria"], keep ["Requirement 1"] and drop "Issue #221 acceptance criteria".
 
+## WORKED EXAMPLE 6 — approved plan_review with same-plan disposition whose note says plan covers it:
+
+Original (malformed): approved plan_review, item-13 has disposition "same-plan" but note says "Plan now covers this".
+
+CORRECT repair: change disposition to "resolved", keep state "approved".
+{
+  "schema_version": 1, "kind": "plan_review", "state": "approved",
+  "summary": "...",
+  "blocking_plan_issues": [], "same_plan_followups": [], "future_followups": [],
+  "prior_plan_item_dispositions": [
+    {"item_id": "item-13", "disposition": "resolved", "note": "Plan now covers this"}
+  ]
+}
+<!-- AGENT_PLAN_STATE: approved -->
+-- Reviewer
+
+## WORKED EXAMPLE 7 — approved plan_review with same-plan disposition, note says work remains:
+
+Original (malformed): approved plan_review, item-14 has disposition "same-plan" and note says work remains.
+
+CORRECT repair: change state to "blocking", keep the same-plan disposition.
+{
+  "schema_version": 1, "kind": "plan_review", "state": "blocking",
+  "summary": "...",
+  "blocking_plan_issues": [],
+  "same_plan_followups": [],
+  "future_followups": [],
+  "prior_plan_item_dispositions": [
+    {"item_id": "item-14", "disposition": "same-plan", "note": "Test count still not updated"}
+  ]
+}
+<!-- AGENT_PLAN_STATE: blocking -->
+-- Reviewer
+
+## WORKED EXAMPLE 8 — blocking pr_review with future_followups and a formerly-future allowed prior item:
+
+Original (malformed): blocking pr_review, has future_followups, prior item-1 was previously "future"
+and is in the allowed prior item IDs.
+
+CORRECT repair: remove future_followups, include item-1 with explicit non-future disposition.
+{
+  "schema_version": 1, "kind": "pr_review", "state": "blocking",
+  "summary": "...",
+  "blocking_items": ["Fix the memory leak"],
+  "same_pr_followups": [],
+  "future_followups": [],
+  "prior_item_dispositions": [
+    {"item_id": "item-1", "disposition": "resolved", "note": "No longer applicable"},
+    {"item_id": "item-2", "disposition": "blocking", "note": "Memory leak is still present"}
+  ]
+}
+<!-- AGENT_STATE: blocking -->
+-- Reviewer
+
+item-1 must appear explicitly; omitting it would fail validation.
+The future_followup entry is discarded; it can be raised again in a later round.
+
+## WORKED EXAMPLE 9 — "still blocking" invalid enum, all other items preserved:
+
+Original (malformed): pr_review with disposition "still blocking" instead of "blocking".
+
+CORRECT repair: normalize "still blocking" → "blocking"; preserve all other items unchanged.
+{
+  "schema_version": 1, "kind": "pr_review", "state": "blocking",
+  "summary": "...",
+  "blocking_items": [],
+  "same_pr_followups": [],
+  "future_followups": [],
+  "prior_item_dispositions": [
+    {"item_id": "item-1", "disposition": "blocking", "note": "Still needs attention"},
+    {"item_id": "item-2", "disposition": "resolved"}
+  ]
+}
+<!-- AGENT_STATE: blocking -->
+-- Reviewer
+
+Only the enum value is changed; no other items are dropped.
+
+## WORKED EXAMPLE 10 — approved review missing HUMAN_REQUIREMENTS_RESOLVED, requirements satisfied:
+
+Original (malformed): approved pr_review with all requirements satisfied but missing the marker.
+The repair context surfaced: Requirement 1.
+
+CORRECT repair: keep state "approved", add <!-- HUMAN_REQUIREMENTS_RESOLVED --> after the JSON.
+{
+  "schema_version": 1, "kind": "pr_review", "state": "approved",
+  "summary": "...",
+  "blocking_items": [], "same_pr_followups": [], "future_followups": [],
+  "prior_item_dispositions": []
+}
+<!-- HUMAN_REQUIREMENTS_RESOLVED -->
+<!-- AGENT_STATE: approved -->
+-- Reviewer
+
+## WORKED EXAMPLE 11 — approved review missing HUMAN_REQUIREMENTS_RESOLVED, requirement unresolved:
+
+Original (malformed): approved pr_review but Requirement 1 is not satisfied by the current PR.
+The repair context surfaced: Requirement 1.
+
+CORRECT repair: change state to "blocking", add a concrete blocking_item naming the requirement.
+{
+  "schema_version": 1, "kind": "pr_review", "state": "blocking",
+  "summary": "...",
+  "blocking_items": ["Requirement 1 is not satisfied: the PR must use absolute URLs as required."],
+  "same_pr_followups": [],
+  "future_followups": [],
+  "prior_item_dispositions": []
+}
+<!-- AGENT_STATE: blocking -->
+-- Reviewer
+
+Do NOT add <!-- HUMAN_REQUIREMENTS_RESOLVED --> when blocking.
+
+## WORKED EXAMPLE 12 — approved plan_review with same-round item in prior_plan_item_dispositions
+and current-plan concerns in future_followups:
+
+Original (malformed): approved plan_review with prior_plan_item_dispositions containing item-1
+(which is a same-round finding, not a carried prior item — allowed_prior_item_ids is empty),
+and future_followups containing current-plan validation details that are not genuinely deferred.
+
+CORRECT repair: remove the invalid same-round disposition, promote current-plan concerns to
+blocking_plan_issues, change state to "blocking".
+{
+  "schema_version": 1, "kind": "plan_review", "state": "blocking",
+  "summary": "...",
+  "blocking_plan_issues": [
+    "The repair examples and validators for already-future prior items must be reconciled."
+  ],
+  "same_plan_followups": [],
+  "future_followups": [],
+  "prior_plan_item_dispositions": []
+}
+<!-- AGENT_PLAN_STATE: blocking -->
+-- Reviewer
+
+item-1 is removed because it was a same-round finding, not an eligible carried prior item.
+The future_followups entry is moved to blocking_plan_issues because it concerns current-plan correctness.
+Only genuinely independent later work should remain in future_followups on an approved review.
+
 ## FORMAT:
 1. Start DIRECTLY with { — no prose, no markdown fences.
-2. After }: optional signed human requirements acknowledgement for plan_revision only, then <!-- AGENT_STATE: X --> (pr_review or coder_followup) OR <!-- AGENT_PLAN_STATE: X --> (plan_review or plan_revision). DIFFERENT MARKERS.
+2. After }: For approved `pr_review` or `plan_review` that now includes `<!-- HUMAN_REQUIREMENTS_RESOLVED -->`,
+   place that marker immediately after the JSON and before the AGENT_STATE/AGENT_PLAN_STATE footer.
+   For `plan_revision`, place the optional signed human requirements acknowledgement before the footer.
+   Then: <!-- AGENT_STATE: X --> (pr_review or coder_followup) OR <!-- AGENT_PLAN_STATE: X --> (plan_review or plan_revision). DIFFERENT MARKERS.
 3. JSON "state" matches X. Then: -- Agent Name. STOP. Nothing else.
 
 Output ONLY the repaired response. No explanations.
@@ -372,6 +541,32 @@ def _coder_followup_human_requirements_instruction(
     )
 
 
+def _reviewer_human_requirements_instruction(
+    expected_kind: str | None,
+    reviewer_requirement_ids: Sequence[str] | None,
+) -> str:
+    if reviewer_requirement_ids is None:
+        return ""
+    if expected_kind not in {"pr_review", "plan_review"}:
+        raise ValueError("reviewer_requirement_ids may only be used for pr_review or plan_review repair")
+    rendered_ids = "\n".join(f"- `{req_id}`" for req_id in reviewer_requirement_ids)
+    if not reviewer_requirement_ids:
+        rendered_ids = "- (none)"
+    state_marker = "AGENT_STATE" if expected_kind == "pr_review" else "AGENT_PLAN_STATE"
+    blocking_field = "blocking_items" if expected_kind == "pr_review" else "blocking_plan_issues"
+    return (
+        "## Signed human requirements missing acknowledgement:\n"
+        "This approved review is missing <!-- HUMAN_REQUIREMENTS_RESOLVED -->.\n"
+        f"Surfaced signed human requirements:\n{rendered_ids}\n"
+        "For each listed requirement, confirm whether the current plan/PR satisfies it.\n"
+        "If ALL requirements are satisfied: keep state `approved` and add "
+        f"`<!-- HUMAN_REQUIREMENTS_RESOLVED -->` after the JSON and before the `<!-- {state_marker}: approved -->` footer.\n"
+        "If ANY requirement is NOT satisfied: change state to `blocking` and add a concrete "
+        f"`{blocking_field}` entry naming the unresolved requirement. "
+        "Do NOT add `<!-- HUMAN_REQUIREMENTS_RESOLVED -->` when blocking.\n"
+    )
+
+
 def _repair_prior_item_ids_instruction(
     allowed_prior_item_ids: Sequence[str] | None,
     unknown_prior_item_ids: Sequence[str] | None,
@@ -406,6 +601,7 @@ def attempt_repair(
     expected_kind: str | None = None,
     unresolved_item_ids: Sequence[str] | None = None,
     surfaced_requirement_ids: Sequence[str] | None = None,
+    reviewer_requirement_ids: Sequence[str] | None = None,
     allowed_prior_item_ids: Sequence[str] | None = None,
     unknown_prior_item_ids: Sequence[str] | None = None,
     same_round_context: str | None = None,
@@ -425,6 +621,10 @@ def attempt_repair(
     coder_followup_human_requirements_instruction = _coder_followup_human_requirements_instruction(
         expected_kind,
         surfaced_requirement_ids,
+    )
+    reviewer_human_requirements_instr = _reviewer_human_requirements_instruction(
+        expected_kind,
+        reviewer_requirement_ids,
     )
     prior_item_dispositions_instruction = _repair_prior_item_ids_instruction(
         allowed_prior_item_ids,
@@ -446,6 +646,11 @@ def attempt_repair(
     prompt = prompt.replace(
         "{coder_followup_human_requirements_instruction}",
         coder_followup_human_requirements_instruction,
+        1,
+    )
+    prompt = prompt.replace(
+        "{reviewer_human_requirements_instruction}",
+        reviewer_human_requirements_instr,
         1,
     )
     prompt = prompt.replace(

@@ -961,6 +961,17 @@ def _merge_human_requirements(
     return tuple(sorted(combined, key=lambda requirement: requirement.created_at or ""))
 
 
+def _surfaced_reviewer_requirement_ids(
+    human_requirements: Sequence,
+    *,
+    requirement_scope: str,
+) -> tuple[str, ...]:
+    return render_coder_human_requirements_prompt_context(
+        human_requirements,
+        requirement_scope=requirement_scope,
+    ).surfaced_requirement_ids
+
+
 def _validate_plan_revision_response(
     text: str,
     *,
@@ -1478,40 +1489,119 @@ def _run_plan_first_loop(
                 if not human_requirements_resolved(review_output)
             ]
             if missing_acknowledgements:
-                log(
-                    config,
-                    f"Planning round {round_number}: reviewer(s) {', '.join(missing_acknowledgements)} "
-                    "approved without acknowledging signed human requirements; "
-                    "re-injecting as blocking plan item",
+                hr_ids = _surfaced_reviewer_requirement_ids(
+                    issue_context.human_requirements,
+                    requirement_scope="planning requirements",
                 )
-                synthetic_review = (
-                    "Orchestrator plan review:\n\n"
-                    f"Reviewer(s) {', '.join(missing_acknowledgements)} approved without "
-                    "acknowledging the signed human requirements. Coder must address the "
-                    "human requirements and ensure the reviewer explicitly resolves them "
-                    "before plan approval."
-                )
-                blocking_reviews.append(("Orchestrator", synthetic_review))
-                round_new_unresolved_items.append(
-                    _next_unresolved_item(
-                        item_number=next_unresolved_item_number,
-                        reviewer="Orchestrator",
-                        source_round=round_number,
-                        text=(
-                            f"Reviewer(s) {', '.join(missing_acknowledgements)} approved without "
-                            "acknowledging the signed human requirements. Coder must address the "
-                            "human requirements and ensure the reviewer explicitly resolves them "
-                            "before plan approval."
-                        ),
-                        status="blocking",
+                still_missing = []
+                for reviewer_name, review_output in approved_review_outputs:
+                    if human_requirements_resolved(review_output):
+                        continue
+                    log(
+                        config,
+                        f"Planning round {round_number}: {reviewer_name} approved without "
+                        "HUMAN_REQUIREMENTS_RESOLVED; attempting repair",
                     )
-                )
-                next_unresolved_item_number += 1
-                unresolved_items = [*unresolved_items, round_new_unresolved_items[-1]]
-                must_fix_items = [
-                    item for item in unresolved_items if item.status in {"blocking", "same-plan"}
-                ]
-                all_approved = False
+                    repaired_text = attempt_repair(
+                        review_output,
+                        config.gemini_cmd,
+                        expected_kind="plan_review",
+                        reviewer_requirement_ids=hr_ids,
+                        allowed_prior_item_ids=tuple(
+                            item.item_id for item in prior_unresolved_items
+                        ),
+                    )
+                    if repaired_text is not None:
+                        try:
+                            repaired_parsed = _validate_plan_review_response(
+                                repaired_text,
+                                reviewer=reviewer_name,
+                                unresolved_items=prior_unresolved_items,
+                                current_round_items=round_new_unresolved_items,
+                            )
+                            if (
+                                repaired_parsed.state == "approved"
+                                and human_requirements_resolved(repaired_text)
+                            ):
+                                log(
+                                    config,
+                                    f"Planning round {round_number}: repair recovered "
+                                    f"HUMAN_REQUIREMENTS_RESOLVED for {reviewer_name}",
+                                )
+                                continue
+                            if repaired_parsed.state == "blocking":
+                                log(
+                                    config,
+                                    f"Planning round {round_number}: repair returned blocking for "
+                                    f"{reviewer_name}; treating as reviewer blocking",
+                                )
+                                blocking_reviews.append((reviewer_name, repaired_text))
+                                for item in repaired_parsed.items.blocking:
+                                    new_item = _next_unresolved_item(
+                                        item_number=next_unresolved_item_number,
+                                        reviewer=item.reviewer,
+                                        source_round=round_number,
+                                        text=item.text,
+                                        status="blocking",
+                                    )
+                                    round_new_unresolved_items.append(new_item)
+                                    unresolved_items = [*unresolved_items, new_item]
+                                    next_unresolved_item_number += 1
+                                for item in repaired_parsed.items.same_plan:
+                                    new_item = _next_unresolved_item(
+                                        item_number=next_unresolved_item_number,
+                                        reviewer=item.reviewer,
+                                        source_round=round_number,
+                                        text=item.text,
+                                        status="same-plan",
+                                    )
+                                    round_new_unresolved_items.append(new_item)
+                                    unresolved_items = [*unresolved_items, new_item]
+                                    next_unresolved_item_number += 1
+                                all_approved = False
+                                must_fix_items = [
+                                    item for item in unresolved_items
+                                    if item.status in {"blocking", "same-plan"}
+                                ]
+                                continue
+                        except AgentLoopError:
+                            pass
+                    still_missing.append(reviewer_name)
+                if still_missing:
+                    log(
+                        config,
+                        f"Planning round {round_number}: reviewer(s) {', '.join(still_missing)} "
+                        "approved without acknowledging signed human requirements; "
+                        "re-injecting as blocking plan item",
+                    )
+                    synthetic_review = (
+                        "Orchestrator plan review:\n\n"
+                        f"Reviewer(s) {', '.join(still_missing)} approved without "
+                        "acknowledging the signed human requirements. Coder must address the "
+                        "human requirements and ensure the reviewer explicitly resolves them "
+                        "before plan approval."
+                    )
+                    blocking_reviews.append(("Orchestrator", synthetic_review))
+                    round_new_unresolved_items.append(
+                        _next_unresolved_item(
+                            item_number=next_unresolved_item_number,
+                            reviewer="Orchestrator",
+                            source_round=round_number,
+                            text=(
+                                f"Reviewer(s) {', '.join(still_missing)} approved without "
+                                "acknowledging the signed human requirements. Coder must address the "
+                                "human requirements and ensure the reviewer explicitly resolves them "
+                                "before plan approval."
+                            ),
+                            status="blocking",
+                        )
+                    )
+                    next_unresolved_item_number += 1
+                    unresolved_items = [*unresolved_items, round_new_unresolved_items[-1]]
+                    must_fix_items = [
+                        item for item in unresolved_items if item.status in {"blocking", "same-plan"}
+                    ]
+                    all_approved = False
 
         if all_approved:
             approved_future_followups.extend(round_approved_future_followups)
@@ -2226,30 +2316,108 @@ def run_pr_loop(
                         if not human_requirements_resolved(review_output)
                     ]
                     if missing_acknowledgements:
-                        log(
-                            config,
-                            f"Round {round_number}: reviewer(s) {', '.join(missing_acknowledgements)} "
-                            "approved without acknowledging signed human requirements; "
-                            "re-injecting as blocking item",
+                        hr_ids = _surfaced_reviewer_requirement_ids(
+                            human_requirements,
+                            requirement_scope="PR requirements",
                         )
-                        unresolved_items.append(
-                            _next_unresolved_item(
-                                item_number=next_unresolved_item_number,
-                                reviewer="Orchestrator",
-                                source_round=round_number,
-                                text=(
-                                    f"Reviewer(s) {', '.join(missing_acknowledgements)} approved without "
-                                    "acknowledging the signed human requirements. Coder must address the "
-                                    "human requirements and ensure the reviewer explicitly resolves them "
-                                    "before approval."
-                                ),
-                                status="blocking",
+                        still_missing = []
+                        for reviewer_name, review_output in approved_review_outputs:
+                            if human_requirements_resolved(review_output):
+                                continue
+                            log(
+                                config,
+                                f"Round {round_number}: {reviewer_name} approved without "
+                                "HUMAN_REQUIREMENTS_RESOLVED; attempting repair",
                             )
-                        )
-                        next_unresolved_item_number += 1
-                        must_fix_items = [
-                            item for item in unresolved_items if item.status in {"blocking", "same-pr"}
-                        ]
+                            repaired_text = attempt_repair(
+                                review_output,
+                                config.gemini_cmd,
+                                expected_kind="pr_review",
+                                reviewer_requirement_ids=hr_ids,
+                                allowed_prior_item_ids=tuple(
+                                    item.item_id for item in prior_unresolved_items
+                                ),
+                            )
+                            if repaired_text is not None:
+                                try:
+                                    repaired_parsed = _validate_review_response(
+                                        repaired_text,
+                                        reviewer=reviewer_name,
+                                        unresolved_items=prior_unresolved_items,
+                                        current_round_items=round_new_unresolved_items,
+                                    )
+                                    if (
+                                        repaired_parsed.state == "approved"
+                                        and human_requirements_resolved(repaired_text)
+                                    ):
+                                        log(
+                                            config,
+                                            f"Round {round_number}: repair recovered "
+                                            f"HUMAN_REQUIREMENTS_RESOLVED for {reviewer_name}",
+                                        )
+                                        continue
+                                    if repaired_parsed.state == "blocking":
+                                        log(
+                                            config,
+                                            f"Round {round_number}: repair returned blocking for "
+                                            f"{reviewer_name}; treating as reviewer blocking",
+                                        )
+                                        for item in repaired_parsed.blocking_items:
+                                            new_item = _next_unresolved_item(
+                                                item_number=next_unresolved_item_number,
+                                                reviewer=item.reviewer,
+                                                source_round=round_number,
+                                                text=item.text,
+                                                status="blocking",
+                                            )
+                                            round_new_unresolved_items.append(new_item)
+                                            unresolved_items.append(new_item)
+                                            next_unresolved_item_number += 1
+                                        for item in repaired_parsed.followups.same_pr:
+                                            new_item = _next_unresolved_item(
+                                                item_number=next_unresolved_item_number,
+                                                reviewer=item.reviewer,
+                                                source_round=round_number,
+                                                text=item.text,
+                                                status="same-pr",
+                                            )
+                                            round_new_unresolved_items.append(new_item)
+                                            unresolved_items.append(new_item)
+                                            next_unresolved_item_number += 1
+                                        all_approved = False
+                                        must_fix_items = [
+                                            item for item in unresolved_items
+                                            if item.status in {"blocking", "same-pr"}
+                                        ]
+                                        continue
+                                except AgentLoopError:
+                                    pass
+                            still_missing.append(reviewer_name)
+                        if still_missing:
+                            log(
+                                config,
+                                f"Round {round_number}: reviewer(s) {', '.join(still_missing)} "
+                                "approved without acknowledging signed human requirements; "
+                                "re-injecting as blocking item",
+                            )
+                            unresolved_items.append(
+                                _next_unresolved_item(
+                                    item_number=next_unresolved_item_number,
+                                    reviewer="Orchestrator",
+                                    source_round=round_number,
+                                    text=(
+                                        f"Reviewer(s) {', '.join(still_missing)} approved without "
+                                        "acknowledging the signed human requirements. Coder must address the "
+                                        "human requirements and ensure the reviewer explicitly resolves them "
+                                        "before approval."
+                                    ),
+                                    status="blocking",
+                                )
+                            )
+                            next_unresolved_item_number += 1
+                            must_fix_items = [
+                                item for item in unresolved_items if item.status in {"blocking", "same-pr"}
+                            ]
                 sync_coder_pr_before_validation(config, runner, pr_number, pr_metadata)
                 migration_validation = validate_pr_migration_topology(
                     runner,
