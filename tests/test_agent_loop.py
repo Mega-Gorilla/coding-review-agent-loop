@@ -14327,3 +14327,123 @@ def test_repair_same_round_disposition_confusion_promotes_to_blocking():
     assert "same-round finding" in prompt
     # The guidance about future_followups promoting to blocking should be in STATE RULES
     assert "future_followups" in prompt
+
+
+# ---------------------------------------------------------------------------
+# Round 2 follow-up tests: same-pr/same-plan followup recording and FORMAT fix
+# ---------------------------------------------------------------------------
+
+def test_repair_prompt_format_rule_allows_human_requirements_resolved_for_pr_plan_review():
+    """FORMAT rule must permit HUMAN_REQUIREMENTS_RESOLVED for pr_review/plan_review, not just plan_revision."""
+    assert "pr_review" in _REPAIR_PROMPT or "HUMAN_REQUIREMENTS_RESOLVED" in _REPAIR_PROMPT
+    # Ensure the FORMAT rule no longer says "plan_revision only"
+    assert "for plan_revision only" not in _REPAIR_PROMPT
+
+
+def test_pr_loop_repair_blocking_records_same_pr_followups(tmp_path):
+    """When repair returns blocking with same_pr_followups, those are recorded as same-pr items."""
+    approved_without_marker = structured_pr_review(
+        state="approved",
+        reviewer="OpenAI Codex",
+        human_requirements_resolved=False,
+    )
+    repaired_blocking = structured_pr_review(
+        state="blocking",
+        same_pr_followups=["Fix the error message formatting."],
+        reviewer="OpenAI Codex",
+    )
+    # Coder addresses item-1 (same-pr followup)
+    coder_response = structured_coder_followup(
+        state="approved",
+        addressed_items=["item-1"],
+        remaining_items=[],
+        human_requirement_ids=["Requirement 1"],
+        reviewer="Anthropic Claude",
+    )
+    runner = FakeRunner(
+        claude_outputs=[coder_response],
+        codex_outputs=[
+            approved_without_marker,
+            structured_pr_review(
+                state="approved",
+                reviewer="OpenAI Codex",
+                human_requirements_resolved=True,
+                prior_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+            ),
+        ],
+        pr_payload=_pr_payload_with_human_requirement(),
+    )
+    config = make_config(tmp_path, max_rounds=2)
+
+    def fake_repair(raw, gemini_cmd, *, expected_kind=None, reviewer_requirement_ids=None, **kwargs):
+        if expected_kind == "pr_review" and reviewer_requirement_ids is not None:
+            return repaired_blocking
+        return None
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_repair):
+        result = run_pr_loop(runner, pr_number=77, config=config)
+
+    assert result == 0
+    # The same-pr followup text must appear in the coder's prompt
+    claude_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert any("error message formatting" in p for p in claude_prompts), \
+        "Same-PR followup from repaired review must appear in coder prompt"
+
+
+def test_plan_loop_repair_blocking_records_same_plan_followups(tmp_path):
+    """When repair returns blocking with same_plan_followups, those are recorded as same-plan items."""
+    plan = (
+        "Initial plan.\n"
+        f"{HUMAN_REQUIREMENTS_ADDRESSED_MARKER}\n"
+        "### Human requirements\n"
+        "- Requirement 1: keep the public API unchanged.\n"
+        "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    approved_without_marker = structured_plan_review(
+        state="approved",
+        reviewer="OpenAI Codex",
+        human_requirements_resolved=False,
+    )
+    repaired_blocking = structured_plan_review(
+        state="blocking",
+        same_plan_followups=["Add a regression test for the parser edge case."],
+        reviewer="OpenAI Codex",
+    )
+    revision = structured_plan_revision(
+        summary="Revised plan with regression test.",
+        prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+        human_requirements=(
+            "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n"
+            "### Human requirements\n"
+            "- Requirement 1: the plan preserves the public API.\n"
+        ),
+    )
+    runner = FakeRunner(
+        issue_payload=_issue_with_human_requirement(),
+        claude_outputs=[plan, revision],
+        codex_outputs=[
+            approved_without_marker,
+            structured_plan_review(
+                summary="Plan looks sound.",
+                human_requirements_resolved=True,
+                prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+            ),
+        ],
+    )
+    config = make_config(tmp_path, max_rounds=3)
+
+    call_count = [0]
+    def fake_repair(raw, gemini_cmd, *, expected_kind=None, reviewer_requirement_ids=None, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1 and expected_kind == "plan_review":
+            return repaired_blocking
+        return None
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", fake_repair):
+        result = run_issue_loop(runner, issue_number=56, config=config, plan_first=True)
+
+    assert result == 0
+    # The same-plan followup text must appear in the coder's prompt
+    claude_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert any("regression test for the parser" in p for p in claude_prompts), \
+        "Same-plan followup from repaired review must appear in coder prompt"

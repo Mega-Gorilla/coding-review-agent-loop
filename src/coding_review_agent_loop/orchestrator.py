@@ -1547,6 +1547,17 @@ def _run_plan_first_loop(
                                     round_new_unresolved_items.append(new_item)
                                     unresolved_items = [*unresolved_items, new_item]
                                     next_unresolved_item_number += 1
+                                for item in repaired_parsed.items.same_plan:
+                                    new_item = _next_unresolved_item(
+                                        item_number=next_unresolved_item_number,
+                                        reviewer=item.reviewer,
+                                        source_round=round_number,
+                                        text=item.text,
+                                        status="same-plan",
+                                    )
+                                    round_new_unresolved_items.append(new_item)
+                                    unresolved_items = [*unresolved_items, new_item]
+                                    next_unresolved_item_number += 1
                                 all_approved = False
                                 must_fix_items = [
                                     item for item in unresolved_items
@@ -2358,6 +2369,17 @@ def run_pr_loop(
                                                 source_round=round_number,
                                                 text=item.text,
                                                 status="blocking",
+                                            )
+                                            round_new_unresolved_items.append(new_item)
+                                            unresolved_items.append(new_item)
+                                            next_unresolved_item_number += 1
+                                        for item in repaired_parsed.followups.same_pr:
+                                            new_item = _next_unresolved_item(
+                                                item_number=next_unresolved_item_number,
+                                                reviewer=item.reviewer,
+                                                source_round=round_number,
+                                                text=item.text,
+                                                status="same-pr",
                                             )
                                             round_new_unresolved_items.append(new_item)
                                             unresolved_items.append(new_item)

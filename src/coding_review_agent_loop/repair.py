@@ -485,7 +485,10 @@ Only genuinely independent later work should remain in future_followups on an ap
 
 ## FORMAT:
 1. Start DIRECTLY with { — no prose, no markdown fences.
-2. After }: optional signed human requirements acknowledgement for plan_revision only, then <!-- AGENT_STATE: X --> (pr_review or coder_followup) OR <!-- AGENT_PLAN_STATE: X --> (plan_review or plan_revision). DIFFERENT MARKERS.
+2. After }: For approved `pr_review` or `plan_review` that now includes `<!-- HUMAN_REQUIREMENTS_RESOLVED -->`,
+   place that marker immediately after the JSON and before the AGENT_STATE/AGENT_PLAN_STATE footer.
+   For `plan_revision`, place the optional signed human requirements acknowledgement before the footer.
+   Then: <!-- AGENT_STATE: X --> (pr_review or coder_followup) OR <!-- AGENT_PLAN_STATE: X --> (plan_review or plan_revision). DIFFERENT MARKERS.
 3. JSON "state" matches X. Then: -- Agent Name. STOP. Nothing else.
 
 Output ONLY the repaired response. No explanations.
