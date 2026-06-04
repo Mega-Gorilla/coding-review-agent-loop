@@ -28,6 +28,20 @@ class CoderHumanRequirementsPromptContext:
     requires_direct_discussion_ack: bool
 
 
+COMPACT_PLANNING_VOLATILE_TAIL_MARKER = "--- volatile compact planning tail ---"
+
+
+@dataclass(frozen=True)
+class CompactPriorContext:
+    prior_item_summaries: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class CompactPlanTailContext:
+    subject: str | None = None
+    action: str | None = None
+
+
 def format_agent_list(agents: Sequence[AgentName]) -> str:
     names = [agent_display_name(agent) for agent in agents]
     if len(names) == 1:
@@ -491,6 +505,175 @@ def _issue_context_block(issue_context: IssueContext | None) -> str:
     )
 
 
+def _compact_issue_context_block(issue_context: IssueContext | None) -> str:
+    if issue_context is None:
+        return ""
+    title = issue_context.title if issue_context.title else "(unknown)"
+    body = issue_context.body if issue_context.body else "(none)"
+    return "\n".join(
+        [
+            "Original GitHub issue context",
+            f"Issue number: {issue_context.number}",
+            "",
+            "Title:",
+            title,
+            "",
+            "Body:",
+            body,
+            "",
+            "Raw prior issue comments are omitted in compact planning context. Durable reviewer findings must appear in the active unresolved ledger or the append-only compact prior ledger below.",
+            "",
+        ]
+    )
+
+
+def _compact_prior_ledger_block(compact_prior: CompactPriorContext | None) -> str:
+    summaries = compact_prior.prior_item_summaries if compact_prior is not None else ()
+    if not summaries:
+        return "Append-only compact prior item ledger\n\n(none)\n"
+    return (
+        "Append-only compact prior item ledger\n\n"
+        + "\n\n".join(summaries)
+        + "\n"
+    )
+
+
+def _canonical_plan_ledger_rules() -> str:
+    return """Canonical compact planning ledger rules
+
+- Treat active prior unresolved plan items as approval-critical until explicitly dispositioned.
+- Treat append-only compact prior ledger entries as the canonical history for prior blocking and same-plan concerns that left the active ledger.
+- Do not reinterpret, reorder, or rewrite prior compact ledger entries; append only new resolved or future-follow-up summaries after later review rounds.
+- Future follow-ups are relevant in compact mode only when elevated, referenced, or preserved in the compact prior ledger.
+"""
+
+
+def _plan_review_schema_and_rules() -> str:
+    return """Plan review response protocol
+
+Use this mandatory structured JSON response format:
+
+{
+  "schema_version": 1,
+  "kind": "plan_review",
+  "state": "approved",
+  "summary": "Plan looks good.",
+  "blocking_plan_issues": [],
+  "same_plan_followups": [],
+  "future_followups": ["Consider a later cleanup pass."],
+  "prior_plan_item_dispositions": [
+    {"item_id": "item-1", "disposition": "resolved", "note": "Covered by the revised tests."}
+  ]
+}
+<!-- AGENT_PLAN_STATE: approved -->
+-- reviewer signature shown in the volatile tail
+
+If signed human requirements are present in the stable prefix and are fully
+addressed or explicitly resolved, include exactly this marker before the
+`AGENT_PLAN_STATE` footer:
+
+<!-- HUMAN_REQUIREMENTS_RESOLVED -->
+
+Blocking plan issues and Same-plan follow-ups both prevent approval. Same-plan
+follow-ups are small current-plan refinements that must be incorporated before
+implementation starts; they may appear only in blocking plan reviews. Future
+follow-ups are independent later work that remains valid after the current
+plan is approved; they are allowed only in approved plan reviews. A concern or
+paraphrase belongs in exactly one current-round list: `blocking_plan_issues`,
+`same_plan_followups`, or `future_followups`. Do not duplicate or reclassify
+the same concern across Same-plan and Future follow-up lists.
+Approved means there are no blocking plan issues, no Same-plan follow-ups, and
+no carried-forward plan items left active for this planning round. If you
+return `<!-- AGENT_PLAN_STATE: blocking -->`, do not use structured Future
+follow-ups; keep all required current-round issues in the main blocking
+content so they are not missed during plan revision.
+Only items listed under `Prior unresolved plan items from earlier rounds` are
+eligible for dispositions in this round. If same-round findings from other
+reviewers appear elsewhere in the issue discussion, treat them as
+informational only and do not disposition them until a later round carries
+them forward explicitly.
+Structured responses must start with one top-level JSON object, place the
+`AGENT_PLAN_STATE` footer immediately after that payload, and end with only
+your standalone signature. Do not include prose or code fences before the JSON
+object.
+"""
+
+
+def _plan_revision_schema_and_rules() -> str:
+    return """Plan revision response protocol
+
+Revise the plan item by item instead of replying only with free-form prose. If
+prior unresolved plan items are listed in the stable prefix, include this exact
+section in your response and address each item ID exactly once:
+
+### Prior plan review item dispositions
+- [item-id] resolved: brief explanation of how the revised plan addresses it
+- [item-id] still blocking: brief explanation if you cannot resolve it yet
+- [item-id] same-plan: brief explanation of the remaining current-plan refinement
+- [item-id] future: brief explanation only if a reviewer explicitly asked to move it to future work
+
+Then provide the revised implementation plan with concrete file areas, edge
+cases, and tests. Use `same-plan`, never `same-pr`, when describing plan-only
+current-round refinements.
+
+Use this mandatory structured JSON response format:
+
+{
+  "schema_version": 1,
+  "kind": "plan_revision",
+  "state": "blocking",
+  "summary": "Updated the plan to cover parser hard-fail behavior and resume state reconstruction.",
+  "prior_plan_item_dispositions": [
+    {"item_id": "item-3", "disposition": "resolved", "note": "Added the carry-forward metadata step."}
+  ],
+  "plan_steps": [
+    "Update `src/coding_review_agent_loop/protocol.py` to hard-fail invalid structured plan payloads after JSON-prefix detection.",
+    "Normalize structured plan rendering and metadata-backed resume behavior in `src/coding_review_agent_loop/orchestrator.py`.",
+    "Extend prompts and targeted tests for structured planning flows."
+  ]
+}
+<!-- AGENT_PLAN_STATE: blocking -->
+-- coder signature shown in the volatile tail
+
+The orchestrator will normalize structured plan revisions into canonical
+markdown for stored plan state, reviewer prompts, subject hashing, and resume.
+Your response must start with exactly one top-level JSON object, with no prose
+or code fences before it. Put the `AGENT_PLAN_STATE` footer immediately after
+the JSON, make the footer state match the JSON state, and include only your
+standalone signature after the footer.
+"""
+
+
+def _compact_plan_stable_prefix(
+    *,
+    config: AgentLoopConfig,
+    memory: AgentMemoryContext | None,
+    issue_context: IssueContext | None,
+    unresolved_items: Sequence[UnresolvedReviewItem],
+    compact_prior: CompactPriorContext | None,
+    human_requirements_block: str,
+    human_requirements_guidance: str,
+    response_protocol: str,
+) -> str:
+    return "\n".join(
+        part.rstrip()
+        for part in (
+            "Compact cache-aware planning context",
+            f"Repository: {config.repo}",
+            _scratch_file_guidance(),
+            response_protocol,
+            _memory_block(memory),
+            _compact_issue_context_block(issue_context),
+            human_requirements_block,
+            human_requirements_guidance,
+            _canonical_plan_ledger_rules(),
+            _format_unresolved_plan_items(unresolved_items) or "Prior unresolved plan items from earlier rounds\n\n(none)\n",
+            _compact_prior_ledger_block(compact_prior),
+        )
+        if part
+    ) + "\n"
+
+
 def _issue_human_requirements_block(
     issue_context: IssueContext | None,
     *,
@@ -631,7 +814,23 @@ def build_plan_review_prompt(
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
     unresolved_items: Sequence[UnresolvedReviewItem] = (),
+    compact_context: bool = False,
+    compact_prior: CompactPriorContext | None = None,
+    compact_tail: CompactPlanTailContext | None = None,
 ) -> str:
+    if compact_context:
+        return _build_compact_plan_review_prompt(
+            issue_number,
+            round_number,
+            plan,
+            config,
+            reviewer=reviewer,
+            memory=memory,
+            issue_context=issue_context,
+            unresolved_items=unresolved_items,
+            compact_prior=compact_prior,
+            compact_tail=compact_tail,
+        )
     coder_name = agent_display_name(config.coder)
     reviewer_signature = agent_signature(reviewer)
     reviewer_group = format_agent_list(reviewers(config))
@@ -736,6 +935,100 @@ object. Always sign your response:
 """
 
 
+def _build_compact_plan_review_prompt(
+    issue_number: int,
+    round_number: int,
+    plan: str,
+    config: AgentLoopConfig,
+    *,
+    reviewer: AgentName,
+    memory: AgentMemoryContext | None,
+    issue_context: IssueContext | None,
+    unresolved_items: Sequence[UnresolvedReviewItem],
+    compact_prior: CompactPriorContext | None,
+    compact_tail: CompactPlanTailContext | None,
+) -> str:
+    coder_name = agent_display_name(config.coder)
+    reviewer_name = agent_display_name(reviewer)
+    reviewer_signature = agent_signature(reviewer)
+    reviewer_group = format_agent_list(reviewers(config))
+    human_requirements_block = _issue_human_requirements_block(
+        issue_context,
+        requirement_scope="planning requirements",
+        full_omission_fallback="Fetch the issue discussion directly before approving the plan.",
+    )
+    human_requirements_guidance = _human_requirements_review_guidance(
+        issue_context.human_requirements if issue_context is not None else (),
+        requirement_label="signed human issue requirements",
+    )
+    if unresolved_items:
+        unresolved_items_guidance = """Because prior unresolved plan items exist, include this exact section in your review:
+
+### Prior unresolved plan item dispositions
+
+Use one bullet per listed item and cover every item exactly once. Allowed forms:
+- [item-id] resolved
+- [item-id] still blocking
+- [item-id] same-plan
+- [item-id] future follow-up: brief reason
+
+Only use `future follow-up` when returning `approved`. If a current-plan item still needs to be fixed before implementation starts, keep it as `still blocking` or `same-plan` instead of downgrading it.
+For any prior item that was already marked `future`, explicitly choose whether it remains valid future work, was resolved by later plan changes, or now belongs back in same-plan/blocking work.
+Contradictory forms like `same-plan: none`, `still blocking: none`, and `future follow-up: none` are invalid; use `resolved` if the item is no longer active.
+"""
+    else:
+        unresolved_items_guidance = ""
+    stable_prefix = _compact_plan_stable_prefix(
+        config=config,
+        memory=memory,
+        issue_context=issue_context,
+        unresolved_items=unresolved_items,
+        compact_prior=compact_prior,
+        human_requirements_block=human_requirements_block,
+        human_requirements_guidance=(
+            "Signed human issue requirements are approval-critical issue constraints for this plan review.\n"
+            f"{human_requirements_guidance}"
+        ),
+        response_protocol=_plan_review_schema_and_rules() + "\n" + unresolved_items_guidance,
+    )
+    subject_line = f"Current plan subject: {compact_tail.subject}" if compact_tail and compact_tail.subject else "Current plan subject: (unknown)"
+    action = (
+        compact_tail.action
+        if compact_tail and compact_tail.action
+        else "Review the current plan for correctness, architecture fit, missing edge cases, test strategy, and ambiguity."
+    )
+    return f"""{stable_prefix}
+{COMPACT_PLANNING_VOLATILE_TAIL_MARKER}
+
+GitHub issue #{issue_number}
+Planning round: {round_number}
+Role: reviewer
+Reviewer: {reviewer_name}
+Coder: {coder_name}
+{subject_line}
+Action for this call: {action}
+
+Current implementation plan from {coder_name}:
+
+{plan}
+
+All configured reviewers ({reviewer_group}) must approve in the same planning
+round before implementation can proceed. End your final response with exactly
+one planning marker:
+
+<!-- AGENT_PLAN_STATE: approved -->
+
+or:
+
+<!-- AGENT_PLAN_STATE: blocking -->
+
+Use approved only if there are no blocking plan issues, no Same-plan
+follow-ups, and no carried-forward plan items left active for this planning
+round. Always sign your response:
+-- {reviewer_signature}
+"""
+
+
 def build_plan_decomposition_prompt(
     issue_number: int,
     approved_plan: str,
@@ -809,7 +1102,23 @@ def build_plan_revision_prompt(
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
     unresolved_items: Sequence[UnresolvedReviewItem] = (),
+    compact_context: bool = False,
+    compact_prior: CompactPriorContext | None = None,
+    compact_tail: CompactPlanTailContext | None = None,
 ) -> str:
+    if compact_context:
+        return _build_compact_plan_revision_prompt(
+            issue_number,
+            round_number,
+            previous_plan,
+            review,
+            config,
+            memory=memory,
+            issue_context=issue_context,
+            unresolved_items=unresolved_items,
+            compact_prior=compact_prior,
+            compact_tail=compact_tail,
+        )
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder)
     unresolved_items_block = _format_unresolved_plan_items(unresolved_items)
@@ -883,6 +1192,76 @@ standalone signature after the footer.
 
 This is planning round {round_number}. End your final response with exactly one
 planning marker:
+
+<!-- AGENT_PLAN_STATE: blocking -->
+
+Use blocking to hand the revised plan back to {reviewer_name}. Sign the response as:
+-- {coder_signature}
+"""
+
+
+def _build_compact_plan_revision_prompt(
+    issue_number: int,
+    round_number: int,
+    previous_plan: str,
+    review: str,
+    config: AgentLoopConfig,
+    *,
+    memory: AgentMemoryContext | None,
+    issue_context: IssueContext | None,
+    unresolved_items: Sequence[UnresolvedReviewItem],
+    compact_prior: CompactPriorContext | None,
+    compact_tail: CompactPlanTailContext | None,
+) -> str:
+    reviewer_name = format_agent_list(reviewers(config))
+    coder_signature = agent_signature(config.coder)
+    human_requirements_context = _issue_human_requirements_prompt_context(
+        issue_context,
+        requirement_scope="planning requirements",
+        full_omission_fallback="Fetch the issue discussion directly before revising the plan.",
+    )
+    stable_prefix = _compact_plan_stable_prefix(
+        config=config,
+        memory=memory,
+        issue_context=issue_context,
+        unresolved_items=unresolved_items,
+        compact_prior=compact_prior,
+        human_requirements_block=human_requirements_context.block,
+        human_requirements_guidance=_coder_human_requirements_guidance(
+            human_requirements_context,
+            requirement_label="planning requirements",
+            surfaced_requirement_instruction=(
+                "Each bullet must explain how the revised plan covers that item or what remains risky or blocked."
+            ),
+        ),
+        response_protocol=_plan_revision_schema_and_rules(),
+    )
+    subject_line = f"Current plan subject: {compact_tail.subject}" if compact_tail and compact_tail.subject else "Current plan subject: (unknown)"
+    action = (
+        compact_tail.action
+        if compact_tail and compact_tail.action
+        else "Revise the implementation plan to address the blocking plan review."
+    )
+    return f"""{stable_prefix}
+{COMPACT_PLANNING_VOLATILE_TAIL_MARKER}
+
+GitHub issue #{issue_number}
+Planning round: {round_number}
+Role: coder
+Coder: {agent_display_name(config.coder)}
+Reviewers: {reviewer_name}
+{subject_line}
+Action for this call: {action}
+
+Previous implementation plan:
+
+{previous_plan}
+
+Blocking plan review payload:
+
+{review}
+
+End your final response with exactly one planning marker:
 
 <!-- AGENT_PLAN_STATE: blocking -->
 

@@ -254,6 +254,15 @@ def build_parser() -> argparse.ArgumentParser:
                 "'fix-and-issue'; default: ignore)."
             ),
         )
+        subparser.add_argument(
+            "--planning-context-mode",
+            choices=("full", "compact"),
+            default="compact",
+            help=(
+                "Planning prompt context mode. Compact uses a cache-aware canonical "
+                "context after the first complete planning round (default: compact)."
+            ),
+        )
 
     issue = subparsers.add_parser("issue", help="Ask the coder to fix an issue, then review it.")
     issue.add_argument("issue_number", type=int)
