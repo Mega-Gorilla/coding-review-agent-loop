@@ -263,6 +263,16 @@ def build_parser() -> argparse.ArgumentParser:
                 "context after the first complete planning round (default: compact)."
             ),
         )
+        subparser.add_argument(
+            "--pr-review-context-mode",
+            choices=("full", "compact"),
+            default="full",
+            help=(
+                "PR review prompt context mode. Compact omits raw prior PR-review "
+                "transcript from round 2 onward, sending only a structured summary "
+                "(default: full)."
+            ),
+        )
 
     issue = subparsers.add_parser("issue", help="Ask the coder to fix an issue, then review it.")
     issue.add_argument("issue_number", type=int)

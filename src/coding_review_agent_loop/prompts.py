@@ -29,6 +29,7 @@ class CoderHumanRequirementsPromptContext:
 
 
 COMPACT_PLANNING_VOLATILE_TAIL_MARKER = "--- volatile compact planning tail ---"
+COMPACT_PR_REVIEW_VOLATILE_TAIL_MARKER = "--- volatile compact pr-review tail ---"
 
 
 @dataclass(frozen=True)
@@ -39,6 +40,13 @@ class CompactPriorContext:
 @dataclass(frozen=True)
 class CompactPlanTailContext:
     subject: str | None = None
+    action: str | None = None
+
+
+@dataclass(frozen=True)
+class CompactPrReviewTailContext:
+    head_sha: str | None = None
+    round_number: int | None = None
     action: str | None = None
 
 
@@ -1394,6 +1402,305 @@ Sign your response as:
 """
 
 
+def _compact_pr_review_issue_context_block(
+    issue_context: IssueContext | None,
+    pr_body: str | None,
+) -> str:
+    lines = ["Original PR context"]
+    if pr_body:
+        lines.extend(["", "PR body:", pr_body])
+    if issue_context is not None:
+        title = issue_context.title if issue_context.title else "(unknown)"
+        body = issue_context.body if issue_context.body else "(none)"
+        lines.extend(
+            [
+                "",
+                f"Linked GitHub issue #{issue_context.number}",
+                "",
+                "Issue title:",
+                title,
+                "",
+                "Issue body:",
+                body,
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "Raw prior PR-review comments are omitted in compact PR review context. "
+            "Durable reviewer findings must appear in the active unresolved ledger or "
+            "the append-only compact prior ledger below.",
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _canonical_pr_review_ledger_rules() -> str:
+    return """Canonical compact PR review ledger rules
+
+- Treat active prior unresolved review items as approval-critical until explicitly dispositioned.
+- Treat append-only compact prior ledger entries as the canonical history for prior blocking and same-PR concerns that left the active ledger.
+- Do not reinterpret, reorder, or rewrite prior compact ledger entries; append only new resolved or future-follow-up summaries after later review rounds.
+- Future follow-ups are relevant in compact mode only when elevated, referenced, or preserved in the compact prior ledger.
+"""
+
+
+def _compact_coder_followup_block(
+    summary: str | None,
+    tests_run: Sequence[str] | None,
+) -> str:
+    if not summary and not tests_run:
+        return ""
+    lines = ["Latest coder follow-up summary"]
+    if summary:
+        lines.extend(["", summary])
+    if tests_run:
+        lines.extend(["", "Tests run:"] + [f"- {t}" for t in tests_run])
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _compact_pr_review_stable_prefix(
+    *,
+    config: AgentLoopConfig,
+    memory: AgentMemoryContext | None,
+    pr_metadata: PullRequestMetadata,
+    issue_context: IssueContext | None,
+    human_requirements: Sequence[HumanReviewRequirement] | None,
+    unresolved_items: Sequence[UnresolvedReviewItem],
+    compact_prior: CompactPriorContext | None,
+    compact_coder_summary: str | None,
+    compact_coder_tests_run: Sequence[str] | None,
+    unresolved_items_guidance: str,
+    followup_guidance: str,
+    human_requirements_guidance: str,
+) -> str:
+    reviewer_group = format_agent_list(reviewers(config))
+    coder_name = agent_display_name(config.coder)
+    response_schema = f"""Use this mandatory structured PR review format. Start your response with
+exactly one top-level JSON object and no prose or code fences before it:
+
+{{
+  "schema_version": 1,
+  "kind": "pr_review",
+  "state": "approved" | "blocking",
+  "summary": "short reviewer summary",
+  "blocking_items": ["render-only blocking bullet", "..."],
+  "same_pr_followups": ["same-PR fix still required", "..."],
+  "future_followups": ["future work after approval", "..."],
+  "prior_item_dispositions": [
+    {{"item_id": "item-1", "disposition": "resolved"}},
+    {{"item_id": "item-2", "disposition": "future", "note": "brief reason"}}
+  ]
+}}
+
+`blocking_items` and `same_pr_followups` must be mutually exclusive: a single
+concern belongs in exactly one list. Put merge-blocking defects, missing
+requirements, regressions, security issues, and consistency gaps in
+`blocking_items`; put only small Same-PR cleanup that is not itself the reason
+the PR is blocked in `same_pr_followups`.
+
+After the JSON object, include only:
+1. optional `<!-- HUMAN_REQUIREMENTS_RESOLVED -->`
+2. required `<!-- AGENT_STATE: approved -->` or `<!-- AGENT_STATE: blocking -->`
+3. your standalone signature line (shown in volatile tail)
+
+Do not include any extra prose, headings, bullets, or fenced blocks before or
+after that structured response. The footer AGENT_STATE must match the JSON
+`state`.
+
+Use approved only if there are no blocking issues, no Same-PR follow-ups, and
+no carried-forward unresolved items left active for this round.
+Only items listed under `Prior unresolved review items from earlier rounds`
+are eligible for dispositions in this round. If same-round findings from
+other reviewers appear elsewhere in the PR discussion, treat them as
+informational only and do not disposition them until a later round carries
+them forward explicitly.
+All configured reviewers ({reviewer_group}) must approve in the same round for
+the pull request to be considered approved.
+Focus on correctness, security, test coverage, and maintainability. Review the
+full diff and any existing PR discussion. Do not make code changes in this
+review step; report blocking findings if {coder_name} needs to fix anything.
+Treat the GitHub PR checks block in the volatile tail as authoritative for current CI state.
+Do not say or imply that tests passed globally unless the GitHub PR checks
+state is `passing` or `no_checks`. If only a local subset passed while GitHub
+checks are `failing`, `pending`, or `unavailable`, say that explicitly.
+When the PR changes files under `alembic/versions/`, verify migration topology:
+new revisions should descend from the current head unless the PR intentionally
+adds a merge migration.
+"""
+    non_future_items = [item for item in unresolved_items if item.status != "future"]
+    return "\n".join(
+        part.rstrip()
+        for part in (
+            "Compact cache-aware PR review context",
+            f"Repository: {config.repo}",
+            _scratch_file_guidance(),
+            response_schema,
+            unresolved_items_guidance,
+            followup_guidance,
+            human_requirements_guidance,
+            _memory_block(memory),
+            _compact_pr_review_issue_context_block(issue_context, pr_metadata.body),
+            _human_requirements_block(human_requirements),
+            _canonical_pr_review_ledger_rules(),
+            _format_unresolved_review_items(non_future_items)
+            or "Prior unresolved review items from earlier rounds\n\n(none)\n",
+            _compact_coder_followup_block(compact_coder_summary, compact_coder_tests_run),
+            _compact_prior_ledger_block(compact_prior),
+        )
+        if part
+    ) + "\n"
+
+
+def _build_compact_pr_review_prompt(
+    pr_number: int,
+    round_number: int,
+    config: AgentLoopConfig,
+    *,
+    reviewer: AgentName,
+    pr_metadata: PullRequestMetadata,
+    pr_checks: PullRequestChecks | None,
+    memory: AgentMemoryContext | None,
+    issue_context: IssueContext | None,
+    human_requirements: Sequence[HumanReviewRequirement] | None,
+    unresolved_items: Sequence[UnresolvedReviewItem],
+    compact_prior: CompactPriorContext | None,
+    compact_coder_summary: str | None,
+    compact_coder_tests_run: Sequence[str] | None,
+    compact_tail: CompactPrReviewTailContext | None,
+) -> str:
+    reviewer_name = agent_display_name(reviewer)
+    reviewer_signature = agent_signature(reviewer)
+    checks_block = f"{format_pr_checks(pr_checks)}\n" if pr_checks is not None else ""
+    human_requirements_guidance = _human_requirements_review_guidance(human_requirements)
+    non_future_items = [item for item in unresolved_items if item.status != "future"]
+    if non_future_items:
+        unresolved_items_guidance = """Because prior unresolved items exist, include this exact section in your review:
+
+### Prior unresolved item dispositions
+
+Use one bullet per listed item and cover every item exactly once. Allowed forms:
+- [item-id] resolved
+- [item-id] still blocking
+- [item-id] same-pr
+- [item-id] future follow-up: brief reason
+
+Only use `future follow-up` when returning `approved`. If an item should still be fixed before merge, keep it as `still blocking` or `same-pr` instead of downgrading it.
+For any prior item that was already marked `future`, explicitly choose whether it remains valid future work, was resolved by later commits, or now belongs back in same-PR/blocking work.
+Contradictory forms like `same-pr: none`, `still blocking: none`, and `future follow-up: none` are invalid; use `resolved` if the item is no longer active.
+"""
+    else:
+        unresolved_items_guidance = ""
+    coder_name = agent_display_name(config.coder)
+    if config.approved_followups == "ignore":
+        followup_guidance = """Do not include Same-PR follow-ups, Future follow-ups, or legacy
+Non-blocking follow-ups sections in approved reviews; this run is configured to
+ignore approved-review follow-up sections. Mark the review blocking instead
+when cleanup should be fixed before merge.
+"""
+    elif config.approved_followups.startswith("fix-and-"):
+        followup_guidance = f"""For small, localized, low-risk cleanup that must still be fixed in this PR
+before merge, return `<!-- AGENT_STATE: blocking -->` and list those items
+under this exact heading:
+
+### Same-PR follow-ups
+
+Use Same-PR follow-ups only for narrow current-PR cleanup in files already
+touched by this PR or directly adjacent code. Do not use this section for
+larger redesigns, broad refactors, or independent future work.
+Keep `blocking_items` and `same_pr_followups` mutually exclusive. Use
+`blocking_items` for defects, missing requirements, regressions, security
+issues, or consistency gaps that make the PR not merge-ready. Use
+`same_pr_followups` only for small localized cleanup that should be handled in
+this PR but is not itself the reason the PR is blocked.
+Same-PR follow-ups may appear only in blocking reviews. If any Same-PR
+follow-up remains, including a carried-forward prior item that stays
+`still blocking` or `same-pr`, the review is not approved yet.
+
+If the PR is otherwise fully complete for this round but you notice substantial
+work that is better handled separately in a future issue or PR, list at most
+three highest-value items under this exact heading:
+
+### Future follow-ups
+
+Approved means there are no blocking issues, no Same-PR follow-ups, and no
+carried-forward prior unresolved items left active for this round.
+Same-PR follow-ups will be sent back to {coder_name} and require another review
+round before final approval. Do not put trivial style nits in either follow-up
+section. If you return `<!-- AGENT_STATE: blocking -->`, do not use structured
+Future follow-ups; keep all required current-round work in the blocking review
+so it is not missed during revision.
+"""
+    else:
+        followup_guidance = """If you approve but notice substantial work that is better handled separately in
+a future issue or PR, list at most three highest-value items under this exact
+heading:
+
+### Future follow-ups
+
+Do not use the Same-PR follow-ups section in this mode; mark the review blocking
+instead when small or local cleanup should be fixed before merge.
+The legacy heading `### Non-blocking follow-ups` is still accepted as future
+follow-ups for compatibility, but prefer `### Future follow-ups`.
+"""
+    stable_prefix = _compact_pr_review_stable_prefix(
+        config=config,
+        memory=memory,
+        pr_metadata=pr_metadata,
+        issue_context=issue_context,
+        human_requirements=human_requirements,
+        unresolved_items=unresolved_items,
+        compact_prior=compact_prior,
+        compact_coder_summary=compact_coder_summary,
+        compact_coder_tests_run=compact_coder_tests_run,
+        unresolved_items_guidance=unresolved_items_guidance,
+        followup_guidance=followup_guidance,
+        human_requirements_guidance=human_requirements_guidance,
+    )
+    head_sha = (compact_tail.head_sha if compact_tail else None) or pr_metadata.head_sha or "(unknown)"
+    volatile_round = (compact_tail.round_number if compact_tail else None) or round_number
+    action = (
+        compact_tail.action if compact_tail and compact_tail.action else None
+    ) or "Review the current PR diff for correctness, security, test coverage, and maintainability."
+    title = pr_metadata.title or "(unknown)"
+    head_branch = pr_metadata.head_branch or "(unknown)"
+    base_branch = pr_metadata.base_branch or "(unknown)"
+    url_line = f"- URL: {pr_metadata.url}\n" if pr_metadata.url else ""
+    return f"""{stable_prefix}
+{COMPACT_PR_REVIEW_VOLATILE_TAIL_MARKER}
+
+PR #{pr_number} in {config.repo} (round {volatile_round})
+- Title: {title}
+- Head branch: {head_branch}
+- Base branch: {base_branch}
+- Head SHA: {head_sha}
+{url_line}
+Use the Head SHA above as authoritative for this review round. If local files do not match that SHA, refresh/fetch the checkout before reviewing. Do not report findings based on untracked files unless those files are present in the PR diff.
+
+{checks_block}Suggested commands:
+- {config.gh_cmd} pr view {pr_metadata.number} --repo {pr_metadata.repo} --json title,body,headRefName,baseRefName,headRefOid,comments,reviews
+- {config.gh_cmd} pr diff {pr_number} --repo {config.repo}
+
+If a shell/tool command requires confirmation in non-interactive mode, do not retry repeatedly. Use the PR metadata above and the suggested GitHub CLI commands, or produce a blocking review explaining the limitation.
+
+Reviewer: {reviewer_name}
+Action for this call: {action}
+
+End your final response with exactly one marker:
+
+<!-- AGENT_STATE: approved -->
+
+or:
+
+<!-- AGENT_STATE: blocking -->
+
+Use blocking only for issues that should prevent merge. Always sign your response:
+-- {reviewer_signature}
+"""
+
+
 def build_review_prompt(
     pr_number: int,
     round_number: int,
@@ -1406,6 +1713,11 @@ def build_review_prompt(
     issue_context: IssueContext | None = None,
     human_requirements: Sequence[HumanReviewRequirement] | None = None,
     unresolved_items: Sequence[UnresolvedReviewItem] | None = None,
+    compact_context: bool = False,
+    compact_prior: CompactPriorContext | None = None,
+    compact_tail: CompactPrReviewTailContext | None = None,
+    compact_coder_summary: str | None = None,
+    compact_coder_tests_run: Sequence[str] | None = None,
 ) -> str:
     coder_name = agent_display_name(config.coder)
     reviewer_signature = agent_signature(reviewer)
@@ -1419,6 +1731,23 @@ def build_review_prompt(
         head_sha=None,
         url=None,
     )
+    if compact_context:
+        return _build_compact_pr_review_prompt(
+            pr_number,
+            round_number,
+            config,
+            reviewer=reviewer,
+            pr_metadata=metadata,
+            pr_checks=pr_checks,
+            memory=memory,
+            issue_context=issue_context,
+            human_requirements=human_requirements,
+            unresolved_items=unresolved_items or [],
+            compact_prior=compact_prior,
+            compact_coder_summary=compact_coder_summary,
+            compact_coder_tests_run=compact_coder_tests_run,
+            compact_tail=compact_tail,
+        )
     title = metadata.title or "(unknown)"
     head_branch = metadata.head_branch or "(unknown)"
     base_branch = metadata.base_branch or "(unknown)"

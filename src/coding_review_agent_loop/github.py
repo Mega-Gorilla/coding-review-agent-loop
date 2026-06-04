@@ -29,6 +29,7 @@ class PullRequestMetadata:
     base_branch: str | None
     head_sha: str | None
     url: str | None
+    body: str | None = None
 
 
 @dataclass(frozen=True)
@@ -85,7 +86,7 @@ class PullRequestChecks:
     branch_protection_note: str | None = None
 
 
-PR_METADATA_FIELDS = "number,title,headRefName,baseRefName,headRefOid,url"
+PR_METADATA_FIELDS = "number,title,headRefName,baseRefName,headRefOid,url,body"
 PR_REVIEW_CONTEXT_FIELDS = f"{PR_METADATA_FIELDS},comments,reviews"
 ISSUE_REFERENCE_RE_TEMPLATE = r"(?:#%d\b|/issues/%d\b)"
 
@@ -170,6 +171,7 @@ def _parse_pr_metadata(
         base_branch=_optional_str(data.get("baseRefName")),
         head_sha=_optional_str(data.get("headRefOid")),
         url=_optional_str(data.get("url")),
+        body=_optional_str(data.get("body")),
     )
 
 
