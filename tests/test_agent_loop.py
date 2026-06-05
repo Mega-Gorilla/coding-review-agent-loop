@@ -107,7 +107,9 @@ from coding_review_agent_loop.orchestrator import (
 )
 from coding_review_agent_loop.prompts import (
     COMPACT_PLANNING_VOLATILE_TAIL_MARKER,
+    COMPACT_PR_REVIEW_VOLATILE_TAIL_MARKER,
     CompactPlanTailContext,
+    CompactPrReviewTailContext,
     CompactPriorContext,
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
     HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK,
@@ -772,6 +774,7 @@ def structured_coder_followup(
     remaining_item_notes: dict[str, str] | None = None,
     human_requirement_ids: list[str] | None = None,
     checked_discussion_directly: bool = False,
+    tests_run: list[str] | None = None,
     reviewer: str = "Anthropic Claude",
 ) -> str:
     return (
@@ -789,6 +792,7 @@ def structured_coder_followup(
                     "addressed_ids": human_requirement_ids or [],
                     "checked_discussion_directly": checked_discussion_directly,
                 },
+                **({"tests_run": tests_run} if tests_run is not None else {}),
             }
         )
         + f"\n<!-- AGENT_STATE: {state} -->\n-- {reviewer}"
@@ -4094,6 +4098,185 @@ def test_full_plan_prompt_still_includes_raw_issue_comments(tmp_path):
     )
 
     assert "UNRELATED RAW PRIOR COMMENT PROSE" in prompt
+
+
+def _compact_pr_issue_context() -> IssueContext:
+    return IssueContext(
+        number=56,
+        repo="OWNER/REPO",
+        title="Linked issue title",
+        body="Linked issue body with durable requirements.",
+        url="https://github.com/OWNER/REPO/issues/56",
+        comments=(
+            IssueComment(
+                author="reviewer",
+                created_at="2026-06-01T00:00:00Z",
+                body="UNRELATED RAW PRIOR PR REVIEW HISTORY should not be replayed.",
+            ),
+        ),
+        human_requirements=(
+            HumanReviewRequirement(
+                source_type="PR comment",
+                author="wwind123",
+                created_at="2026-06-04T10:00:00Z",
+                url="https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+                body="Compact PR mode must preserve human requirements.",
+            ),
+        ),
+    )
+
+
+def _compact_pr_metadata() -> PullRequestMetadata:
+    return PullRequestMetadata(
+        number=77,
+        repo="OWNER/REPO",
+        title="Compact PR context",
+        head_branch="feature/context",
+        base_branch="main",
+        head_sha="abc123",
+        url="https://github.com/OWNER/REPO/pull/77",
+        body="PR body with author intent and scope.",
+    )
+
+
+def test_config_and_cli_default_to_full_pr_review_context(tmp_path):
+    assert make_config(tmp_path).pr_review_context_mode == "full"
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "pr",
+        "77",
+        "--repo",
+        "OWNER/REPO",
+        "--pr-review-context-mode",
+        "compact",
+    ])
+    assert config_from_args(args, FakeRunner()).pr_review_context_mode == "compact"
+
+    with pytest.raises(AgentLoopError):
+        make_config(tmp_path, pr_review_context_mode="invalid")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["pr", "77", "--pr-review-context-mode", "invalid"])
+
+
+def test_compact_pr_review_prompt_preserves_context_and_omits_raw_history(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    issue_context = _compact_pr_issue_context()
+    prompt = build_review_prompt(
+        77,
+        2,
+        config,
+        reviewer="codex",
+        pr_metadata=_compact_pr_metadata(),
+        pr_checks=None,
+        memory=_compact_memory_context(tmp_path),
+        issue_context=issue_context,
+        human_requirements=issue_context.human_requirements,
+        unresolved_items=(
+            UnresolvedReviewItem(
+                item_id="item-1",
+                reviewer="OpenAI Codex",
+                source_round=1,
+                text="Active blocking issue remains important.",
+                status="blocking",
+            ),
+            UnresolvedReviewItem(
+                item_id="item-2",
+                reviewer="Google Gemini",
+                source_round=1,
+                text="Active same-PR cleanup remains important.",
+                status="same-pr",
+            ),
+            UnresolvedReviewItem(
+                item_id="item-3",
+                reviewer="OpenAI Codex",
+                source_round=1,
+                text="Unrelated future-only item should not stay active in compact prompt.",
+                status="future",
+            ),
+        ),
+        compact_context=True,
+        compact_prior=CompactPriorContext(("[item-4] resolved: old resolved item",)),
+        compact_coder_summary="Coder says the compact mode wiring is complete.",
+        compact_coder_tests_run=("python -m pytest tests/test_agent_loop.py -k compact_pr",),
+        compact_tail=CompactPrReviewTailContext(
+            head_sha="abc123",
+            round_number=2,
+            action="Review compact PR context mode.",
+        ),
+    )
+
+    prefix, tail = prompt.split(COMPACT_PR_REVIEW_VOLATILE_TAIL_MARKER, 1)
+    assert "PR body with author intent and scope." in prefix
+    assert "Linked issue body with durable requirements." in prefix
+    assert "Compact PR mode must preserve human requirements." in prefix
+    assert "Repo memory summary for compact prefix." in prefix
+    assert "Active blocking issue remains important." in prefix
+    assert "Active same-PR cleanup remains important." in prefix
+    assert "Unrelated future-only item should not stay active" not in prefix
+    assert "UNRELATED RAW PRIOR PR REVIEW HISTORY" not in prompt
+    assert "[item-4] resolved: old resolved item" in prefix
+    assert "Coder says the compact mode wiring is complete." in prefix
+    assert "python -m pytest tests/test_agent_loop.py -k compact_pr" in prefix
+    assert "Review compact PR context mode." in tail
+    assert "Head SHA: abc123" in tail
+    assert "gh pr diff 77 --repo OWNER/REPO" in tail
+
+
+def test_compact_pr_review_prompt_stable_prefix_is_byte_identical_across_rounds(tmp_path):
+    config = make_config(tmp_path)
+    metadata = _compact_pr_metadata()
+    issue_context = _compact_pr_issue_context()
+    unresolved_item = UnresolvedReviewItem(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Active PR item remains approval-critical.",
+        status="blocking",
+    )
+    first = build_review_prompt(
+        77,
+        2,
+        config,
+        reviewer="codex",
+        pr_metadata=metadata,
+        memory=_compact_memory_context(tmp_path),
+        issue_context=issue_context,
+        human_requirements=issue_context.human_requirements,
+        unresolved_items=(unresolved_item,),
+        compact_context=True,
+        compact_prior=CompactPriorContext(("[item-9] resolved: unchanged",)),
+        compact_coder_summary="Stable coder summary.",
+        compact_coder_tests_run=("pytest -k stable",),
+        compact_tail=CompactPrReviewTailContext(head_sha="abc123", round_number=2, action="Review A."),
+    )
+    second = build_review_prompt(
+        77,
+        3,
+        config,
+        reviewer="codex",
+        pr_metadata=metadata,
+        memory=_compact_memory_context(tmp_path),
+        issue_context=issue_context,
+        human_requirements=issue_context.human_requirements,
+        unresolved_items=(unresolved_item,),
+        compact_context=True,
+        compact_prior=CompactPriorContext(("[item-9] resolved: unchanged",)),
+        compact_coder_summary="Stable coder summary.",
+        compact_coder_tests_run=("pytest -k stable",),
+        compact_tail=CompactPrReviewTailContext(head_sha="def456", round_number=3, action="Review B."),
+    )
+
+    first_prefix, first_tail = first.split(COMPACT_PR_REVIEW_VOLATILE_TAIL_MARKER, 1)
+    second_prefix, second_tail = second.split(COMPACT_PR_REVIEW_VOLATILE_TAIL_MARKER, 1)
+    assert first_prefix.encode() == second_prefix.encode()
+    assert first_tail != second_tail
+    assert "Active PR item remains approval-critical." in first_prefix
+    assert "Stable coder summary." in first_prefix
+    assert "PR body with author intent and scope." in first_prefix
+    for volatile in ("round 2", "Head SHA: abc123", "Review A."):
+        assert volatile not in first_prefix
+        assert volatile in first_tail
 
 
 def test_compact_review_prompt_stable_prefix_is_byte_identical_across_rounds(tmp_path):
@@ -8305,7 +8488,7 @@ def test_pr_loop_requires_all_reviewers_to_approve(tmp_path):
         if cmd[:3] == ["gh", "pr", "view"]
         and "--json" in cmd
         and cmd[cmd.index("--json") + 1]
-        == "number,title,headRefName,baseRefName,headRefOid,url,comments,reviews"
+        == "number,title,headRefName,baseRefName,headRefOid,url,body,comments,reviews"
     ]
     assert len(metadata_fetches) == 1
     assert ["pytest", "tests/test_agent_loop.py"] in commands
@@ -9080,7 +9263,7 @@ def test_pr_loop_reruns_all_reviewers_when_any_reviewer_blocks(tmp_path):
         if cmd[:3] == ["gh", "pr", "view"]
         and "--json" in cmd
         and cmd[cmd.index("--json") + 1]
-        == "number,title,headRefName,baseRefName,headRefOid,url,comments,reviews"
+        == "number,title,headRefName,baseRefName,headRefOid,url,body,comments,reviews"
     ]
     assert len(metadata_fetches) == 2
 
@@ -9245,6 +9428,68 @@ def test_pr_loop_carries_new_future_followups_into_later_reviewer_prompts(tmp_pa
     summary = runner.comments[-1]
     assert summary.startswith("Approved-review future follow-ups for PR #77:")
     assert "Document cache cleanup behavior." in summary
+
+
+def test_pr_loop_compact_review_mode_uses_fresh_sessions_and_compact_prior_ledger(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Codex approves with future work.\n\n"
+            "### Future follow-ups\n"
+            "- Document cache cleanup behavior.\n"
+            "<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+            "Codex approves final pass."
+            + prior_item_dispositions(
+                "[item-1] future follow-up: still future work",
+                "[item-2] resolved",
+            )
+            + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        claude_outputs=[
+            "Claude still blocks.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+            "Claude approves final pass."
+            + prior_item_dispositions(
+                "[item-1] future follow-up: still future work",
+                "[item-2] resolved",
+            )
+            + "\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+        gemini_outputs=[
+            structured_coder_followup(
+                state="blocking",
+                summary="Implemented blocker and ran focused tests.",
+                addressed_items=["item-1", "item-2"],
+                remaining_items=[],
+                tests_run=["python -m pytest tests/test_agent_loop.py -k compact_pr"],
+                reviewer="Google Gemini",
+            )
+        ],
+        pr_payload={"body": "PR body used by compact review mode."},
+    )
+    config = make_config(
+        tmp_path,
+        coder="gemini",
+        reviewer=("codex", "claude"),
+        approved_followups="summarize",
+        max_rounds=2,
+        pr_review_context_mode="compact",
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    codex_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]
+    assert len(codex_prompts) == 2
+    second_codex_prompt = codex_prompts[1]
+    assert COMPACT_PR_REVIEW_VOLATILE_TAIL_MARKER in second_codex_prompt
+    assert "PR body used by compact review mode." in second_codex_prompt
+    assert "Implemented blocker and ran focused tests." in second_codex_prompt
+    assert "python -m pytest tests/test_agent_loop.py -k compact_pr" in second_codex_prompt
+    assert "Document cache cleanup behavior." not in second_codex_prompt
+    assert "[item-1] future" not in second_codex_prompt
+    assert "Claude still blocks." in second_codex_prompt
+    assert not any("--resume" in cmd for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"])
+
+    assert runner.comments[-1].startswith("Approved-review future follow-ups for PR #77:")
+    assert "Document cache cleanup behavior." in runner.comments[-1]
 
 
 def test_pr_loop_carries_prior_item_notes_without_creating_duplicate_blocker_items(tmp_path):

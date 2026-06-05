@@ -52,6 +52,7 @@ from .migrations import validate_pr_migration_topology
 from .prompts import (
     CompactPlanTailContext,
     CompactPriorContext,
+    CompactPrReviewTailContext,
     build_followup_prompt,
     build_issue_implementation_prompt,
     build_issue_plan_prompt,
@@ -85,6 +86,7 @@ from .protocol import (
     review_freeform_summary_text,
     normalize_response_file_structured_text,
     validate_human_requirements_acknowledgement,
+    validate_structured_coder_followup,
     validate_structured_plan_revision,
 )
 from .protocol import ApprovedFollowup, parse_review
@@ -2015,6 +2017,26 @@ def run_task_loop(
             _persist_usage_summary(config, usage_context)
 
 
+def _extract_structured_coder_summary(text: str | None) -> str | None:
+    if not text:
+        return None
+    try:
+        parsed = validate_structured_coder_followup(text)
+        return parsed.summary if parsed else None
+    except AgentLoopError:
+        return None
+
+
+def _extract_structured_coder_tests_run(text: str | None) -> tuple[str, ...] | None:
+    if not text:
+        return None
+    try:
+        parsed = validate_structured_coder_followup(text)
+        return parsed.tests_run if parsed else None
+    except AgentLoopError:
+        return None
+
+
 def run_pr_loop(
     runner: Runner,
     *,
@@ -2038,6 +2060,7 @@ def run_pr_loop(
         reviewer_session_ids: dict[AgentName, str | None] = {}
         configured_reviewers = reviewers(config)
         unresolved_items: list[UnresolvedReviewItem] = []
+        pr_compact_prior_summaries: list[str] = []
         latest_coder_output: str | None = None
         next_unresolved_item_number = 1
         start_round_number = 1
@@ -2055,6 +2078,7 @@ def run_pr_loop(
         )
         if resumed_round is not None:
             unresolved_items = list(resumed_round.prior_items)
+            pr_compact_prior_summaries = list(resumed_round.compact_prior_summaries)
             latest_coder_output = resumed_round.coder_output
             next_unresolved_item_number = resumed_round.next_unresolved_item_number
             start_round_number = resumed_round.round_number
@@ -2095,6 +2119,21 @@ def run_pr_loop(
                 flow="pr",
                 current_subject=current_pr_subject,
             )
+            use_compact_pr_context = (
+                config.pr_review_context_mode == "compact"
+                and round_number >= 2
+                and not round_ledger_incomplete
+            )
+            compact_coder_summary = (
+                _extract_structured_coder_summary(latest_coder_output)
+                if use_compact_pr_context
+                else None
+            )
+            compact_coder_tests_run = (
+                _extract_structured_coder_tests_run(latest_coder_output)
+                if use_compact_pr_context
+                else None
+            )
             approved_review_outputs: list[tuple[str, str]] = []
             pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
             resumed_by_name = {
@@ -2117,8 +2156,21 @@ def run_pr_loop(
                     reviewer_new_unresolved_items = list(resumed_record.metadata.new_items)
                     log(config, f"Round {round_number}: resuming {reviewer_name}'s completed review")
                 else:
-                    log(config, f"Round {round_number}: {reviewer_name} reviewing PR #{pr_number}")
+                    context_mode = "compact" if use_compact_pr_context else "full"
+                    log(
+                        config,
+                        f"Round {round_number}: {reviewer_name} reviewing PR #{pr_number} "
+                        f"(context mode: {context_mode})",
+                    )
                     sync_reviewer_pr_before_review(config, runner, reviewer, pr_number, pr_metadata)
+                    compact_tail = (
+                        CompactPrReviewTailContext(
+                            head_sha=pr_metadata.head_sha,
+                            round_number=round_number,
+                        )
+                        if use_compact_pr_context
+                        else None
+                    )
                     review_response = _run_validated_agent(
                         runner,
                         agent=reviewer,
@@ -2134,8 +2186,17 @@ def run_pr_loop(
                             issue_context=issue_context,
                             human_requirements=human_requirements,
                             unresolved_items=prior_unresolved_items,
+                            compact_context=use_compact_pr_context,
+                            compact_prior=(
+                                CompactPriorContext(tuple(pr_compact_prior_summaries))
+                                if use_compact_pr_context
+                                else None
+                            ),
+                            compact_tail=compact_tail,
+                            compact_coder_summary=compact_coder_summary,
+                            compact_coder_tests_run=compact_coder_tests_run,
                         ),
-                        session_id=reviewer_session_ids.get(reviewer),
+                        session_id=None if use_compact_pr_context else reviewer_session_ids.get(reviewer),
                         marker_description="<!-- AGENT_STATE: approved|blocking -->",
                         validate=lambda text, reviewer_name=reviewer_name, items=prior_unresolved_items: _validate_review_response(
                             text,
@@ -2296,14 +2357,30 @@ def run_pr_loop(
                 else:
                     round_new_unresolved_items.extend(reviewer_new_unresolved_items)
 
-            unresolved_items, _future_items = _apply_unresolved_item_dispositions(
-                prior_unresolved_items,
-                prior_dispositions,
-            )
+            if use_compact_pr_context:
+                unresolved_items, future_from_prior_items = _apply_unresolved_item_dispositions(
+                    prior_unresolved_items,
+                    prior_dispositions,
+                    retain_future=False,
+                )
+                pr_compact_prior_summaries.extend(
+                    _collect_prior_compact_summaries(
+                        prior_unresolved_items,
+                        unresolved_items,
+                        future_from_prior_items,
+                        prior_dispositions,
+                    )
+                )
+            else:
+                unresolved_items, _future_items = _apply_unresolved_item_dispositions(
+                    prior_unresolved_items,
+                    prior_dispositions,
+                )
+                future_from_prior_items = []
             unresolved_items = [*unresolved_items, *round_new_unresolved_items]
             future_followups = [
                 _approved_followup_from_unresolved_item(item)
-                for item in unresolved_items
+                for item in [*unresolved_items, *future_from_prior_items]
                 if item.status == "future"
             ]
             must_fix_items = [item for item in unresolved_items if item.status in {"blocking", "same-pr"}]
@@ -2591,6 +2668,7 @@ def run_pr_loop(
                         subject=str(updated_pr_context.metadata.head_sha or "unknown"),
                         prior_items=tuple(unresolved_items),
                         raw_structured_coder_response=raw_structured_coder_response,
+                        compact_prior_summaries=tuple(pr_compact_prior_summaries),
                     ),
                 ),
             )
