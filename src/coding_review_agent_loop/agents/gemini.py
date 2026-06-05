@@ -15,15 +15,12 @@ from .base import (
     with_public_response_file_instruction,
 )
 from ..logging import agent_log_path, log
-from ..protocol import CLARIFY_RE, PLAN_STATE_RE, STATE_RE
+from ..protocol import CLARIFY_RE, PLAN_STATE_RE, PUBLIC_RESPONSE_MARKER, STATE_RE
 from ..runner import Runner
 from ..usage import UsageMetadata, coerce_int, first_present
 
 if TYPE_CHECKING:
     from ..config import AgentLoopConfig
-
-
-PUBLIC_RESPONSE_MARKER = "=== AGENT_LOOP_PUBLIC_RESPONSE_BELOW ==="
 
 
 def _with_public_response_marker_instruction(prompt: str) -> str:

@@ -219,7 +219,8 @@ NEAR_MISS_AGENT_MARKER_RE = re.compile(
     re.I,
 )
 PUBLIC_RESPONSE_ARTIFACT_PREFIX_RE = re.compile(
-    r"\A\s*(?:=== AGENT_LOOP_PUBLIC_RESPONSE_BELOW ===\s*)+"
+    r"\A\s*(?:={3,}\s*AGENT_LOOP_PUBLIC_RESPONSE_BELOW\s*={3,}\s*)+",
+    re.I,
 )
 STRUCTURED_PUBLIC_RESPONSE_KINDS = frozenset(
     {"plan_review", "pr_review", "coder_followup", "plan_revision"}
@@ -479,14 +480,19 @@ def _is_retryable_marker_near_miss(text: str) -> bool:
     )
 
 
-def _failure_category(text: str, *, public_response: bool = False) -> str:
+def _failure_category(
+    text: str,
+    *,
+    public_response: bool = False,
+    repair_expected_kind: str | None = None,
+) -> str:
     """Classify a failure for logging: helps users decide whether to rerun or fix config/code."""
     if not text.strip():
         return "empty-response"
     if NON_RETRYABLE_AGENT_OUTPUT_RE.search(text):
         return "non-retryable"  # auth/billing — fix configuration
     if public_response:
-        if _is_transient_public_response(text):
+        if _is_transient_public_response(text, repair_expected_kind=repair_expected_kind):
             return "transient"  # extracted provider diagnostic — rerun may help
         return "deterministic"  # public response protocol/content issue
     if TRANSIENT_AGENT_OUTPUT_RE.search(text):
@@ -894,13 +900,14 @@ def _run_validated_agent(
                 if result.response_file_text
                 else None
             )
-            if response_file_pre_status == "leading-public-response-marker-recovered":
-                log(
-                    config,
-                    f"{agent_name}: response file contained stdout filtering marker and was recovered",
-                )
             try:
                 marker_value = validate(text)
+                if response_file_pre_status == "leading-public-response-marker-recovered":
+                    log(
+                        config,
+                        f"{agent_name}: response file contained stdout filtering marker and "
+                        "validated after stripping it",
+                    )
             except AgentLoopError as exc:
                 last_error = str(exc)
                 classification_text = _agent_failure_classification_text(result, phase="validation")
@@ -912,6 +919,7 @@ def _run_validated_agent(
                 last_failure_category = _failure_category(
                     classification_text,
                     public_response=True,
+                    repair_expected_kind=repair_expected_kind,
                 )
                 # Marker near-misses are a separate first-attempt nudge for common footer typos;
                 # structured JSON protocol drift still remains repairable when retries are exhausted.

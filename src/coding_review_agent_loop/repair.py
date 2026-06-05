@@ -235,6 +235,10 @@ You are a format-repair assistant. An AI agent produced a code review, plan revi
 
 ## Valid Format D — Plan Revision:
 
+When the malformed plan_revision did not include a signed human requirements
+acknowledgement, omit the `<!-- HUMAN_REQUIREMENTS_ADDRESSED -->` marker and
+the `### Human requirements` section from Format D.
+
 {
   "schema_version": 1,
   "kind": "plan_revision",
@@ -722,10 +726,9 @@ def _repair_prior_item_ids_instruction(
     )
     return (
         "## Prior item disposition repair:\n"
-        "Same-round findings are informational only and must not be dispositioned as prior carried items.\n"
+        f"{context}\n"
         f"Allowed carried prior item IDs: {allowed}\n"
         f"Unknown prior item disposition IDs to remove: {unknown}\n"
-        f"Context: {context}\n"
         "Preserve valid dispositions for allowed IDs. Remove only unknown prior-item disposition entries.\n"
     )
 
