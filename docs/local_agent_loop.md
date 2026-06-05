@@ -506,6 +506,10 @@ markdown comments, newer orchestrator-rendered comments, or both. When
 `AGENT_LOOP_META` exists for the current PR head or plan subject, resume uses
 that metadata-backed ledger and ignores stale visible item IDs from older heads,
 superseded plans, or replayed rounds.
+If the PR head advanced without a current-head coder metadata comment, resume
+uses metadata-backed active `blocking` and `same-pr` items from the latest
+recorded head and sends them to the coder for a structured follow-up before
+reviewers run again.
 
 Reviewer responses should use structured JSON first. A PR review starts with:
 

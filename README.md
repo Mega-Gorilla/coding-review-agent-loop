@@ -261,6 +261,10 @@ remain earlier in the issue or PR thread, while newer orchestrator-rendered
 comments carry `AGENT_LOOP_META`. When metadata exists for the current head or
 plan subject, resume reconstruction uses that metadata-backed ledger and ignores
 stale visible item IDs from older heads, superseded plans, or replayed rounds.
+If a PR head advances but no current-head coder metadata was recorded, the PR
+loop recovers from metadata-backed active `blocking` and `same-pr` items on the
+latest recorded head and routes them through a coder follow-up before reviewers
+run again.
 
 Structured JSON is also the preferred coder format for follow-up and plan
 revision rounds. Coder follow-up responses use `kind: "coder_followup"` with

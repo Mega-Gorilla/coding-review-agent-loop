@@ -2205,7 +2205,17 @@ def run_pr_loop(
             resumed_by_name = {
                 record.metadata.agent: record for record in (current_resume.completed_reviews if current_resume is not None else ())
             }
-            for reviewer in configured_reviewers:
+            skip_reviewers_for_recovery = bool(
+                current_resume is not None and current_resume.unrecorded_head_advance
+            )
+            if skip_reviewers_for_recovery:
+                log(
+                    config,
+                    f"Round {round_number}: PR head advanced to {current_pr_subject} "
+                    "without current-head coder metadata; routing recovered prior items "
+                    f"through {coder_name} before review",
+                )
+            for reviewer in (() if skip_reviewers_for_recovery else configured_reviewers):
                 reviewer_name = agent_display_name(reviewer)
                 resumed_record = resumed_by_name.get(reviewer_name)
                 if resumed_record is not None:

@@ -9795,6 +9795,242 @@ def test_resume_pr_round_does_not_mark_ledger_incomplete_for_cross_subject_prior
     assert resumed.ledger_may_be_incomplete is False
 
 
+def test_resume_pr_round_recovers_unrecorded_head_advance_reviewer_new_item():
+    active_item = UnresolvedReviewItem(
+        item_id="item-2",
+        reviewer="Google Gemini",
+        source_round=1,
+        text="Fix the regression before merge.",
+        status="blocking",
+    )
+    coder_comment = _attach_round_metadata(
+        "Initial PR handoff.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        PostedRoundMetadata(
+            flow="pr",
+            role="coder",
+            agent="Claude",
+            round_number=1,
+            subject="old-sha",
+            prior_items=(),
+        ),
+    )
+    review_comment = _attach_round_metadata(
+        "Blocked.\n<!-- AGENT_STATE: blocking -->\n-- Google Gemini",
+        PostedRoundMetadata(
+            flow="pr",
+            role="reviewer",
+            agent="Gemini",
+            round_number=1,
+            subject="old-sha",
+            prior_items=(),
+            new_items=(active_item,),
+            state="blocking",
+        ),
+    )
+
+    resumed = _resume_pr_round(
+        [
+            IssueComment(author="bot", created_at="2026-05-25T00:00:00Z", body=coder_comment),
+            IssueComment(author="bot", created_at="2026-05-25T00:01:00Z", body=review_comment),
+        ],
+        head_sha="new-sha",
+        configured_reviewers=("gemini",),
+    )
+
+    assert resumed is not None
+    assert resumed.unrecorded_head_advance is True
+    assert resumed.ledger_may_be_incomplete is True
+    assert resumed.round_number == 1
+    assert resumed.completed_reviews == ()
+    assert [item.item_id for item in resumed.prior_items] == ["item-2"]
+    assert resumed.next_unresolved_item_number == 3
+
+
+def test_resume_pr_round_recovers_coder_only_unrecorded_head_advance():
+    carried_item = UnresolvedReviewItem(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Still needs a targeted test.",
+        status="same-pr",
+    )
+    future_item = UnresolvedReviewItem(
+        item_id="item-2",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Document this later.",
+        status="future",
+    )
+    coder_comment = _attach_round_metadata(
+        "Addressed prior feedback.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        PostedRoundMetadata(
+            flow="pr",
+            role="coder",
+            agent="Claude",
+            round_number=2,
+            subject="old-sha",
+            prior_items=(carried_item, future_item),
+            compact_prior_summaries=("Older summary.",),
+        ),
+    )
+
+    resumed = _resume_pr_round(
+        [IssueComment(author="bot", created_at="2026-05-25T00:00:00Z", body=coder_comment)],
+        head_sha="new-sha",
+        configured_reviewers=("codex",),
+    )
+
+    assert resumed is not None
+    assert resumed.unrecorded_head_advance is True
+    assert resumed.round_number == 2
+    assert [item.item_id for item in resumed.prior_items] == ["item-1"]
+    assert resumed.compact_prior_summaries == ("Older summary.",)
+
+
+def test_resume_pr_round_recovers_reviewer_only_with_aggregated_dispositions():
+    prior_blocking = UnresolvedReviewItem(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Fix the flaky test.",
+        status="blocking",
+    )
+    prior_same_pr = UnresolvedReviewItem(
+        item_id="item-2",
+        reviewer="Google Gemini",
+        source_round=1,
+        text="Tighten the docs.",
+        status="same-pr",
+    )
+    future_new_item = UnresolvedReviewItem(
+        item_id="item-3",
+        reviewer="OpenAI Codex",
+        source_round=2,
+        text="Follow up in another PR.",
+        status="future",
+    )
+    active_new_item = UnresolvedReviewItem(
+        item_id="item-4",
+        reviewer="Google Gemini",
+        source_round=2,
+        text="Add one same-PR assertion.",
+        status="same-pr",
+    )
+    codex_resolution = ReviewItemDisposition(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        disposition="resolved",
+        note=None,
+    )
+    gemini_same_pr = ReviewItemDisposition(
+        item_id="item-2",
+        reviewer="Google Gemini",
+        disposition="same-pr",
+        note="Still needed before merge.",
+    )
+    codex_comment = _attach_round_metadata(
+        "Codex review.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        PostedRoundMetadata(
+            flow="pr",
+            role="reviewer",
+            agent="Codex",
+            round_number=2,
+            subject="old-sha",
+            prior_items=(prior_blocking, prior_same_pr),
+            dispositions=(codex_resolution,),
+            new_items=(future_new_item,),
+            state="approved",
+        ),
+    )
+    gemini_comment = _attach_round_metadata(
+        "Gemini review.\n<!-- AGENT_STATE: blocking -->\n-- Google Gemini",
+        PostedRoundMetadata(
+            flow="pr",
+            role="reviewer",
+            agent="Gemini",
+            round_number=2,
+            subject="old-sha",
+            prior_items=(prior_blocking, prior_same_pr),
+            dispositions=(gemini_same_pr,),
+            new_items=(active_new_item,),
+            state="blocking",
+        ),
+    )
+
+    resumed = _resume_pr_round(
+        [
+            IssueComment(author="bot", created_at="2026-05-25T00:00:00Z", body=codex_comment),
+            IssueComment(author="bot", created_at="2026-05-25T00:01:00Z", body=gemini_comment),
+        ],
+        head_sha="new-sha",
+        configured_reviewers=("codex", "gemini"),
+    )
+
+    assert resumed is not None
+    assert resumed.unrecorded_head_advance is True
+    assert [item.item_id for item in resumed.prior_items] == ["item-2", "item-4"]
+    assert resumed.prior_items[0].status == "same-pr"
+    assert "Still needed before merge." in resumed.prior_items[0].text
+
+
+def test_resume_pr_round_ignores_unrecorded_head_advance_with_no_active_items():
+    future_item = UnresolvedReviewItem(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Future cleanup.",
+        status="future",
+    )
+    review_comment = _attach_round_metadata(
+        "Approved with future follow-up.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        PostedRoundMetadata(
+            flow="pr",
+            role="reviewer",
+            agent="Codex",
+            round_number=1,
+            subject="old-sha",
+            prior_items=(),
+            new_items=(future_item,),
+            state="approved",
+        ),
+    )
+
+    assert (
+        _resume_pr_round(
+            [IssueComment(author="bot", created_at="2026-05-25T00:00:00Z", body=review_comment)],
+            head_sha="new-sha",
+            configured_reviewers=("codex",),
+        )
+        is None
+    )
+
+
+def test_resume_pr_round_fails_early_for_incoherent_unrecorded_head_advance():
+    bad_comment = _attach_round_metadata(
+        "Bad metadata.\n<!-- AGENT_STATE: blocking -->\n-- Bot",
+        PostedRoundMetadata(
+            flow="pr",
+            role="observer",
+            agent="Bot",
+            round_number=1,
+            subject="old-sha",
+        ),
+    )
+
+    with pytest.raises(
+        AgentLoopError,
+        match=(
+            "PR head advanced without a recorded coder follow-up.*"
+            "Current head: new-sha.*Latest recorded metadata subject: old-sha"
+        ),
+    ):
+        _resume_pr_round(
+            [IssueComment(author="bot", created_at="2026-05-25T00:00:00Z", body=bad_comment)],
+            head_sha="new-sha",
+            configured_reviewers=("codex",),
+        )
+
+
 def test_resume_plan_round_marks_empty_ledger_incomplete_after_same_subject_prior_new_items():
     plan = "Plan text."
     subject = _plan_subject(plan)
@@ -10029,6 +10265,138 @@ def test_pr_loop_resume_hybrid_history_prefers_metadata_ledger_over_legacy_markd
     assert "[item-1]" in gemini_prompt
     assert "Add a regression test before merge." in gemini_prompt
     assert "Keep the legacy fallback path." not in gemini_prompt
+
+
+def test_pr_loop_routes_unrecorded_head_advance_through_coder_before_reviewers(tmp_path):
+    old_item = UnresolvedReviewItem(
+        item_id="item-2",
+        reviewer="Google Gemini",
+        source_round=1,
+        text="Preserve the metadata-backed unresolved item on rerun.",
+        status="blocking",
+    )
+    old_coder_comment = _attach_round_metadata(
+        "Opened the PR.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        PostedRoundMetadata(
+            flow="pr",
+            role="coder",
+            agent="Claude",
+            round_number=1,
+            subject="old-sha",
+            prior_items=(),
+        ),
+    )
+    old_review_comment = _attach_round_metadata(
+        "Blocked.\n<!-- AGENT_STATE: blocking -->\n-- Google Gemini",
+        PostedRoundMetadata(
+            flow="pr",
+            role="reviewer",
+            agent="Gemini",
+            round_number=1,
+            subject="old-sha",
+            prior_items=(),
+            new_items=(old_item,),
+            state="blocking",
+        ),
+    )
+    runner = FakeRunner(
+        claude_outputs=[
+            structured_coder_followup(
+                summary="Addressed the recovered prior item.",
+                addressed_items=["item-2"],
+                tests_run=["python -m pytest tests/test_agent_loop.py -k unrecorded_head"],
+            )
+        ],
+        codex_outputs=[
+            structured_pr_review(
+                state="approved",
+                summary="Recovered item is resolved.",
+                prior_item_dispositions=[
+                    {"item_id": "item-2", "disposition": "resolved"},
+                ],
+            )
+        ],
+        pr_payload={
+            "headRefOid": "new-sha",
+            "comments": [
+                {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:00:00Z", "body": old_coder_comment},
+                {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:01:00Z", "body": old_review_comment},
+            ],
+        },
+    )
+    config = make_config(tmp_path, reviewer="codex")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    first_coder = command_index(runner.commands, ["claude"])
+    first_reviewer = command_index(runner.commands, ["codex", "exec"])
+    assert first_coder < first_reviewer
+    reviewer_prompt = runner.commands[first_reviewer][0][-1]
+    assert "[item-2]" in reviewer_prompt
+    assert "Preserve the metadata-backed unresolved item on rerun." in reviewer_prompt
+    posted_coder_comment = next(
+        comment["body"]
+        for comment in runner.pr_payload["comments"]
+        if "## Coder follow-up" in comment["body"]
+    )
+    match = re.search(r"<!--\s*AGENT_LOOP_META:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->", posted_coder_comment)
+    assert match is not None
+    metadata = _decode_round_metadata(match.group("payload"))
+    assert metadata.subject == "new-sha"
+    assert metadata.round_number == 2
+    assert [item.item_id for item in metadata.prior_items] == ["item-2"]
+
+
+def test_pr_loop_unrecorded_head_advance_prevents_empty_ledger_unknown_item_abort(tmp_path):
+    old_item = UnresolvedReviewItem(
+        item_id="item-2",
+        reviewer="Google Gemini",
+        source_round=1,
+        text="Carry this item instead of starting an empty ledger.",
+        status="blocking",
+    )
+    old_review_comment = _attach_round_metadata(
+        "Blocked.\n<!-- AGENT_STATE: blocking -->\n-- Google Gemini",
+        PostedRoundMetadata(
+            flow="pr",
+            role="reviewer",
+            agent="Gemini",
+            round_number=1,
+            subject="old-sha",
+            prior_items=(),
+            new_items=(old_item,),
+            state="blocking",
+        ),
+    )
+    runner = FakeRunner(
+        claude_outputs=[
+            structured_coder_followup(
+                summary="Classified the recovered item.",
+                addressed_items=["item-2"],
+            )
+        ],
+        codex_outputs=[
+            structured_pr_review(
+                state="approved",
+                summary="Old item is resolved.",
+                prior_item_dispositions=[
+                    {"item_id": "item-2", "disposition": "resolved"},
+                ],
+            )
+        ],
+        pr_payload={
+            "headRefOid": "new-sha",
+            "comments": [
+                {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:01:00Z", "body": old_review_comment},
+            ],
+        },
+    )
+    config = make_config(tmp_path, reviewer="codex")
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+    assert runner.claude_outputs == []
+    assert runner.codex_outputs == []
+    assert not any("unknown item" in comment.lower() for comment in runner.comments)
 
 
 def test_reconcile_human_requirements_ack_item_accepts_stored_structured_coder_followup():
