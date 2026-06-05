@@ -60,6 +60,7 @@ from coding_review_agent_loop.decomposition import (
     approved_plan_hash,
     find_existing_phase_implementation_handoff,
     format_decomposition_parent_summary,
+    format_one_shot_impl_handoff_comment,
     format_phase_implementation_handoff_comment,
     parse_plan_decomposition,
 )
@@ -12968,9 +12969,10 @@ def test_issue_loop_plan_first_can_implement_after_approval(tmp_path):
     switch_index = command_index(runner.commands, ["git", "switch", "main"])
     second_claude_index = command_index(runner.commands, ["claude", "--print"], start=first_claude_index + 1)
     assert first_claude_index < fetch_index < switch_index < second_claude_index
-    assert len(runner.comments) == 5
-    assert runner.comments[3].startswith("Implemented approved plan.")
-    assert runner.comments[4].startswith("**Review verdict:** Approved\n\nLGTM.")
+    assert len(runner.comments) == 6
+    assert "<!-- AGENT_PLAN_ONE_SHOT_IMPL:" in runner.comments[3]
+    assert runner.comments[4].startswith("Implemented approved plan.")
+    assert runner.comments[5].startswith("**Review verdict:** Approved\n\nLGTM.")
 
 
 def test_issue_loop_rejects_pr_without_issue_reference_in_body(tmp_path):
@@ -13023,6 +13025,264 @@ def test_issue_loop_plan_first_implementation_rejects_pr_without_issue_reference
 
     assert "Edit the PR description on GitHub" in str(excinfo.value)
     assert "rerun the orchestrator as `agent-loop pr 77` to continue the review" in str(excinfo.value)
+
+
+def test_issue_loop_plan_first_one_shot_posts_handoff_after_pr_creation(tmp_path):
+    plan = "Plan:\n- Make the change.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    runner = FakeRunner(
+        claude_outputs=[
+            plan,
+            "Implemented approved plan.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path)
+
+    assert (
+        run_issue_loop(runner, issue_number=56, config=config, plan_first=True, implement_after_approval=True)
+        == 0
+    )
+
+    handoff_comments = [c for c in runner.comments if "<!-- AGENT_PLAN_ONE_SHOT_IMPL:" in c]
+    assert len(handoff_comments) == 1
+    assert f"Plan hash: {approved_plan_hash(plan)}" in handoff_comments[0]
+    assert "Plan subject:" in handoff_comments[0]
+    assert "PR #77" in handoff_comments[0]
+
+
+def test_issue_loop_plan_first_one_shot_rerun_resumes_pr_loop(tmp_path):
+    plan = "Plan:\n- Make the change.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    handoff = format_one_shot_impl_handoff_comment(
+        parent_issue=56,
+        mode="implement-one-shot",
+        plan_hash=approved_plan_hash(plan),
+        plan_subject=_plan_subject(plan),
+        pr_number=77,
+        pr_head_sha="abc123",
+    )
+    runner = FakeRunner(
+        issue_comments=[
+            {
+                "author": {"login": "bot"},
+                "createdAt": "2026-05-23T00:00:00Z",
+                "body": _attach_round_metadata(
+                    plan,
+                    PostedRoundMetadata(
+                        flow="plan",
+                        role="coder",
+                        agent="Claude",
+                        round_number=1,
+                        subject=_plan_subject(plan),
+                    ),
+                ),
+            },
+            {
+                "author": {"login": "bot"},
+                "createdAt": "2026-05-23T00:00:01Z",
+                "body": _attach_round_metadata(
+                    "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+                    PostedRoundMetadata(
+                        flow="plan",
+                        role="reviewer",
+                        agent="Codex",
+                        round_number=1,
+                        subject=_plan_subject(plan),
+                        state="approved",
+                    ),
+                ),
+            },
+            {"author": {"login": "bot"}, "createdAt": "2026-05-23T00:00:02Z", "body": handoff},
+        ],
+        codex_outputs=[
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path)
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True, implement_after_approval=True) == 0
+
+    claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert len(claude_calls) == 0
+    assert any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
+
+
+def test_issue_loop_plan_first_one_shot_rerun_with_closed_pr_stops(tmp_path, capsys):
+    plan = "Plan:\n- Make the change.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    handoff = format_one_shot_impl_handoff_comment(
+        parent_issue=56,
+        mode="implement-one-shot",
+        plan_hash=approved_plan_hash(plan),
+        plan_subject=_plan_subject(plan),
+        pr_number=77,
+        pr_head_sha="abc123",
+    )
+    runner = FakeRunner(
+        issue_comments=[
+            {
+                "author": {"login": "bot"},
+                "createdAt": "2026-05-23T00:00:00Z",
+                "body": _attach_round_metadata(
+                    plan,
+                    PostedRoundMetadata(
+                        flow="plan",
+                        role="coder",
+                        agent="Claude",
+                        round_number=1,
+                        subject=_plan_subject(plan),
+                    ),
+                ),
+            },
+            {
+                "author": {"login": "bot"},
+                "createdAt": "2026-05-23T00:00:01Z",
+                "body": _attach_round_metadata(
+                    "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+                    PostedRoundMetadata(
+                        flow="plan",
+                        role="reviewer",
+                        agent="Codex",
+                        round_number=1,
+                        subject=_plan_subject(plan),
+                        state="approved",
+                    ),
+                ),
+            },
+            {"author": {"login": "bot"}, "createdAt": "2026-05-23T00:00:02Z", "body": handoff},
+        ],
+        pr_payload={"state": "CLOSED"},
+    )
+    config = make_config(tmp_path)
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True, implement_after_approval=True) == 0
+
+    output = capsys.readouterr().out
+    assert "PR #77" in output
+    assert "closed" in output
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+    assert not any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
+
+
+def test_issue_loop_plan_first_one_shot_rerun_hash_mismatch_reimplements(tmp_path):
+    plan = "Plan:\n- Make the change.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    old_plan = "Plan:\n- Old approach that was replaced.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    old_handoff = format_one_shot_impl_handoff_comment(
+        parent_issue=56,
+        mode="implement-one-shot",
+        plan_hash=approved_plan_hash(old_plan),
+        plan_subject=_plan_subject(old_plan),
+        pr_number=99,
+        pr_head_sha=None,
+    )
+    runner = FakeRunner(
+        issue_comments=[
+            {
+                "author": {"login": "bot"},
+                "createdAt": "2026-05-23T00:00:00Z",
+                "body": _attach_round_metadata(
+                    plan,
+                    PostedRoundMetadata(
+                        flow="plan",
+                        role="coder",
+                        agent="Claude",
+                        round_number=1,
+                        subject=_plan_subject(plan),
+                    ),
+                ),
+            },
+            {
+                "author": {"login": "bot"},
+                "createdAt": "2026-05-23T00:00:01Z",
+                "body": _attach_round_metadata(
+                    "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+                    PostedRoundMetadata(
+                        flow="plan",
+                        role="reviewer",
+                        agent="Codex",
+                        round_number=1,
+                        subject=_plan_subject(plan),
+                        state="approved",
+                    ),
+                ),
+            },
+            {"author": {"login": "bot"}, "createdAt": "2026-05-23T00:00:02Z", "body": old_handoff},
+        ],
+        claude_outputs=[
+            "Implemented approved plan.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path)
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True, implement_after_approval=True) == 0
+
+    claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert len(claude_calls) == 1
+    assert "Approved implementation plan" in claude_calls[0][-1]
+
+
+def test_issue_loop_plan_first_one_shot_rerun_pr_missing_issue_reference(tmp_path):
+    plan = "Plan:\n- Make the change.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    handoff = format_one_shot_impl_handoff_comment(
+        parent_issue=56,
+        mode="implement-one-shot",
+        plan_hash=approved_plan_hash(plan),
+        plan_subject=_plan_subject(plan),
+        pr_number=77,
+        pr_head_sha="abc123",
+    )
+    runner = FakeRunner(
+        issue_comments=[
+            {
+                "author": {"login": "bot"},
+                "createdAt": "2026-05-23T00:00:00Z",
+                "body": _attach_round_metadata(
+                    plan,
+                    PostedRoundMetadata(
+                        flow="plan",
+                        role="coder",
+                        agent="Claude",
+                        round_number=1,
+                        subject=_plan_subject(plan),
+                    ),
+                ),
+            },
+            {
+                "author": {"login": "bot"},
+                "createdAt": "2026-05-23T00:00:01Z",
+                "body": _attach_round_metadata(
+                    "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+                    PostedRoundMetadata(
+                        flow="plan",
+                        role="reviewer",
+                        agent="Codex",
+                        round_number=1,
+                        subject=_plan_subject(plan),
+                        state="approved",
+                    ),
+                ),
+            },
+            {"author": {"login": "bot"}, "createdAt": "2026-05-23T00:00:02Z", "body": handoff},
+        ],
+        pr_payload={
+            "number": 77,
+            "state": "OPEN",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "body": "No issue reference here.",
+        },
+    )
+    config = make_config(tmp_path)
+
+    with pytest.raises(AgentLoopError, match="does not reference issue #56") as excinfo:
+        run_issue_loop(runner, issue_number=56, config=config, plan_first=True, implement_after_approval=True)
+
+    assert "Edit the PR description on GitHub" in str(excinfo.value)
+    assert "rerun the orchestrator as `agent-loop pr 77` to continue the review" in str(excinfo.value)
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
 
 
 def test_is_clarification_request_detects_marker():
