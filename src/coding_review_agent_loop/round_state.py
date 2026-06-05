@@ -18,6 +18,7 @@ from .protocol import (
     ReviewItemDisposition,
     UnresolvedReviewItem,
 )
+from .unresolved_items import _apply_unresolved_item_dispositions
 
 ROUND_RESUME_MARKER_RE = re.compile(r"<!--\s*AGENT_LOOP_META:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->", re.I)
 
@@ -60,6 +61,7 @@ class ResumedReviewRound:
     next_unresolved_item_number: int
     ledger_may_be_incomplete: bool = False
     compact_prior_summaries: tuple[str, ...] = ()
+    unrecorded_head_advance: bool = False
 
 
 def _serialize_unresolved_item(item: UnresolvedReviewItem) -> dict[str, object]:
@@ -280,6 +282,125 @@ def _max_unresolved_item_number_from_records(records: Sequence[PostedRoundRecord
     return max_number
 
 
+def _active_pr_items(items: Sequence[UnresolvedReviewItem]) -> list[UnresolvedReviewItem]:
+    return [item for item in items if item.status in {"blocking", "same-pr"}]
+
+
+def _append_active_pr_new_items(
+    active_items: list[UnresolvedReviewItem],
+    records: Sequence[PostedRoundRecord],
+) -> None:
+    seen_item_ids = {item.item_id for item in active_items}
+    for record in records:
+        for item in record.metadata.new_items:
+            if item.status not in {"blocking", "same-pr"} or item.item_id in seen_item_ids:
+                continue
+            active_items.append(item)
+            seen_item_ids.add(item.item_id)
+
+
+def _aggregate_record_dispositions(
+    records: Sequence[PostedRoundRecord],
+) -> dict[str, list[ReviewItemDisposition]]:
+    dispositions_by_item: dict[str, list[ReviewItemDisposition]] = {}
+    for record in records:
+        for disposition in record.metadata.dispositions:
+            dispositions_by_item.setdefault(disposition.item_id, []).append(disposition)
+    return dispositions_by_item
+
+
+def _recover_unrecorded_pr_head_advance(
+    records: Sequence[PostedRoundRecord],
+    *,
+    head_sha: str,
+) -> ResumedReviewRound | None:
+    prior_records = [record for record in records if record.metadata.subject != head_sha]
+    if not prior_records:
+        return None
+    latest_prior_subject = prior_records[-1].metadata.subject
+    selection = _select_current_round_records(records, subject=latest_prior_subject)
+    if selection is None:
+        return None
+
+    current_round_records = selection.current_round_records
+    anchor_metadata = selection.anchor_record.metadata
+    latest_coder_record = next(
+        (
+            record
+            for record in reversed(current_round_records)
+            if record.metadata.role == "coder"
+        ),
+        None,
+    )
+    reviewer_records_after_coder = tuple(
+        record
+        for record in current_round_records
+        if record.metadata.role == "reviewer"
+        and (latest_coder_record is None or record.index > latest_coder_record.index)
+    )
+    all_reviewer_records = tuple(
+        record for record in current_round_records if record.metadata.role == "reviewer"
+    )
+
+    if latest_coder_record is not None and not reviewer_records_after_coder:
+        round_number = latest_coder_record.metadata.round_number
+        recovered_items = _active_pr_items(latest_coder_record.metadata.prior_items)
+        coder_output = latest_coder_record.metadata.raw_structured_coder_response or latest_coder_record.body
+        compact_prior_summaries = latest_coder_record.metadata.compact_prior_summaries
+    elif latest_coder_record is not None:
+        round_number = latest_coder_record.metadata.round_number
+        recovered_items, _future_items = _apply_unresolved_item_dispositions(
+            latest_coder_record.metadata.prior_items,
+            _aggregate_record_dispositions(reviewer_records_after_coder),
+            retain_future=False,
+        )
+        recovered_items = _active_pr_items(recovered_items)
+        _append_active_pr_new_items(recovered_items, reviewer_records_after_coder)
+        coder_output = latest_coder_record.metadata.raw_structured_coder_response or latest_coder_record.body
+        compact_prior_summaries = latest_coder_record.metadata.compact_prior_summaries
+    elif all_reviewer_records:
+        round_number = anchor_metadata.round_number
+        recovered_items, _future_items = _apply_unresolved_item_dispositions(
+            anchor_metadata.prior_items,
+            _aggregate_record_dispositions(all_reviewer_records),
+            retain_future=False,
+        )
+        recovered_items = _active_pr_items(recovered_items)
+        _append_active_pr_new_items(recovered_items, all_reviewer_records)
+        coder_output = None
+        compact_prior_summaries = ()
+    else:
+        return None
+
+    if not recovered_items:
+        return None
+
+    return ResumedReviewRound(
+        round_number=round_number,
+        prior_items=tuple(recovered_items),
+        coder_output=coder_output,
+        completed_reviews=(),
+        next_unresolved_item_number=_max_unresolved_item_number_from_records(records) + 1,
+        ledger_may_be_incomplete=True,
+        compact_prior_summaries=compact_prior_summaries,
+        unrecorded_head_advance=True,
+    )
+
+
+def _latest_prior_pr_subject_is_coherent(records: Sequence[PostedRoundRecord], *, head_sha: str) -> bool:
+    prior_records = [record for record in records if record.metadata.subject != head_sha]
+    if not prior_records:
+        return True
+    latest_prior_subject = prior_records[-1].metadata.subject
+    selection = _select_current_round_records(records, subject=latest_prior_subject)
+    if selection is None:
+        return False
+    return any(
+        record.metadata.role in {"coder", "reviewer"}
+        for record in selection.current_round_records
+    )
+
+
 def _plan_subject(text: str) -> str:
     return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
@@ -297,7 +418,19 @@ def _resume_pr_round(
         return None
     selection = _select_current_round_records(records, subject=head_sha)
     if selection is None:
-        return None
+        recovered = _recover_unrecorded_pr_head_advance(records, head_sha=head_sha)
+        if recovered is not None:
+            return recovered
+        if _latest_prior_pr_subject_is_coherent(records, head_sha=head_sha):
+            return None
+        latest_prior_subject = records[-1].metadata.subject
+        raise AgentLoopError(
+            "PR head advanced without a recorded coder follow-up and the metadata-backed "
+            "handoff could not be recovered safely. "
+            f"Current head: {head_sha}. Latest recorded metadata subject: {latest_prior_subject}. "
+            "Rerun after posting a valid structured coder follow-up for the current head "
+            "or repair the metadata-backed handoff."
+        )
     current_round_records = selection.current_round_records
     anchor_metadata = selection.anchor_record.metadata
     latest_coder_record = next(
