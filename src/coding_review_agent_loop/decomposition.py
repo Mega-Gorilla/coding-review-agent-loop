@@ -24,6 +24,10 @@ PHASE_IMPLEMENTATION_MARKER_RE = re.compile(
     r"<!--\s*AGENT_PLAN_PHASE_IMPLEMENTATION:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->",
     re.I,
 )
+ONE_SHOT_IMPL_HANDOFF_MARKER_RE = re.compile(
+    r"<!--\s*AGENT_PLAN_ONE_SHOT_IMPL:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->",
+    re.I,
+)
 ISSUE_NUMBER_RE = re.compile(r"/issues/(\d+)(?:\b|$)|#(\d+)\b")
 
 
@@ -81,6 +85,16 @@ class PhaseImplementationHandoffMetadata:
     automation: str
     child_issue_number: int
     child_issue_url: str | None
+
+
+@dataclass(frozen=True)
+class OneShotImplementationHandoffMetadata:
+    parent_issue: int
+    plan_hash: str
+    plan_subject: str
+    mode: str
+    pr_number: int
+    pr_head_sha: str | None
 
 
 def approved_plan_hash(approved_plan: str) -> str:
@@ -601,5 +615,117 @@ def post_decomposition_parent_summary(
             mode=mode,
             plan_hash=plan_hash,
             created=created,
+        ),
+    )
+
+
+def _encode_one_shot_impl_handoff_metadata(
+    metadata: OneShotImplementationHandoffMetadata,
+) -> str:
+    return _encode_json_payload(
+        {
+            "parent_issue": metadata.parent_issue,
+            "plan_hash": metadata.plan_hash,
+            "plan_subject": metadata.plan_subject,
+            "mode": metadata.mode,
+            "pr_number": metadata.pr_number,
+            "pr_head_sha": metadata.pr_head_sha,
+        }
+    )
+
+
+def _decode_one_shot_impl_handoff_metadata(encoded: str) -> OneShotImplementationHandoffMetadata:
+    payload = _decode_json_payload(encoded, marker_name="AGENT_PLAN_ONE_SHOT_IMPL")
+    try:
+        pr_head_sha = payload.get("pr_head_sha")
+        return OneShotImplementationHandoffMetadata(
+            parent_issue=int(payload["parent_issue"]),
+            plan_hash=str(payload["plan_hash"]),
+            plan_subject=str(payload.get("plan_subject") or ""),
+            mode=str(payload["mode"]),
+            pr_number=int(payload["pr_number"]),
+            pr_head_sha=pr_head_sha if isinstance(pr_head_sha, str) else None,
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AgentLoopError("Invalid AGENT_PLAN_ONE_SHOT_IMPL payload.") from exc
+
+
+def find_existing_one_shot_impl_handoff(
+    comments: Sequence[object],
+    *,
+    parent_issue: int,
+    plan_hash: str,
+    mode: str,
+) -> OneShotImplementationHandoffMetadata | None:
+    found: OneShotImplementationHandoffMetadata | None = None
+    for comment in comments:
+        body = getattr(comment, "body", None)
+        if not isinstance(body, str):
+            continue
+        for match in ONE_SHOT_IMPL_HANDOFF_MARKER_RE.finditer(body):
+            metadata = _decode_one_shot_impl_handoff_metadata(match.group("payload"))
+            if (
+                metadata.parent_issue == parent_issue
+                and metadata.plan_hash == plan_hash
+                and metadata.mode == mode
+            ):
+                found = metadata
+    return found
+
+
+def format_one_shot_impl_handoff_comment(
+    *,
+    parent_issue: int,
+    mode: str,
+    plan_hash: str,
+    plan_subject: str,
+    pr_number: int,
+    pr_head_sha: str | None,
+) -> str:
+    metadata = OneShotImplementationHandoffMetadata(
+        parent_issue=parent_issue,
+        plan_hash=plan_hash,
+        plan_subject=plan_subject,
+        mode=mode,
+        pr_number=pr_number,
+        pr_head_sha=pr_head_sha,
+    )
+    lines = [
+        f"Approved plan for issue #{parent_issue} handed off to PR #{pr_number} for one-shot implementation.",
+        "",
+        f"Mode: {mode}",
+        f"Plan hash: {plan_hash}",
+        f"Plan subject: {plan_subject}",
+        "",
+        "Parent reruns will resume the PR review loop for this PR instead of re-implementing.",
+        "",
+        f"<!-- AGENT_PLAN_ONE_SHOT_IMPL: {_encode_one_shot_impl_handoff_metadata(metadata)} -->",
+        "-- coding-review-agent-loop",
+    ]
+    return "\n".join(lines)
+
+
+def post_one_shot_impl_handoff_comment(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    parent_issue: int,
+    mode: str,
+    plan_hash: str,
+    plan_subject: str,
+    pr_number: int,
+    pr_head_sha: str | None,
+) -> None:
+    post_issue_comment(
+        runner,
+        config=config,
+        issue_number=parent_issue,
+        body=format_one_shot_impl_handoff_comment(
+            parent_issue=parent_issue,
+            mode=mode,
+            plan_hash=plan_hash,
+            plan_subject=plan_subject,
+            pr_number=pr_number,
+            pr_head_sha=pr_head_sha,
         ),
     )

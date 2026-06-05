@@ -26,9 +26,11 @@ from .decomposition import (
     approved_plan_hash,
     create_decomposition_child_issues,
     find_existing_decomposition,
+    find_existing_one_shot_impl_handoff,
     find_existing_phase_implementation_handoff,
     parse_plan_decomposition,
     post_decomposition_parent_summary,
+    post_one_shot_impl_handoff_comment,
     post_phase_implementation_handoff_comment,
 )
 from .errors import AgentLoopError, QuotaResetExceededError, UnknownPriorItemDispositionError
@@ -38,6 +40,7 @@ from .github import (
     get_issue_context,
     get_pr_checks,
     get_pr_review_context,
+    get_pr_state,
     merge_pr,
     post_issue_comment,
     post_pr_comment,
@@ -1069,6 +1072,8 @@ def _implement_approved_issue(
     issue_context: IssueContext,
     coder_session_id: str | None,
     usage_context: RunUsageContext,
+    one_shot_parent_issue: int | None = None,
+    plan_subject: str | None = None,
 ) -> int:
     coder_name = agent_display_name(config.coder)
     sync_coder_base_before_implementation(config, runner)
@@ -1105,6 +1110,18 @@ def _implement_approved_issue(
         pr_number=pr_number,
         issue_number=issue_number,
     )
+    initial_pr_context = get_pr_review_context(runner, config=config, pr_number=pr_number)
+    if one_shot_parent_issue is not None:
+        post_one_shot_impl_handoff_comment(
+            runner,
+            config=config,
+            parent_issue=one_shot_parent_issue,
+            mode="implement-one-shot",
+            plan_hash=approved_plan_hash(approved_plan),
+            plan_subject=plan_subject or "",
+            pr_number=pr_number,
+            pr_head_sha=initial_pr_context.metadata.head_sha,
+        )
     post_pr_comment(
         runner,
         config=config,
@@ -1116,7 +1133,7 @@ def _implement_approved_issue(
                 role="coder",
                 agent=coder_name,
                 round_number=1,
-                subject=str(get_pr_review_context(runner, config=config, pr_number=pr_number).metadata.head_sha or "unknown"),
+                subject=str(initial_pr_context.metadata.head_sha or "unknown"),
                 prior_items=(),
             ),
         ),
@@ -1704,6 +1721,53 @@ def _run_plan_first_loop(
                 )
 
             if mode == "implement-one-shot":
+                plan_hash = approved_plan_hash(current_plan)
+                plan_subject = _plan_subject(current_plan)
+                existing_handoff = find_existing_one_shot_impl_handoff(
+                    issue_context.comments,
+                    parent_issue=issue_number,
+                    plan_hash=plan_hash,
+                    mode="implement-one-shot",
+                )
+                if existing_handoff is not None:
+                    try:
+                        pr_state = get_pr_state(
+                            runner, config=config, pr_number=existing_handoff.pr_number
+                        )
+                    except AgentLoopError:
+                        raise AgentLoopError(
+                            f"PR #{existing_handoff.pr_number} recorded in the one-shot handoff "
+                            f"for issue #{issue_number} cannot be found in {config.repo}. "
+                            f"Verify the PR exists and rerun "
+                            f"`agent-loop pr {existing_handoff.pr_number}` directly to continue, "
+                            "or remove the handoff comment from the issue and rerun to re-implement."
+                        )
+                    if pr_state == "OPEN":
+                        log(
+                            config,
+                            f"Issue #{issue_number}: resuming PR #{existing_handoff.pr_number} "
+                            "review for already-handed-off plan",
+                        )
+                        validate_pr_references_issue(
+                            runner,
+                            config=config,
+                            pr_number=existing_handoff.pr_number,
+                            issue_number=issue_number,
+                        )
+                        return run_pr_loop(
+                            runner,
+                            pr_number=existing_handoff.pr_number,
+                            config=config,
+                            issue_context=issue_context,
+                            usage_context=usage_context,
+                        )
+                    else:
+                        print(
+                            f"Issue #{issue_number} approved plan was handed off to "
+                            f"PR #{existing_handoff.pr_number}, which is "
+                            f"{pr_state.lower()}. Nothing to resume."
+                        )
+                        return 0
                 return _implement_approved_issue(
                     runner,
                     issue_number=issue_number,
@@ -1713,6 +1777,8 @@ def _run_plan_first_loop(
                     issue_context=issue_context,
                     coder_session_id=coder_session_id,
                     usage_context=usage_context,
+                    one_shot_parent_issue=issue_number,
+                    plan_subject=plan_subject,
                 )
             raise AgentLoopError(f"Unknown plan execution mode: {mode}")
 

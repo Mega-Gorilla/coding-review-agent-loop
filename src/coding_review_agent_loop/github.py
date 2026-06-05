@@ -102,6 +102,34 @@ def detect_repo(runner: Runner, cwd: Path, gh_cmd: str) -> str:
     return repo
 
 
+def get_pr_state(runner: Runner, *, config: AgentLoopConfig, pr_number: int) -> str:
+    """Return the PR state string ('OPEN', 'CLOSED', or 'MERGED').
+
+    Raises AgentLoopError when the state cannot be determined (non-zero exit or
+    absent state field), so the caller can wrap it with issue-level context.
+    """
+    result = runner.run(
+        [
+            config.gh_cmd,
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            config.repo,
+            "--json",
+            "number,state,url",
+        ],
+        cwd=active_workdir(config),
+    )
+    if result.returncode != 0:
+        raise AgentLoopError(f"Unable to determine state of PR #{pr_number}.")
+    data = json.loads(result.stdout or "{}")
+    state = _optional_str(data.get("state"))
+    if not state:
+        raise AgentLoopError(f"Unable to determine state of PR #{pr_number}.")
+    return state
+
+
 def validate_open_pr(runner: Runner, *, config: AgentLoopConfig, pr_number: int) -> None:
     if config.dry_run:
         return
