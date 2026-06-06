@@ -1009,7 +1009,10 @@ def _run_validated_agent(
                     repair_kwargs: dict[str, object] = {"expected_kind": repair_expected_kind}
                     if repair_unresolved_item_ids is not None:
                         repair_kwargs["unresolved_item_ids"] = tuple(repair_unresolved_item_ids)
-                    if repair_surfaced_requirement_ids is not None:
+                    if (
+                        repair_expected_kind == "coder_followup"
+                        and repair_surfaced_requirement_ids is not None
+                    ):
                         repair_kwargs["surfaced_requirement_ids"] = tuple(repair_surfaced_requirement_ids)
                     if isinstance(exc, UnknownPriorItemDispositionError):
                         repair_kwargs["allowed_prior_item_ids"] = exc.allowed_ids

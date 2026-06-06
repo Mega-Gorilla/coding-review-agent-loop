@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import coding_review_agent_loop.orchestrator as orchestrator
+from coding_review_agent_loop.agents.base import with_public_response_file_instruction
 from coding_review_agent_loop.agents.claude import (
     BACKEND as CLAUDE_BACKEND,
     _normalize_claude_usage,
@@ -7192,6 +7193,7 @@ def test_structured_plan_revision_transient_terms_before_footer_runs_repair(tmp_
             validate=_validate_plan_revision_response,
             use_repair=True,
             repair_expected_kind="plan_revision",
+            repair_surfaced_requirement_ids=("Requirement 1",),
         )
 
     assert response.text == repaired_revision
@@ -14666,6 +14668,18 @@ def test_claude_review_loop_prefers_public_response_file_over_stdout(tmp_path):
     assert "PUBLIC RESPONSE FILE:" in claude_call[-1]
     assert "/coding-review-agent-loop/responses/OWNER-REPO/claude/" in claude_call[-1]
     assert runner.comments == ["**Review verdict:** Approved\n\nLGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude"]
+
+
+def test_public_response_file_instruction_mentions_plan_revision_human_ack_exception(tmp_path):
+    prompt = with_public_response_file_instruction(
+        "Review the PR.",
+        tmp_path / "response.md",
+    )
+
+    assert "For structured plan revisions only" in prompt
+    assert "<!-- HUMAN_REQUIREMENTS_ADDRESSED -->" in prompt
+    assert "`### Human requirements` section after the JSON object" in prompt
+    assert "before the\n`AGENT_PLAN_STATE` footer" in prompt
 
 
 def test_codex_task_loop_rejects_empty_task_text(tmp_path):
