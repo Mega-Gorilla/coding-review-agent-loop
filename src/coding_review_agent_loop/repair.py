@@ -168,6 +168,12 @@ You are a format-repair assistant. An AI agent produced a code review, plan revi
 - If the same plan-review concern or paraphrase appears in same_plan_followups and future_followups, keep same_plan_followups/current-plan work and drop the duplicate future_followups entry.
 - If the same plan-review concern or paraphrase appears in blocking_plan_issues and future_followups, keep blocking_plan_issues and drop the duplicate future_followups entry.
 
+## DEDUPE RULES (Format A):
+- Same-PR follow-ups and Future follow-ups are mutually exclusive.
+- If the same PR-review concern or paraphrase appears in blocking_items and same_pr_followups, keep blocking_items and drop the duplicate same_pr_followups entry.
+- If the same PR-review concern or paraphrase appears in same_pr_followups and future_followups, keep same_pr_followups/current-PR work and drop the duplicate future_followups entry.
+- If the same PR-review concern or paraphrase appears in blocking_items and future_followups, keep blocking_items and drop the duplicate future_followups entry.
+
 ## STATE RULES (Format C):
 ### APPROVED: remaining_items=[]
 ### BLOCKING: remaining_items is non-empty

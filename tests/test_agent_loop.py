@@ -2676,6 +2676,45 @@ def test_parse_review_dedupes_same_pr_items_that_duplicate_blocking_items():
     assert parsed.followups.same_pr == ()
 
 
+def test_parse_review_prefers_same_pr_over_duplicate_future_followups():
+    review = """
+    Blocking on a local cleanup.
+
+    ### Same-PR follow-ups
+    - Fix the duplicated prompt wording introduced by this PR.
+
+    ### Future follow-ups
+    - `Fix the duplicated prompt wording introduced by this PR.`
+
+    <!-- AGENT_STATE: blocking -->
+    -- OpenAI Codex
+    """
+
+    parsed = parse_review(review, reviewer="OpenAI Codex")
+
+    assert [item.text for item in parsed.followups.same_pr] == [
+        "Fix the duplicated prompt wording introduced by this PR."
+    ]
+    assert parsed.followups.future == ()
+
+
+def test_parse_review_prefers_blocking_over_duplicate_future_followups():
+    review = (
+        "Blocking issue summary."
+        + blocking_issues("Fix the indentation in the touched `orchestrator.py` call.")
+        + "\n\n### Future follow-ups\n"
+        + "- fix the indentation in the touched orchestrator.py call\n"
+        + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+    )
+
+    parsed = parse_review(review, reviewer="OpenAI Codex")
+
+    assert [item.text for item in parsed.blocking_items] == [
+        "Fix the indentation in the touched `orchestrator.py` call."
+    ]
+    assert parsed.followups.future == ()
+
+
 def test_parse_structured_pr_review_dedupes_exact_normalized_same_pr_duplicates():
     review = json.dumps(
         {
@@ -2697,6 +2736,42 @@ def test_parse_structured_pr_review_dedupes_exact_normalized_same_pr_duplicates(
         "- Add the missing `share.html` CSS update."
     ]
     assert parsed.followups.same_pr == ()
+
+
+def test_parse_structured_pr_review_prefers_same_pr_over_duplicate_future_followups():
+    review = structured_pr_review(
+        state="blocking",
+        summary="Blocked on local cleanup.",
+        blocking_items=[],
+        same_pr_followups=["Fix the duplicated prompt wording introduced by this PR."],
+        future_followups=["fix the duplicated prompt wording introduced by this PR"],
+    )
+
+    parsed = parse_pr_review(review, reviewer="OpenAI Codex")
+
+    assert parsed.blocking_items == ()
+    assert [item.text for item in parsed.followups.same_pr] == [
+        "Fix the duplicated prompt wording introduced by this PR."
+    ]
+    assert parsed.followups.future == ()
+
+
+def test_parse_structured_pr_review_prefers_blocking_over_duplicate_future_followups():
+    review = structured_pr_review(
+        state="blocking",
+        summary="Blocked.",
+        blocking_items=["Fix the indentation in the touched `orchestrator.py` call."],
+        same_pr_followups=[],
+        future_followups=["fix the indentation in the touched orchestrator.py call"],
+    )
+
+    parsed = parse_pr_review(review, reviewer="OpenAI Codex")
+
+    assert [item.text for item in parsed.blocking_items] == [
+        "Fix the indentation in the touched `orchestrator.py` call."
+    ]
+    assert parsed.followups.same_pr == ()
+    assert parsed.followups.future == ()
 
 
 def test_parse_structured_pr_review_keeps_near_but_distinct_same_pr_items():
@@ -2721,6 +2796,32 @@ def test_parse_structured_pr_review_keeps_near_but_distinct_same_pr_items():
     ]
     assert [item.text for item in parsed.followups.same_pr] == [
         "Add the missing share.html print CSS update."
+    ]
+
+
+def test_pr_239_style_followup_classification_fixture():
+    review = """
+    PR #239-style cleanup classification.
+
+    ### Same-PR follow-ups
+    - orchestrator.py line 2100: subject=current_pr_subject is indented 4 extra spaces relative to sibling keyword arguments.
+    - _repair_prior_item_ids_instruction duplicates the same-round warning/context in the repair prompt.
+
+    ### Future follow-ups
+    - _round_ledger_may_be_incomplete cross-subject branch could be bounded if comment history grows very large.
+
+    <!-- AGENT_STATE: blocking -->
+    -- OpenAI Codex
+    """
+
+    followups = parse_approved_followups(review, reviewer="OpenAI Codex")
+
+    assert [item.text for item in followups.same_pr] == [
+        "orchestrator.py line 2100: subject=current_pr_subject is indented 4 extra spaces relative to sibling keyword arguments.",
+        "_repair_prior_item_ids_instruction duplicates the same-round warning/context in the repair prompt.",
+    ]
+    assert [item.text for item in followups.future] == [
+        "_round_ledger_may_be_incomplete cross-subject branch could be bounded if comment history grows very large."
     ]
 
 
@@ -4168,7 +4269,11 @@ def test_config_and_cli_default_to_full_pr_review_context(tmp_path):
 
 
 def test_compact_pr_review_prompt_preserves_context_and_omits_raw_history(tmp_path):
-    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    config = make_config(
+        tmp_path,
+        approved_followups="fix-and-summarize",
+        reviewer=("codex", "gemini"),
+    )
     issue_context = _compact_pr_issue_context()
     prompt = build_review_prompt(
         77,
@@ -4226,6 +4331,11 @@ def test_compact_pr_review_prompt_preserves_context_and_omits_raw_history(tmp_pa
     assert "[item-4] resolved: old resolved item" in prefix
     assert "Coder says the compact mode wiring is complete." in prefix
     assert "python -m pytest tests/test_agent_loop.py -k compact_pr" in prefix
+    assert "Use Future follow-ups only for independent later work" in prefix
+    assert "broader scaling or performance refinement\nfor very large histories" in prefix
+    assert "indentation or\nstyle cleanup in touched code" in prefix
+    assert "duplicated helper or prompt wording introduced by this PR" in prefix
+    assert "Before approving, self-check every `future_followups` entry" in prefix
     assert "Review compact PR context mode." in tail
     assert "Head SHA: abc123" in tail
     assert "gh pr diff 77 --repo OWNER/REPO" in tail
@@ -8549,6 +8659,12 @@ def test_review_prompt_requests_future_followups_when_processed(tmp_path):
     assert "### Future follow-ups" in prompt
     assert "legacy heading `### Non-blocking follow-ups`" in prompt
     assert "Do not use the Same-PR follow-ups section in this mode" in prompt
+    assert "Use Future follow-ups only for independent later work" in prompt
+    assert "broader scaling or performance refinement\nfor very large histories" in prompt
+    assert "Do not put small cleanup in touched or directly\nadjacent code under Future follow-ups" in prompt
+    assert "Indentation/style cleanup in touched\ncode should be omitted unless worth requiring before merge" in prompt
+    assert "duplicated helper\nor prompt wording introduced by this PR should make the review blocking" in prompt
+    assert "Before returning approved, self-check that no Future follow-up is trivial or\nlocal to the current PR" in prompt
     assert "Use blocking only for issues that should prevent merge." in prompt
 
 
@@ -8563,6 +8679,11 @@ def test_review_prompt_allows_same_pr_followups_for_fix_modes(tmp_path):
     assert "### Future follow-ups" in prompt
     assert "small, localized, low-risk cleanup" in prompt
     assert "narrow current-PR cleanup in files already\ntouched by this PR or directly adjacent code" in prompt
+    assert "indentation or\nstyle cleanup in touched code" in prompt
+    assert "duplicated helper or prompt wording introduced by this PR" in prompt
+    assert "Use Future follow-ups only for independent later work" in prompt
+    assert "broader scaling or performance refinement\nfor very large histories" in prompt
+    assert "Do not put small cleanup in touched or directly\nadjacent code under Future follow-ups" in prompt
     assert "Keep `blocking_items` and `same_pr_followups` mutually exclusive." in prompt
     assert (
         "Use\n`blocking_items` for defects, missing requirements, regressions, security\n"
@@ -8575,18 +8696,18 @@ def test_review_prompt_allows_same_pr_followups_for_fix_modes(tmp_path):
     assert "Same-PR follow-ups may appear only in blocking reviews." in prompt
     assert "will be sent back to Claude and require another review" in prompt
     assert "Approved means there are no blocking issues, no Same-PR follow-ups, and no\ncarried-forward prior unresolved items left active" in prompt
-    assert "If you return `<!-- AGENT_STATE: blocking -->`, do not use structured\nFuture follow-ups" in prompt
+    assert "Before returning approved, self-check that no\nFuture follow-up is trivial or local to the current PR" in prompt
+    assert "If you return `<!-- AGENT_STATE: blocking -->`, do not use structured Future\nfollow-ups" in prompt
     assert (
-        "`blocking_items` and `same_pr_followups` must be mutually exclusive: a single\n"
-        "concern belongs in exactly one list."
+        "`blocking_items`, `same_pr_followups`, and `future_followups` have distinct\n"
+        "roles."
     ) in prompt
+    assert "small, localized cleanup in touched files or directly adjacent code" in prompt
+    assert "`future_followups` are independent later work that remains valid after this PR\nis merge-ready." in prompt
+    assert "Before approving, self-check every `future_followups` entry" in prompt
     assert (
-        "Put merge-blocking defects, missing\nrequirements, regressions, security "
-        "issues, and consistency gaps in\n`blocking_items`"
-    ) in prompt
-    assert (
-        "put only small Same-PR cleanup that is not itself the reason\n"
-        "the PR is blocked in `same_pr_followups`."
+        "`blocking_items` are merge-blocking defects, missing requirements,\n"
+        "regressions, security issues, or consistency gaps."
     ) in prompt
 
 
@@ -15180,6 +15301,17 @@ def test_repair_prompt_includes_plan_review_dedupe_guidance():
         in _REPAIR_PROMPT
     )
     assert "keep blocking_plan_issues and drop the duplicate future_followups entry" in _REPAIR_PROMPT
+
+
+def test_repair_prompt_includes_pr_review_dedupe_guidance():
+    assert "## DEDUPE RULES (Format A):" in _REPAIR_PROMPT
+    assert "Same-PR follow-ups and Future follow-ups are mutually exclusive" in _REPAIR_PROMPT
+    assert "keep blocking_items and drop the duplicate same_pr_followups entry" in _REPAIR_PROMPT
+    assert (
+        "keep same_pr_followups/current-PR work and drop the duplicate future_followups entry"
+        in _REPAIR_PROMPT
+    )
+    assert "keep blocking_items and drop the duplicate future_followups entry" in _REPAIR_PROMPT
 
 
 def test_repair_prompt_includes_skip_trust_in_cli_invocation():

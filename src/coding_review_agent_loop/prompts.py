@@ -1501,11 +1501,17 @@ exactly one top-level JSON object and no prose or code fences before it:
   ]
 }}
 
-`blocking_items` and `same_pr_followups` must be mutually exclusive: a single
-concern belongs in exactly one list. Put merge-blocking defects, missing
-requirements, regressions, security issues, and consistency gaps in
-`blocking_items`; put only small Same-PR cleanup that is not itself the reason
-the PR is blocked in `same_pr_followups`.
+`blocking_items`, `same_pr_followups`, and `future_followups` have distinct
+roles. `blocking_items` are merge-blocking defects, missing requirements,
+regressions, security issues, or consistency gaps. `same_pr_followups` are
+small, localized cleanup in touched files or directly adjacent code that should
+be handled before merge, but is not itself a major correctness blocker.
+`future_followups` are independent later work that remains valid after this PR
+is merge-ready. Keep `blocking_items` and `same_pr_followups` mutually
+exclusive: a single current-PR concern belongs in exactly one of those lists.
+Before approving, self-check every `future_followups` entry: if it is trivial
+or local to the current PR, reclassify it as `same_pr_followups` and return
+`blocking`, or omit it if it is only a nit.
 
 After the JSON object, include only:
 1. optional `<!-- HUMAN_REQUIREMENTS_RESOLVED -->`
@@ -1611,6 +1617,9 @@ Contradictory forms like `same-pr: none`, `still blocking: none`, and `future fo
 Non-blocking follow-ups sections in approved reviews; this run is configured to
 ignore approved-review follow-up sections. Mark the review blocking instead
 when cleanup should be fixed before merge.
+Trivial style nits in touched code should be omitted unless worth requiring
+before merge; if required, they are current-PR work and the review is blocking,
+not approved with Future follow-ups.
 """
     elif config.approved_followups.startswith("fix-and-"):
         followup_guidance = f"""For small, localized, low-risk cleanup that must still be fixed in this PR
@@ -1620,8 +1629,10 @@ under this exact heading:
 ### Same-PR follow-ups
 
 Use Same-PR follow-ups only for narrow current-PR cleanup in files already
-touched by this PR or directly adjacent code. Do not use this section for
-larger redesigns, broad refactors, or independent future work.
+touched by this PR or directly adjacent code. This includes indentation or
+style cleanup in touched code when it is worth requiring before merge, and
+duplicated helper or prompt wording introduced by this PR. Do not use this
+section for larger redesigns, broad refactors, or independent future work.
 Keep `blocking_items` and `same_pr_followups` mutually exclusive. Use
 `blocking_items` for defects, missing requirements, regressions, security
 issues, or consistency gaps that make the PR not merge-ready. Use
@@ -1637,13 +1648,20 @@ three highest-value items under this exact heading:
 
 ### Future follow-ups
 
+Use Future follow-ups only for independent later work that is not necessary for
+this PR to be merge-ready, such as a broader scaling or performance refinement
+for very large histories. Do not put small cleanup in touched or directly
+adjacent code under Future follow-ups; classify it as Same-PR if it should be
+done before merge, otherwise omit it.
 Approved means there are no blocking issues, no Same-PR follow-ups, and no
 carried-forward prior unresolved items left active for this round.
 Same-PR follow-ups will be sent back to {coder_name} and require another review
-round before final approval. Do not put trivial style nits in either follow-up
-section. If you return `<!-- AGENT_STATE: blocking -->`, do not use structured
-Future follow-ups; keep all required current-round work in the blocking review
-so it is not missed during revision.
+round before final approval. Before returning approved, self-check that no
+Future follow-up is trivial or local to the current PR; reclassify it as
+Same-PR or omit it. Do not put trivial style nits in either follow-up section.
+If you return `<!-- AGENT_STATE: blocking -->`, do not use structured Future
+follow-ups; keep all required current-round work in the blocking review so it
+is not missed during revision.
 """
     else:
         followup_guidance = """If you approve but notice substantial work that is better handled separately in
@@ -1652,8 +1670,17 @@ heading:
 
 ### Future follow-ups
 
+Use Future follow-ups only for independent later work that is not necessary for
+this PR to be merge-ready, such as a broader scaling or performance refinement
+for very large histories. Do not put small cleanup in touched or directly
+adjacent code under Future follow-ups. Indentation/style cleanup in touched
+code should be omitted unless worth requiring before merge; duplicated helper
+or prompt wording introduced by this PR should make the review blocking if it
+must be fixed now.
 Do not use the Same-PR follow-ups section in this mode; mark the review blocking
 instead when small or local cleanup should be fixed before merge.
+Before returning approved, self-check that no Future follow-up is trivial or
+local to the current PR; reclassify it as blocking current-PR work or omit it.
 The legacy heading `### Non-blocking follow-ups` is still accepted as future
 follow-ups for compatibility, but prefer `### Future follow-ups`.
 """
@@ -1790,6 +1817,9 @@ Contradictory forms like `same-pr: none`, `still blocking: none`, and `future fo
 Non-blocking follow-ups sections in approved reviews; this run is configured to
 ignore approved-review follow-up sections. Mark the review blocking instead
 when cleanup should be fixed before merge.
+Trivial style nits in touched code should be omitted unless worth requiring
+before merge; if required, they are current-PR work and the review is blocking,
+not approved with Future follow-ups.
 """
     elif config.approved_followups.startswith("fix-and-"):
         followup_guidance = f"""For small, localized, low-risk cleanup that must still be fixed in this PR
@@ -1799,8 +1829,10 @@ under this exact heading:
 ### Same-PR follow-ups
 
 Use Same-PR follow-ups only for narrow current-PR cleanup in files already
-touched by this PR or directly adjacent code. Do not use this section for
-larger redesigns, broad refactors, or independent future work.
+touched by this PR or directly adjacent code. This includes indentation or
+style cleanup in touched code when it is worth requiring before merge, and
+duplicated helper or prompt wording introduced by this PR. Do not use this
+section for larger redesigns, broad refactors, or independent future work.
 Keep `blocking_items` and `same_pr_followups` mutually exclusive. Use
 `blocking_items` for defects, missing requirements, regressions, security
 issues, or consistency gaps that make the PR not merge-ready. Use
@@ -1816,13 +1848,20 @@ three highest-value items under this exact heading:
 
 ### Future follow-ups
 
+Use Future follow-ups only for independent later work that is not necessary for
+this PR to be merge-ready, such as a broader scaling or performance refinement
+for very large histories. Do not put small cleanup in touched or directly
+adjacent code under Future follow-ups; classify it as Same-PR if it should be
+done before merge, otherwise omit it.
 Approved means there are no blocking issues, no Same-PR follow-ups, and no
 carried-forward prior unresolved items left active for this round.
 Same-PR follow-ups will be sent back to {coder_name} and require another review
-round before final approval. Do not put trivial style nits in either follow-up
-section. If you return `<!-- AGENT_STATE: blocking -->`, do not use structured
-Future follow-ups; keep all required current-round work in the blocking review
-so it is not missed during revision.
+round before final approval. Before returning approved, self-check that no
+Future follow-up is trivial or local to the current PR; reclassify it as
+Same-PR or omit it. Do not put trivial style nits in either follow-up section.
+If you return `<!-- AGENT_STATE: blocking -->`, do not use structured Future
+follow-ups; keep all required current-round work in the blocking review so it
+is not missed during revision.
 """
     else:
         followup_guidance = """If you approve but notice substantial work that is better handled separately in
@@ -1831,8 +1870,17 @@ heading:
 
 ### Future follow-ups
 
+Use Future follow-ups only for independent later work that is not necessary for
+this PR to be merge-ready, such as a broader scaling or performance refinement
+for very large histories. Do not put small cleanup in touched or directly
+adjacent code under Future follow-ups. Indentation/style cleanup in touched
+code should be omitted unless worth requiring before merge; duplicated helper
+or prompt wording introduced by this PR should make the review blocking if it
+must be fixed now.
 Do not use the Same-PR follow-ups section in this mode; mark the review blocking
 instead when small or local cleanup should be fixed before merge.
+Before returning approved, self-check that no Future follow-up is trivial or
+local to the current PR; reclassify it as blocking current-PR work or omit it.
 The legacy heading `### Non-blocking follow-ups` is still accepted as future
 follow-ups for compatibility, but prefer `### Future follow-ups`.
 """
@@ -1909,11 +1957,17 @@ exactly one top-level JSON object and no prose or code fences before it:
   ]
 }}
 
-`blocking_items` and `same_pr_followups` must be mutually exclusive: a single
-concern belongs in exactly one list. Put merge-blocking defects, missing
-requirements, regressions, security issues, and consistency gaps in
-`blocking_items`; put only small Same-PR cleanup that is not itself the reason
-the PR is blocked in `same_pr_followups`.
+`blocking_items`, `same_pr_followups`, and `future_followups` have distinct
+roles. `blocking_items` are merge-blocking defects, missing requirements,
+regressions, security issues, or consistency gaps. `same_pr_followups` are
+small, localized cleanup in touched files or directly adjacent code that should
+be handled before merge, but is not itself a major correctness blocker.
+`future_followups` are independent later work that remains valid after this PR
+is merge-ready. Keep `blocking_items` and `same_pr_followups` mutually
+exclusive: a single current-PR concern belongs in exactly one of those lists.
+Before approving, self-check every `future_followups` entry: if it is trivial
+or local to the current PR, reclassify it as `same_pr_followups` and return
+`blocking`, or omit it if it is only a nit.
 
 After the JSON object, include only:
 1. optional `<!-- HUMAN_REQUIREMENTS_RESOLVED -->`
