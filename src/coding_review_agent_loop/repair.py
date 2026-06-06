@@ -318,6 +318,7 @@ CORRECT repair — output plan_revision JSON first, preserve the human requireme
 Notes:
 - When repairing plan_revision, do not output coder_followup even if the original contains a Human requirements section.
 - If the original plan revision includes <!-- HUMAN_REQUIREMENTS_ADDRESSED --> and a ### Human requirements section, preserve both after the JSON and before <!-- AGENT_PLAN_STATE: blocking -->.
+- If the original plan revision does not include both that marker and section, do not fabricate a human requirements acknowledgement.
 
 ## WORKED EXAMPLE 5 — coder follow-up with no signed human requirements:
 
@@ -487,7 +488,7 @@ Only genuinely independent later work should remain in future_followups on an ap
 1. Start DIRECTLY with { — no prose, no markdown fences.
 2. After }: For approved `pr_review` or `plan_review` that now includes `<!-- HUMAN_REQUIREMENTS_RESOLVED -->`,
    place that marker immediately after the JSON and before the AGENT_STATE/AGENT_PLAN_STATE footer.
-   For `plan_revision`, place the optional signed human requirements acknowledgement before the footer.
+   For `plan_revision`, place the optional signed human requirements acknowledgement before the footer only when it was present in the malformed original.
    Then: <!-- AGENT_STATE: X --> (pr_review or coder_followup) OR <!-- AGENT_PLAN_STATE: X --> (plan_review or plan_revision). DIFFERENT MARKERS.
 3. JSON "state" matches X. Then: -- Agent Name. STOP. Nothing else.
 

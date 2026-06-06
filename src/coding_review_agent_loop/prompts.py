@@ -646,9 +646,12 @@ Use this mandatory structured JSON response format:
 The orchestrator will normalize structured plan revisions into canonical
 markdown for stored plan state, reviewer prompts, subject hashing, and resume.
 Your response must start with exactly one top-level JSON object, with no prose
-or code fences before it. Put the `AGENT_PLAN_STATE` footer immediately after
-the JSON, make the footer state match the JSON state, and include only your
-standalone signature after the footer.
+or code fences before it. If signed human requirements are present, put
+`<!-- HUMAN_REQUIREMENTS_ADDRESSED -->` and a `### Human requirements` section
+after the JSON object and before the `AGENT_PLAN_STATE` footer. Otherwise, put
+the `AGENT_PLAN_STATE` footer immediately after the JSON. Make the footer state
+match the JSON state, and include only your standalone signature after the
+footer.
 """
 
 
@@ -1194,9 +1197,12 @@ Use this mandatory structured JSON response format:
 The orchestrator will normalize structured plan revisions into canonical
 markdown for stored plan state, reviewer prompts, subject hashing, and resume.
 Your response must start with exactly one top-level JSON object, with no prose
-or code fences before it. Put the `AGENT_PLAN_STATE` footer immediately after
-the JSON, make the footer state match the JSON state, and include only your
-standalone signature after the footer.
+or code fences before it. If signed human requirements are present, put
+`<!-- HUMAN_REQUIREMENTS_ADDRESSED -->` and a `### Human requirements` section
+after the JSON object and before the `AGENT_PLAN_STATE` footer. Otherwise, put
+the `AGENT_PLAN_STATE` footer immediately after the JSON. Make the footer state
+match the JSON state, and include only your standalone signature after the
+footer.
 
 This is planning round {round_number}. End your final response with exactly one
 planning marker:
