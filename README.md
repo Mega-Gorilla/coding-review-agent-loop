@@ -127,11 +127,12 @@ follow-up`. `Future follow-ups` are accepted only in approved plan reviews and
 are reconciled with the final approved plan instead of reopening planning. If
 `--approved-followups=issue` or `fix-and-issue` is enabled and implementation
 will continue after approval, those plan-stage future follow-ups are filed as
-separate issues before implementation starts. Otherwise they are summarized in
-the planning-complete comment with an explicit note that they are not carried
-into PR review. Planning `item-*` IDs visible in issue history are not PR prior
-review items unless they are repeated in the active PR unresolved-item ledger.
-By default the loop posts the approved plan summary and stops; add
+separate issues before implementation starts. If implementation continues but
+issue filing is disabled, they are summarized in the planning-complete comment
+with an explicit note that they are not carried into PR review. Planning
+`item-*` IDs visible in issue history are not PR prior review items unless they
+are repeated in the active PR unresolved-item ledger. By default the loop posts
+the approved plan summary and stops without filing follow-up issues; add
 `--implement-after-approval` to continue into the normal PR flow:
 
 ```bash

@@ -198,12 +198,14 @@ item exactly once. Use `same-plan` for required current-plan refinements,
 reserve `future follow-up` for approved plan reviews only, and expect approved
 future follow-ups to be reconciled with the final approved plan instead of
 reopening planning. In `--approved-followups=issue` and `fix-and-issue` modes,
-plan-stage future follow-ups are filed as separate issues before implementation
-starts; otherwise they are summarized inline with a note that they are not
-carried into PR review. Planning `item-*` IDs visible in issue history are not
-PR prior review items unless they appear in the active PR unresolved-item
-ledger. By default the loop posts an approved consensus summary to the issue
-and stops. Add `--implement-after-approval` to continue into the normal
+when implementation will continue after approval, plan-stage future follow-ups
+are filed as separate issues before implementation starts. If implementation
+continues but issue filing is disabled, they are summarized inline with a note
+that they are not carried into PR review. Planning `item-*` IDs visible in issue
+history are not PR prior review items unless they appear in the active PR
+unresolved-item ledger. By default the loop posts an approved consensus summary
+to the issue and stops without filing follow-up issues. Add
+`--implement-after-approval` to continue into the normal
 implementation and PR review loop using the approved plan:
 
 ```bash

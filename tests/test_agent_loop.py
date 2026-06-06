@@ -12854,7 +12854,7 @@ def test_issue_loop_plan_first_rejects_contradictory_disposition_before_extra_re
     assert len(claude_calls) == 2
 
 
-def test_issue_loop_plan_first_approved_future_followups_are_summarized_without_reopening(tmp_path):
+def test_issue_loop_plan_first_plan_only_does_not_publish_approved_future_followups(tmp_path):
     runner = FakeRunner(
         claude_outputs=[
             "Initial plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
@@ -12872,11 +12872,17 @@ def test_issue_loop_plan_first_approved_future_followups_are_summarized_without_
 
     assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
 
-    assert "Approved plan future follow-ups:" in runner.comments[-1]
-    assert "document parser helper reuse separately" in runner.comments[-1]
-    assert "Add a later cleanup to dedupe shared prompt rendering." in runner.comments[-1]
-    assert "not carried into PR review" in runner.comments[-1]
-    assert "not PR prior review items" in runner.comments[-1]
+    assert runner.issues == []
+    summary = runner.comments[-1]
+    assert summary.startswith("Planning complete for issue #56.")
+    assert "Approved plan future follow-ups:" in summary
+    assert "document parser helper reuse separately" in summary
+    assert "Add a later cleanup to dedupe shared prompt rendering." in summary
+    assert "not carried into PR review" in summary
+    assert "not PR prior review items" in summary
+    assert "Filed future follow-up issues:" not in summary
+    assert "<!-- AGENT_PLAN_APPROVED_FOLLOWUPS:" in summary
+    assert "mode=summarize" in summary
 
 
 def test_issue_loop_plan_first_files_approved_future_followups_before_implementation(tmp_path):
@@ -12982,6 +12988,7 @@ def test_issue_loop_plan_first_deduplicates_plan_followup_issues_across_reviewer
     runner = FakeRunner(
         gemini_outputs=[
             "Plan:\n- Make the change.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Google Gemini",
+            "Implemented approved plan.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Google Gemini",
         ],
         codex_outputs=[
             structured_plan_review(
@@ -12990,6 +12997,7 @@ def test_issue_loop_plan_first_deduplicates_plan_followup_issues_across_reviewer
                     "**Remote validation**: Validate explicit workdir git remotes against the target repo.",
                 ],
             ),
+            structured_pr_review(state="approved", summary="LGTM."),
         ],
         claude_outputs=[
             structured_plan_review(
@@ -12999,6 +13007,7 @@ def test_issue_loop_plan_first_deduplicates_plan_followup_issues_across_reviewer
                 ],
                 reviewer="Anthropic Claude",
             ),
+            structured_pr_review(state="approved", summary="LGTM.", reviewer="Anthropic Claude"),
         ],
         issue_urls=["https://github.com/OWNER/REPO/issues/99"],
     )
@@ -13009,14 +13018,26 @@ def test_issue_loop_plan_first_deduplicates_plan_followup_issues_across_reviewer
         approved_followups="issue",
     )
 
-    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+    assert (
+        run_issue_loop(
+            runner,
+            issue_number=56,
+            config=config,
+            plan_first=True,
+            implement_after_approval=True,
+        )
+        == 0
+    )
 
     assert len(runner.issues) == 1
     body = runner.issues[0]["body"]
     assert "Reviewers: Codex, Claude" in body
     assert "Original plan item ID(s): item-1, item-2" in body
     assert body.count("**Remote validation**") == 3
-    assert "Reconciliation: 1 filed, 1 deduplicated, 0 skipped by cap." in runner.comments[-1]
+    assert any(
+        "Reconciliation: 1 filed, 1 deduplicated, 0 skipped by cap." in comment
+        for comment in runner.comments
+    )
 
 
 def test_issue_loop_plan_first_plan_followup_marker_prevents_duplicate_issue_creation(tmp_path):
@@ -13031,6 +13052,12 @@ def test_issue_loop_plan_first_plan_followup_marker_prevents_duplicate_issue_cre
         source_status="future",
     )
     runner = FakeRunner(
+        claude_outputs=[
+            "Implemented approved plan.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            structured_pr_review(state="approved", summary="LGTM."),
+        ],
         issue_comments=[
             {
                 "author": {"login": "bot"},
@@ -13079,10 +13106,22 @@ def test_issue_loop_plan_first_plan_followup_marker_prevents_duplicate_issue_cre
     )
     config = make_config(tmp_path, approved_followups="issue")
 
-    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+    assert (
+        run_issue_loop(
+            runner,
+            issue_number=56,
+            config=config,
+            plan_first=True,
+            implement_after_approval=True,
+        )
+        == 0
+    )
 
     assert runner.issues == []
-    assert runner.comments == []
+    assert not any(
+        "Filed future follow-up issues:" in comment or "Approved plan future follow-ups:" in comment
+        for comment in runner.comments
+    )
 
 
 def test_issue_loop_plan_first_decompose_only_creates_child_issues(tmp_path):

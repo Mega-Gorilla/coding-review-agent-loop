@@ -92,7 +92,7 @@ from .protocol import (
     validate_structured_coder_followup,
     validate_structured_plan_revision,
 )
-from .protocol import ApprovedFollowup, parse_review
+from .protocol import parse_review
 from .repair import attempt_repair
 from .runner import Runner
 from .usage import RunUsageContext, UsageMetadata, estimate_usage
@@ -1632,6 +1632,9 @@ def _run_plan_first_loop(
         if all_approved and not must_fix_items:
             plan_hash = approved_plan_hash(current_plan)
             plan_subject = _plan_subject(current_plan)
+            mode = config.plan_execution_mode
+            if implement_after_approval:
+                mode = "implement-one-shot"
             _publish_plan_approved_followups(
                 runner,
                 config=config,
@@ -1641,10 +1644,8 @@ def _run_plan_first_loop(
                 plan_subject=plan_subject,
                 issue_comments=issue_context.comments,
                 sources=approved_future_followup_sources,
+                allow_issue_filing=mode != "plan-only",
             )
-            mode = config.plan_execution_mode
-            if implement_after_approval:
-                mode = "implement-one-shot"
             if mode == "plan-only":
                 print(
                     f"Issue #{issue_number} plan approved by {format_agent_list(configured_reviewers)}."

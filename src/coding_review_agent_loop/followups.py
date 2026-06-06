@@ -827,8 +827,9 @@ def _publish_plan_approved_followups(
     plan_subject: str,
     issue_comments: Sequence[object],
     sources: Sequence[PlanApprovedFollowupSource],
+    allow_issue_filing: bool = True,
 ) -> bool:
-    filing_enabled = config.approved_followups in ("issue", "fix-and-issue")
+    filing_enabled = allow_issue_filing and config.approved_followups in ("issue", "fix-and-issue")
     mode = "issue" if filing_enabled else "summarize"
     if _has_plan_approved_followups_marker(
         issue_comments,
