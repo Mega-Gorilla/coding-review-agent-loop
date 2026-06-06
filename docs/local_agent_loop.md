@@ -196,10 +196,17 @@ If earlier blocking or same-plan items are still open, reviewers must also add
 `### Prior unresolved plan item dispositions` and disposition every carried
 item exactly once. Use `same-plan` for required current-plan refinements,
 reserve `future follow-up` for approved plan reviews only, and expect approved
-future follow-ups to be summarized with the final approved plan instead of
-reopening planning. By default the loop posts an approved consensus summary to
-the issue and stops. Add `--implement-after-approval` to continue into the
-normal implementation and PR review loop using the approved plan:
+future follow-ups to be reconciled with the final approved plan instead of
+reopening planning. In `--approved-followups=issue` and `fix-and-issue` modes,
+when implementation will continue after approval, plan-stage future follow-ups
+are filed as separate issues before implementation starts. If implementation
+continues but issue filing is disabled, they are summarized inline with a note
+that they are not carried into PR review. Planning `item-*` IDs visible in issue
+history are not PR prior review items unless they appear in the active PR
+unresolved-item ledger. By default the loop posts an approved consensus summary
+to the issue and stops without filing follow-up issues. Add
+`--implement-after-approval` to continue into the normal
+implementation and PR review loop using the approved plan:
 
 ```bash
 agent-loop issue 56 --repo OWNER/REPO --plan-first --implement-after-approval
@@ -676,6 +683,11 @@ be fixed before merge.
 - `issue`: create GitHub issues for up to three future follow-ups, then comment with the created issue links.
 - `fix-and-summarize`: send same-PR follow-ups to the coder for another review round, then summarize future follow-ups after final approval.
 - `fix-and-issue`: send same-PR follow-ups to the coder for another review round, then create issues for future follow-ups after final approval and comment with the created issue links.
+
+For plan-first runs that continue into implementation, issue-filing modes apply
+twice at different lifecycle points: planning-stage future follow-ups are filed
+before implementation begins, while PR-stage approved-review future follow-ups
+are filed only after final PR approval.
 
 Bullets and prose paragraphs inside the `Same-PR follow-ups`, `Future follow-ups`,
 and legacy `Non-blocking follow-ups` sections are parsed; each section ends at
