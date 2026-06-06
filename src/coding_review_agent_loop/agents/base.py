@@ -95,7 +95,10 @@ AGENT_CLARIFY markers in the file, as requested above.
 For structured responses, the file must start directly with {{, contain exactly
 one structured JSON object, then the required footer marker and signature. Do
 not put the stdout filtering marker, headings, prose, or markdown code fences in
-the response file.
+the response file. For structured plan revisions only, if signed human
+requirements are present, place `<!-- HUMAN_REQUIREMENTS_ADDRESSED -->` and the
+`### Human requirements` section after the JSON object and before the
+`AGENT_PLAN_STATE` footer.
 """
 
 

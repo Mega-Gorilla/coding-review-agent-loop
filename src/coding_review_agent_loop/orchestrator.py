@@ -71,6 +71,7 @@ from .prompts import (
     render_coder_human_requirements_prompt_context,
 )
 from .protocol import (
+    HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
     ParsedPlanReview,
     ParsedReview,
     PUBLIC_RESPONSE_MARKER,
@@ -80,6 +81,7 @@ from .protocol import (
     UnresolvedReviewItem,
     human_requirements_resolved,
     is_clarification_request,
+    parse_human_requirements_acknowledgement,
     parse_agent_state,
     parse_plan_review,
     parse_plan_review_items,
@@ -217,6 +219,7 @@ PUBLIC_RESPONSE_ARTIFACT_PREFIX_RE = re.compile(
 STRUCTURED_PUBLIC_RESPONSE_KINDS = frozenset(
     {"plan_review", "pr_review", "coder_followup", "plan_revision"}
 )
+PLAN_REVISION_FOOTER_RE = re.compile(r"(?m)^<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*-->\s*$")
 STRUCTURED_FENCE_RE = re.compile(
     r"```(?:json)?[ \t]*\n(?P<body>\s*\{.*?\}\s*)```",
     re.I | re.S,
@@ -601,6 +604,145 @@ def _recover_valid_structured_candidate(
     return None
 
 
+@dataclass(frozen=True)
+class _HumanRequirementsRecoveryContext:
+    surfaced_requirement_ids: tuple[str, ...]
+    requires_direct_discussion_ack: bool
+
+
+def _split_reconstructable_plan_revision_response(text: str) -> tuple[str, str] | None:
+    normalized, _status = normalize_response_file_structured_text(text)
+    decoder = json.JSONDecoder()
+    stripped = normalized.strip()
+    try:
+        payload, end = decoder.raw_decode(stripped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict) or payload.get("kind") != "plan_revision":
+        return None
+    json_prefix = stripped[:end].rstrip()
+    trailing = stripped[end:].lstrip()
+    footer_match = PLAN_REVISION_FOOTER_RE.search(trailing)
+    if footer_match is None:
+        return None
+    before_footer = trailing[: footer_match.start()].strip()
+    if before_footer:
+        return None
+    footer_and_signature = trailing[footer_match.start() :].strip()
+    return json_prefix, footer_and_signature
+
+
+def _plan_revision_missing_human_acknowledgement(
+    text: str,
+    *,
+    context: _HumanRequirementsRecoveryContext,
+) -> bool:
+    if not context.surfaced_requirement_ids and not context.requires_direct_discussion_ack:
+        return False
+    if _split_reconstructable_plan_revision_response(text) is None:
+        return False
+    parsed = parse_human_requirements_acknowledgement(text)
+    return not parsed.marker_present or not parsed.section_present
+
+
+def _human_requirements_acknowledgement_blocks(text: str) -> list[str]:
+    lines = text.splitlines()
+    blocks: list[str] = []
+    for index, line in enumerate(lines):
+        if HUMAN_REQUIREMENTS_ADDRESSED_MARKER not in line:
+            continue
+        block_lines = [line.strip()]
+        section_seen = False
+        for next_line in lines[index + 1 :]:
+            if section_seen and (
+                PLAN_REVISION_FOOTER_RE.match(next_line.strip())
+                or re.match(r"^--\s+\S", next_line.strip())
+                or next_line.lstrip().startswith("{")
+            ):
+                break
+            block_lines.append(next_line.rstrip())
+            if re.match(r"^\s*###\s+Human requirements\s*$", next_line, re.I):
+                section_seen = True
+        blocks.append("\n".join(block_lines).strip())
+    return blocks
+
+
+def _recover_plan_revision_human_requirements_acknowledgement(
+    result: AgentResult,
+    *,
+    validate: Callable[[str], object],
+    context: _HumanRequirementsRecoveryContext,
+    config: AgentLoopConfig,
+    agent_name: str,
+) -> tuple[str, object] | None:
+    split = _split_reconstructable_plan_revision_response(result.text)
+    if split is None:
+        log(
+            config,
+            f"{agent_name}: refused plan_revision human-requirements recovery because "
+            "the public response file is not a reconstructable structured plan revision",
+        )
+        return None
+
+    valid_blocks: list[tuple[str, str]] = []
+    invalid_count = 0
+    incomplete_count = 0
+    for source, source_text in _candidate_source_texts(result):
+        for block in _human_requirements_acknowledgement_blocks(source_text):
+            parsed = parse_human_requirements_acknowledgement(block)
+            if not parsed.marker_present or not parsed.section_present:
+                incomplete_count += 1
+                continue
+            try:
+                validate_human_requirements_acknowledgement(
+                    block,
+                    surfaced_requirement_ids=context.surfaced_requirement_ids,
+                    requires_direct_discussion_ack=context.requires_direct_discussion_ack,
+                )
+            except AgentLoopError:
+                invalid_count += 1
+                continue
+            valid_blocks.append((source, block))
+
+    unique_valid: list[tuple[str, str]] = []
+    seen_blocks: set[str] = set()
+    for source, block in valid_blocks:
+        if block in seen_blocks:
+            continue
+        seen_blocks.add(block)
+        unique_valid.append((source, block))
+
+    if len(unique_valid) != 1:
+        if len(unique_valid) > 1:
+            reason = "multiple distinct valid acknowledgement blocks were present"
+        elif invalid_count:
+            reason = "captured acknowledgement evidence failed human-requirements validation"
+        elif incomplete_count:
+            reason = "captured acknowledgement evidence lacked the marker or section"
+        else:
+            reason = "no captured acknowledgement evidence was present"
+        log(config, f"{agent_name}: refused plan_revision human-requirements recovery because {reason}")
+        return None
+
+    json_prefix, footer_and_signature = split
+    source, block = unique_valid[0]
+    recovered_text = f"{json_prefix}\n{block}\n{footer_and_signature}"
+    try:
+        marker_value = validate(recovered_text)
+    except AgentLoopError as exc:
+        log(
+            config,
+            f"{agent_name}: refused plan_revision human-requirements recovery because "
+            f"the reconstructed response did not validate ({exc})",
+        )
+        return None
+    log(
+        config,
+        f"{agent_name}: recovered plan_revision human-requirements acknowledgement from {source}",
+    )
+    return recovered_text, marker_value
+
+
 def _retry_delay(config: AgentLoopConfig, retry_index: int) -> int:
     delays = config.agent_retry_backoff_seconds
     if not delays:
@@ -692,6 +834,7 @@ def _run_validated_agent(
     repair_expected_kind: str | None = None,
     repair_unresolved_item_ids: Sequence[str] | None = None,
     repair_surfaced_requirement_ids: Sequence[str] | None = None,
+    repair_requires_direct_discussion_ack: bool = False,
     repair_allowed_prior_item_ids: Sequence[str] | None = None,
     ledger_incomplete: bool = False,
 ) -> ValidatedAgentResponse:
@@ -819,6 +962,42 @@ def _run_validated_agent(
                             usage=usage,
                         )
                 if (
+                    repair_expected_kind == "plan_revision"
+                    and result.response_file_text
+                    and not isinstance(exc, UnknownPriorItemDispositionError)
+                    and _plan_revision_missing_human_acknowledgement(
+                        result.text,
+                        context=_HumanRequirementsRecoveryContext(
+                            surfaced_requirement_ids=tuple(
+                                repair_surfaced_requirement_ids or ()
+                            ),
+                            requires_direct_discussion_ack=repair_requires_direct_discussion_ack,
+                        ),
+                    )
+                ):
+                    recovered = _recover_plan_revision_human_requirements_acknowledgement(
+                        result,
+                        validate=validate,
+                        context=_HumanRequirementsRecoveryContext(
+                            surfaced_requirement_ids=tuple(
+                                repair_surfaced_requirement_ids or ()
+                            ),
+                            requires_direct_discussion_ack=repair_requires_direct_discussion_ack,
+                        ),
+                        config=config,
+                        agent_name=agent_name,
+                    )
+                    if recovered is not None:
+                        recovered_text, marker_value = recovered
+                        if usage_record is not None:
+                            usage_record.validation_status = "validated"
+                        return ValidatedAgentResponse(
+                            text=recovered_text,
+                            session_id=result.session_id,
+                            marker_value=marker_value,
+                            usage=usage,
+                        )
+                if (
                     use_repair
                     and not public_text_is_transient
                     and not (
@@ -830,7 +1009,10 @@ def _run_validated_agent(
                     repair_kwargs: dict[str, object] = {"expected_kind": repair_expected_kind}
                     if repair_unresolved_item_ids is not None:
                         repair_kwargs["unresolved_item_ids"] = tuple(repair_unresolved_item_ids)
-                    if repair_surfaced_requirement_ids is not None:
+                    if (
+                        repair_expected_kind == "coder_followup"
+                        and repair_surfaced_requirement_ids is not None
+                    ):
                         repair_kwargs["surfaced_requirement_ids"] = tuple(repair_surfaced_requirement_ids)
                     if isinstance(exc, UnknownPriorItemDispositionError):
                         repair_kwargs["allowed_prior_item_ids"] = exc.allowed_ids
@@ -1801,6 +1983,11 @@ def _run_plan_first_loop(
             f"Planning round {round_number}: {coder_name} revising the plan "
             f"(context mode: {context_mode}{context_reason})",
         )
+        plan_revision_human_requirements_context = render_coder_human_requirements_prompt_context(
+            issue_context.human_requirements,
+            requirement_scope="planning requirements",
+            full_omission_fallback="Fetch the issue discussion directly before revising the plan.",
+        )
         plan_response = _run_validated_agent(
             runner,
             agent=config.coder,
@@ -1836,6 +2023,12 @@ def _run_plan_first_loop(
             usage_context=usage_context,
             use_repair=True,
             repair_expected_kind="plan_revision",
+            repair_surfaced_requirement_ids=(
+                plan_revision_human_requirements_context.surfaced_requirement_ids
+            ),
+            repair_requires_direct_discussion_ack=(
+                plan_revision_human_requirements_context.requires_direct_discussion_ack
+            ),
             repair_allowed_prior_item_ids=tuple(item.item_id for item in must_fix_items),
             ledger_incomplete=round_ledger_incomplete,
         )

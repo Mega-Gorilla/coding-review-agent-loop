@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 import coding_review_agent_loop.orchestrator as orchestrator
+from coding_review_agent_loop.agents.base import with_public_response_file_instruction
 from coding_review_agent_loop.agents.claude import (
     BACKEND as CLAUDE_BACKEND,
     _normalize_claude_usage,
@@ -3923,6 +3924,9 @@ def test_plan_revision_prompt_includes_unresolved_ledger_and_required_dispositio
     assert '"kind": "plan_revision"' in prompt
     assert '"plan_steps"' in prompt
     assert "normalize structured plan revisions into canonical\nmarkdown for stored plan state" in prompt
+    assert "<!-- HUMAN_REQUIREMENTS_ADDRESSED -->" in prompt
+    assert "### Human requirements" in prompt
+    assert "after the JSON object and before the `AGENT_PLAN_STATE` footer" in prompt
     assert "Use this mandatory structured JSON response format" in prompt
     assert "fall back to markdown" not in prompt.lower()
 
@@ -4085,6 +4089,9 @@ def test_compact_plan_revision_prompt_preserves_context_and_omits_raw_prose(tmp_
     assert "Blocking review payload." in tail
     assert "Planning round: 2" in tail
     assert "subject-b" in tail
+    assert "<!-- HUMAN_REQUIREMENTS_ADDRESSED -->" in prompt
+    assert "### Human requirements" in prompt
+    assert "after the JSON object and before the `AGENT_PLAN_STATE` footer" in prompt
 
 
 def test_full_plan_prompt_still_includes_raw_issue_comments(tmp_path):
@@ -6772,6 +6779,289 @@ def test_run_validated_agent_recovers_fenced_coder_followup_from_raw_stdout(tmp_
     assert response.text == valid_followup
 
 
+def _plan_revision_validate_with_human_requirements(human_requirements):
+    return lambda text: orchestrator._validate_response_with_human_requirements(
+        text,
+        marker_validator=lambda revised_text: _validate_plan_revision_response(
+            revised_text,
+            unresolved_items=(),
+        ),
+        human_requirements=human_requirements,
+        requirement_scope="planning requirements",
+        full_omission_fallback="Fetch the issue discussion directly before revising the plan.",
+    )
+
+
+def test_run_validated_agent_recovers_plan_revision_human_ack_from_message_text(tmp_path):
+    human_requirements = (
+        HumanReviewRequirement(
+            source_type="Issue comment",
+            author="wwind123",
+            created_at="2026-06-05T00:00:00Z",
+            url="https://github.com/OWNER/REPO/issues/237#issuecomment-1",
+            body="Cover stdout acknowledgement recovery.",
+        ),
+    )
+    context = render_coder_human_requirements_prompt_context(
+        human_requirements,
+        requirement_scope="planning requirements",
+        full_omission_fallback="Fetch the issue discussion directly before revising the plan.",
+    )
+    response_file = structured_plan_revision(reviewer="Anthropic Claude")
+    acknowledgement = (
+        "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n\n"
+        "### Human requirements\n"
+        "- Requirement 1: The revised plan covers stdout acknowledgement recovery.\n"
+    )
+    message_text = structured_plan_revision(
+        reviewer="Anthropic Claude",
+        human_requirements=acknowledgement,
+    )
+    runner = FakeRunner(
+        claude_outputs=[(message_text, 0)],
+        public_response_outputs=[{"text": response_file}],
+    )
+    config = make_config(tmp_path, coder="claude", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
+        response = _run_validated_agent(
+            runner,
+            agent="claude",
+            config=config,
+            prompt="Revise the plan.",
+            marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+            validate=_plan_revision_validate_with_human_requirements(human_requirements),
+            use_repair=True,
+            repair_expected_kind="plan_revision",
+            repair_surfaced_requirement_ids=context.surfaced_requirement_ids,
+            repair_requires_direct_discussion_ack=context.requires_direct_discussion_ack,
+        )
+
+    repair_mock.assert_not_called()
+    assert "<!-- HUMAN_REQUIREMENTS_ADDRESSED -->" in response.text
+    assert "### Human requirements" in response.text
+    assert response.text.index("### Human requirements") < response.text.index(
+        "<!-- AGENT_PLAN_STATE: blocking -->"
+    )
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n",
+        "\n### Human requirements\n- Requirement 1: Covered.\n",
+        "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n\n### Human requirements\n- Requirement 99: Covered.\n",
+        "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n\n### Human requirements\n- Requirement 1: Covered.\n- Requirement 1: Covered again.\n",
+    ],
+)
+def test_run_validated_agent_refuses_invalid_plan_revision_human_ack_evidence(tmp_path, evidence):
+    human_requirements = (
+        HumanReviewRequirement(
+            source_type="Issue comment",
+            author="wwind123",
+            created_at="2026-06-05T00:00:00Z",
+            url="https://github.com/OWNER/REPO/issues/237#issuecomment-1",
+            body="Cover stdout acknowledgement recovery.",
+        ),
+    )
+    context = render_coder_human_requirements_prompt_context(
+        human_requirements,
+        requirement_scope="planning requirements",
+        full_omission_fallback="Fetch the issue discussion directly before revising the plan.",
+    )
+    runner = FakeRunner(
+        claude_outputs=[
+            (
+                structured_plan_revision(
+                    reviewer="Anthropic Claude",
+                    human_requirements=evidence,
+                ),
+                0,
+            )
+        ],
+        public_response_outputs=[{"text": structured_plan_revision(reviewer="Anthropic Claude")}],
+    )
+    config = make_config(tmp_path, coder="claude", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=None) as repair_mock:
+        with pytest.raises(AgentLoopError, match="No review result was recorded"):
+            _run_validated_agent(
+                runner,
+                agent="claude",
+                config=config,
+                prompt="Revise the plan.",
+                marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+                validate=_plan_revision_validate_with_human_requirements(human_requirements),
+                use_repair=True,
+                repair_expected_kind="plan_revision",
+                repair_surfaced_requirement_ids=context.surfaced_requirement_ids,
+                repair_requires_direct_discussion_ack=context.requires_direct_discussion_ack,
+            )
+
+    repair_mock.assert_called_once()
+
+
+def test_run_validated_agent_refuses_plan_revision_missing_direct_discussion_ack(tmp_path):
+    context = render_coder_human_requirements_prompt_context(
+        (),
+        requirement_scope="planning requirements",
+        full_omission_fallback="Fetch the issue discussion directly before revising the plan.",
+    )
+    acknowledgement = (
+        "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n\n"
+        "### Human requirements\n"
+        "- The prompt omitted the detailed signed human requirements.\n"
+    )
+    runner = FakeRunner(
+        claude_outputs=[
+            (
+                structured_plan_revision(
+                    reviewer="Anthropic Claude",
+                    human_requirements=acknowledgement,
+                ),
+                0,
+            )
+        ],
+        public_response_outputs=[{"text": structured_plan_revision(reviewer="Anthropic Claude")}],
+    )
+    config = make_config(tmp_path, coder="claude", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=None):
+        with pytest.raises(AgentLoopError, match="No review result was recorded"):
+            _run_validated_agent(
+                runner,
+                agent="claude",
+                config=config,
+                prompt="Revise the plan.",
+                marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+                validate=lambda text: (
+                    _validate_plan_revision_response(text, unresolved_items=()),
+                    validate_human_requirements_acknowledgement(
+                        text,
+                        surfaced_requirement_ids=(),
+                        requires_direct_discussion_ack=True,
+                    ),
+                )[0],
+                use_repair=True,
+                repair_expected_kind="plan_revision",
+                repair_surfaced_requirement_ids=context.surfaced_requirement_ids,
+                repair_requires_direct_discussion_ack=True,
+            )
+
+
+def test_run_validated_agent_refuses_conflicting_plan_revision_human_ack_blocks(tmp_path):
+    human_requirements = (
+        HumanReviewRequirement(
+            source_type="Issue comment",
+            author="wwind123",
+            created_at="2026-06-05T00:00:00Z",
+            url="https://github.com/OWNER/REPO/issues/237#issuecomment-1",
+            body="Cover stdout acknowledgement recovery.",
+        ),
+    )
+    context = render_coder_human_requirements_prompt_context(
+        human_requirements,
+        requirement_scope="planning requirements",
+        full_omission_fallback="Fetch the issue discussion directly before revising the plan.",
+    )
+    first = (
+        "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n\n"
+        "### Human requirements\n- Requirement 1: Covered by the parser step.\n"
+    )
+    second = (
+        "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n\n"
+        "### Human requirements\n- Requirement 1: Covered by the orchestrator step.\n"
+    )
+    runner = FakeRunner(
+        claude_outputs=[
+            (
+                structured_plan_revision(
+                    reviewer="Anthropic Claude",
+                    human_requirements=first,
+                )
+                + "\n\n"
+                + second,
+                0,
+            )
+        ],
+        public_response_outputs=[{"text": structured_plan_revision(reviewer="Anthropic Claude")}],
+    )
+    config = make_config(tmp_path, coder="claude", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=None):
+        with pytest.raises(AgentLoopError, match="No review result was recorded"):
+            _run_validated_agent(
+                runner,
+                agent="claude",
+                config=config,
+                prompt="Revise the plan.",
+                marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+                validate=_plan_revision_validate_with_human_requirements(human_requirements),
+                use_repair=True,
+                repair_expected_kind="plan_revision",
+                repair_surfaced_requirement_ids=context.surfaced_requirement_ids,
+                repair_requires_direct_discussion_ack=context.requires_direct_discussion_ack,
+            )
+
+
+def test_run_validated_agent_does_not_recover_unknown_prior_item_disposition(tmp_path):
+    human_requirements = (
+        HumanReviewRequirement(
+            source_type="Issue comment",
+            author="wwind123",
+            created_at="2026-06-05T00:00:00Z",
+            url="https://github.com/OWNER/REPO/issues/237#issuecomment-1",
+            body="Cover stdout acknowledgement recovery.",
+        ),
+    )
+    context = render_coder_human_requirements_prompt_context(
+        human_requirements,
+        requirement_scope="planning requirements",
+        full_omission_fallback="Fetch the issue discussion directly before revising the plan.",
+    )
+    acknowledgement = (
+        "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n\n"
+        "### Human requirements\n- Requirement 1: Covered.\n"
+    )
+    response_file = structured_plan_revision(
+        reviewer="Anthropic Claude",
+        prior_plan_item_dispositions=[
+            {"item_id": "item-unknown", "disposition": "resolved", "note": "Covered."}
+        ],
+    )
+    runner = FakeRunner(
+        claude_outputs=[
+            (
+                structured_plan_revision(
+                    reviewer="Anthropic Claude",
+                    human_requirements=acknowledgement,
+                ),
+                0,
+            )
+        ],
+        public_response_outputs=[{"text": response_file}],
+    )
+    config = make_config(tmp_path, coder="claude", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=None) as repair_mock:
+        with pytest.raises(AgentLoopError, match="No review result was recorded"):
+            _run_validated_agent(
+                runner,
+                agent="claude",
+                config=config,
+                prompt="Revise the plan.",
+                marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+                validate=_plan_revision_validate_with_human_requirements(human_requirements),
+                use_repair=True,
+                repair_expected_kind="plan_revision",
+                repair_surfaced_requirement_ids=context.surfaced_requirement_ids,
+                repair_requires_direct_discussion_ack=context.requires_direct_discussion_ack,
+                repair_allowed_prior_item_ids=(),
+            )
+
+    repair_mock.assert_called_once()
+
+
 @pytest.mark.parametrize(
     "stdout",
     [
@@ -6903,6 +7193,7 @@ def test_structured_plan_revision_transient_terms_before_footer_runs_repair(tmp_
             validate=_validate_plan_revision_response,
             use_repair=True,
             repair_expected_kind="plan_revision",
+            repair_surfaced_requirement_ids=("Requirement 1",),
         )
 
     assert response.text == repaired_revision
@@ -14377,6 +14668,18 @@ def test_claude_review_loop_prefers_public_response_file_over_stdout(tmp_path):
     assert "PUBLIC RESPONSE FILE:" in claude_call[-1]
     assert "/coding-review-agent-loop/responses/OWNER-REPO/claude/" in claude_call[-1]
     assert runner.comments == ["**Review verdict:** Approved\n\nLGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude"]
+
+
+def test_public_response_file_instruction_mentions_plan_revision_human_ack_exception(tmp_path):
+    prompt = with_public_response_file_instruction(
+        "Review the PR.",
+        tmp_path / "response.md",
+    )
+
+    assert "For structured plan revisions only" in prompt
+    assert "<!-- HUMAN_REQUIREMENTS_ADDRESSED -->" in prompt
+    assert "`### Human requirements` section after the JSON object" in prompt
+    assert "before the\n`AGENT_PLAN_STATE` footer" in prompt
 
 
 def test_codex_task_loop_rejects_empty_task_text(tmp_path):
