@@ -1644,7 +1644,7 @@ def _run_plan_first_loop(
                 plan_subject=plan_subject,
                 issue_comments=issue_context.comments,
                 sources=approved_future_followup_sources,
-                allow_issue_filing=mode != "plan-only",
+                allow_issue_filing=mode in {"implement-one-shot", "implement-by-phase"},
             )
             if mode == "plan-only":
                 print(

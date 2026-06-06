@@ -12885,6 +12885,55 @@ def test_issue_loop_plan_first_plan_only_does_not_publish_approved_future_follow
     assert "mode=summarize" in summary
 
 
+def test_issue_loop_plan_first_decompose_only_summarizes_instead_of_filing_plan_followups(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Plan:\n- Split the implementation into phases.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude",
+            plan_decomposition_json(
+                {
+                    "title": "Schema helpers",
+                    "scope": "Add parser dataclasses and tests.",
+                    "non_goals": "No live orchestrator switch.",
+                    "dependency_notes": "First phase; no dependencies.",
+                    "rollout_risk": "low - internal only.",
+                    "validation": "Run python -m pytest tests/test_agent_loop.py.",
+                    "parent_context": "Approved plan slice: add schema helpers and preserve behavior.",
+                    "automation": "agent-pr",
+                    "depends_on": [],
+                }
+            ),
+        ],
+        codex_outputs=[
+            structured_plan_review(
+                state="approved",
+                future_followups=["Add a later cleanup to dedupe shared prompt rendering."],
+            ),
+        ],
+        issue_urls=["https://github.com/OWNER/REPO/issues/101"],
+    )
+    config = make_config(
+        tmp_path,
+        approved_followups="issue",
+        plan_execution_mode="decompose-only",
+    )
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    assert len(runner.issues) == 1
+    assert runner.issues[0]["title"] == "Phase 1: Schema helpers (from #56)"
+    assert not any(
+        issue["title"].startswith("Follow up future plan-review note:")
+        for issue in runner.issues
+    )
+    planning_summary = runner.comments[2]
+    assert planning_summary.startswith("Planning complete for issue #56.")
+    assert "Approved plan future follow-ups:" in planning_summary
+    assert "Add a later cleanup to dedupe shared prompt rendering." in planning_summary
+    assert "Filed future follow-up issues:" not in planning_summary
+    assert "mode=summarize" in planning_summary
+    assert "mode=issue" not in planning_summary
+
+
 def test_issue_loop_plan_first_files_approved_future_followups_before_implementation(tmp_path):
     runner = FakeRunner(
         claude_outputs=[
