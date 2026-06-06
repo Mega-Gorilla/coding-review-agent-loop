@@ -189,6 +189,7 @@ class GeminiBackend:
             label="Gemini",
             progress_interval_seconds=config.progress_interval_seconds,
             check=False,
+            env={"AGENT_LOOP_WORKDIR": str(config.gemini_dir.resolve())},
         )
         log(config, f"Gemini finished; log: {log_path}")
         message_text, new_session_id, usage, raw_usage, message_source = _parse_gemini_payload(result.stdout)
