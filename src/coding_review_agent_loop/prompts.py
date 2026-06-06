@@ -1517,6 +1517,12 @@ are eligible for dispositions in this round. If same-round findings from
 other reviewers appear elsewhere in the PR discussion, treat them as
 informational only and do not disposition them until a later round carries
 them forward explicitly.
+Item IDs visible only in `issue_context`, issue history, or planning comments
+are informational only. This includes planning-stage `item-*` IDs and approved
+plan future follow-ups, which are tracked separately. Do not include those IDs
+in `prior_item_dispositions` or `prior_plan_item_dispositions` unless they are
+also listed in the active `Prior unresolved review items from earlier rounds`
+section above.
 All configured reviewers ({reviewer_group}) must approve in the same round for
 the pull request to be considered approved.
 Focus on correctness, security, test coverage, and maintainability. Review the
@@ -1868,6 +1874,12 @@ are eligible for dispositions in this round. If same-round findings from
 other reviewers appear elsewhere in the PR discussion, treat them as
 informational only and do not disposition them until a later round carries
 them forward explicitly.
+Item IDs visible only in `issue_context`, issue history, or planning comments
+are informational only. This includes planning-stage `item-*` IDs and approved
+plan future follow-ups, which are tracked separately. Do not include those IDs
+in `prior_item_dispositions` or `prior_plan_item_dispositions` unless they are
+also listed in the active `Prior unresolved review items from earlier rounds`
+section above.
 {unresolved_items_guidance}
 {followup_guidance}
 Use blocking only for issues that should prevent merge.

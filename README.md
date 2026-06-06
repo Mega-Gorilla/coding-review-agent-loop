@@ -124,8 +124,14 @@ When earlier plan issues remain open, reviewers must also include
 `### Prior unresolved plan item dispositions` and disposition every carried item
 exactly once with `resolved`, `still blocking`, `same-plan`, or `future
 follow-up`. `Future follow-ups` are accepted only in approved plan reviews and
-are summarized with the final approved plan instead of reopening planning. By
-default the loop posts the approved plan summary and stops; add
+are reconciled with the final approved plan instead of reopening planning. If
+`--approved-followups=issue` or `fix-and-issue` is enabled and implementation
+will continue after approval, those plan-stage future follow-ups are filed as
+separate issues before implementation starts. Otherwise they are summarized in
+the planning-complete comment with an explicit note that they are not carried
+into PR review. Planning `item-*` IDs visible in issue history are not PR prior
+review items unless they are repeated in the active PR unresolved-item ledger.
+By default the loop posts the approved plan summary and stops; add
 `--implement-after-approval` to continue into the normal PR flow:
 
 ```bash
@@ -343,7 +349,9 @@ skipped by the cap.
 Plan reviews follow the same rule: approved plan reviews may include Future
 follow-ups only. Blocking plan issues, Same-plan follow-ups, or carried-forward
 plan items left `still blocking` or `same-plan` keep the planning round
-unapproved.
+unapproved. Plan-stage future follow-up issues are filed before implementation
+begins in issue-filing modes; PR-stage approved-review future follow-up issues
+are filed after final PR approval.
 
 By default, `--approved-followups=ignore` asks reviewers not to include
 approved-review follow-up sections. Reviewers should mark the review blocking

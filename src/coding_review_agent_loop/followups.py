@@ -8,7 +8,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from .config import AgentLoopConfig
-from .github import create_issue, post_pr_comment
+from .github import create_issue, post_issue_comment, post_pr_comment
 from .logging import log
 from .protocol import ApprovedFollowup, UnresolvedReviewItem
 from .runner import Runner
@@ -16,6 +16,10 @@ from .runner import Runner
 MAX_APPROVED_FOLLOWUP_ISSUES = 3
 APPROVED_FOLLOWUP_MARKER_RE = re.compile(
     r"<!--\s*AGENT_APPROVED_FOLLOWUPS:\s*pr=(?P<pr>\d+)\s+head=(?P<head>\S+)\s+mode=(?P<mode>[a-z-]+)\s*-->",
+    re.I,
+)
+PLAN_APPROVED_FOLLOWUP_MARKER_RE = re.compile(
+    r"<!--\s*AGENT_PLAN_APPROVED_FOLLOWUPS:\s*issue=(?P<issue>\d+)\s+plan=(?P<plan>\S+)\s+mode=(?P<mode>[a-z-]+)\s*-->",
     re.I,
 )
 FOLLOWUP_UPDATE_SPLIT_RE = re.compile(r"\n{2,}Update from ", re.I)
@@ -39,6 +43,38 @@ class GroupedApprovedFollowup:
 class ApprovedFollowupReconciliation:
     groups: tuple[GroupedApprovedFollowup, ...]
     selected_groups: tuple[GroupedApprovedFollowup, ...]
+    skipped_by_cap: int
+    deduplicated_count: int
+
+
+@dataclass(frozen=True)
+class PlanApprovedFollowupSource:
+    item_id: str | None
+    reviewer: str
+    source_round: int | None
+    text: str
+    notes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PlanGroupedApprovedFollowup:
+    text: str
+    items: tuple[ApprovedFollowup, ...]
+    sources: tuple[PlanApprovedFollowupSource, ...]
+
+    @property
+    def reviewers(self) -> tuple[str, ...]:
+        reviewers: list[str] = []
+        for source in self.sources:
+            if source.reviewer not in reviewers:
+                reviewers.append(source.reviewer)
+        return tuple(reviewers)
+
+
+@dataclass(frozen=True)
+class PlanApprovedFollowupReconciliation:
+    groups: tuple[PlanGroupedApprovedFollowup, ...]
+    selected_groups: tuple[PlanGroupedApprovedFollowup, ...]
     skipped_by_cap: int
     deduplicated_count: int
 
@@ -208,6 +244,25 @@ def _approved_followup_from_unresolved_item(item: UnresolvedReviewItem) -> Appro
     return ApprovedFollowup(reviewer=item.reviewer, text=text)
 
 
+def _plan_followup_source_from_unresolved_item(item: UnresolvedReviewItem) -> PlanApprovedFollowupSource:
+    return PlanApprovedFollowupSource(
+        item_id=item.item_id,
+        reviewer=item.reviewer,
+        source_round=item.source_round,
+        text=item.text,
+        notes=tuple(item.notes),
+    )
+
+
+def _approved_followup_from_plan_source(source: PlanApprovedFollowupSource) -> ApprovedFollowup:
+    text = source.text
+    for note in source.notes:
+        update_line = f"Update from {note}"
+        if update_line not in text:
+            text = f"{text.rstrip()}\n\n{update_line}"
+    return ApprovedFollowup(reviewer=source.reviewer, text=text)
+
+
 def reconcile_approved_followups(
     followups: Sequence[ApprovedFollowup],
     *,
@@ -240,6 +295,37 @@ def reconcile_approved_followups(
         selected_groups=selected_groups,
         skipped_by_cap=max(0, len(grouped) - len(selected_groups)),
         deduplicated_count=len(followups) - len(grouped),
+    )
+
+
+def reconcile_plan_approved_followups(
+    sources: Sequence[PlanApprovedFollowupSource],
+    *,
+    issue_limit: int = MAX_APPROVED_FOLLOWUP_ISSUES,
+) -> PlanApprovedFollowupReconciliation:
+    source_by_projection_id: dict[int, PlanApprovedFollowupSource] = {}
+    projections: list[ApprovedFollowup] = []
+    for source in sources:
+        projection = _approved_followup_from_plan_source(source)
+        projections.append(projection)
+        source_by_projection_id[id(projection)] = source
+
+    reconciliation = reconcile_approved_followups(projections, issue_limit=issue_limit)
+
+    def plan_group(group: GroupedApprovedFollowup) -> PlanGroupedApprovedFollowup:
+        return PlanGroupedApprovedFollowup(
+            text=group.text,
+            items=group.items,
+            sources=tuple(source_by_projection_id[id(item)] for item in group.items),
+        )
+
+    groups = tuple(plan_group(group) for group in reconciliation.groups)
+    selected_groups = tuple(plan_group(group) for group in reconciliation.selected_groups)
+    return PlanApprovedFollowupReconciliation(
+        groups=groups,
+        selected_groups=selected_groups,
+        skipped_by_cap=reconciliation.skipped_by_cap,
+        deduplicated_count=reconciliation.deduplicated_count,
     )
 
 
@@ -323,6 +409,53 @@ def _has_approved_followups_marker(
     return False
 
 
+def _plan_approved_followups_marker(issue_number: int, plan_hash: str, mode: str) -> str:
+    return f"<!-- AGENT_PLAN_APPROVED_FOLLOWUPS: issue={issue_number} plan={plan_hash} mode={mode} -->"
+
+
+def _append_plan_approved_followups_marker(
+    body: str,
+    *,
+    issue_number: int,
+    plan_hash: str,
+    mode: str,
+) -> str:
+    footer = "\n-- coding-review-agent-loop"
+    prefix, found, _suffix = body.rpartition(footer)
+    if not found:
+        return body
+    prefix = prefix.rstrip()
+    return "\n".join(
+        [
+            prefix,
+            "",
+            _plan_approved_followups_marker(issue_number, plan_hash, mode),
+            "-- coding-review-agent-loop",
+        ]
+    )
+
+
+def _has_plan_approved_followups_marker(
+    comments: Sequence[object],
+    *,
+    issue_number: int,
+    plan_hash: str,
+    mode: str,
+) -> bool:
+    for comment in comments:
+        body = getattr(comment, "body", None)
+        if not isinstance(body, str):
+            continue
+        for match in PLAN_APPROVED_FOLLOWUP_MARKER_RE.finditer(body):
+            if (
+                int(match.group("issue")) == issue_number
+                and match.group("plan") == plan_hash
+                and match.group("mode").lower() == mode.lower()
+            ):
+                return True
+    return False
+
+
 def _followup_issue_title(followup: ApprovedFollowup) -> str:
     text = " ".join(_followup_main_text(followup.text).split())
     title = f"Follow up future review note: {text}"
@@ -380,6 +513,97 @@ def _followup_issue_body(pr_number: int, followup: GroupedApprovedFollowup) -> s
         ]
     )
     return "\n".join(lines)
+
+
+def _plan_followup_issue_title(followup: PlanGroupedApprovedFollowup) -> str:
+    text = " ".join(_followup_main_text(followup.text).split())
+    title = f"Follow up future plan-review note: {text}"
+    return title[:120]
+
+
+def _plan_source_label(source: PlanApprovedFollowupSource) -> str:
+    parts: list[str] = []
+    if source.item_id:
+        parts.append(source.item_id)
+    if source.source_round is not None:
+        parts.append(f"round {source.source_round}")
+    parts.append(source.reviewer)
+    return ", ".join(parts)
+
+
+def _plan_followup_issue_body(
+    *,
+    issue_number: int,
+    plan_hash: str,
+    plan_subject: str,
+    followup: PlanGroupedApprovedFollowup,
+) -> str:
+    reviewers = followup.reviewers
+    rounds = sorted({source.source_round for source in followup.sources if source.source_round is not None})
+    item_ids = [source.item_id for source in followup.sources if source.item_id]
+    lines = [
+        f"Future follow-up from approved planning for issue #{issue_number}.",
+        "",
+        "Source context:",
+        f"- Parent issue: #{issue_number}",
+        f"- Approved plan subject: {plan_subject}",
+        f"- Approved plan hash: {plan_hash}",
+    ]
+    if rounds:
+        lines.append("- Planning round(s): " + ", ".join(str(round_number) for round_number in rounds))
+    if len(reviewers) == 1:
+        lines.append(f"- Reviewer: {reviewers[0]}")
+    else:
+        lines.append("- Reviewers: " + ", ".join(reviewers))
+    if item_ids:
+        lines.append("- Original plan item ID(s): " + ", ".join(item_ids))
+    lines.extend(
+        [
+            "",
+            "Canonical follow-up:",
+            f"- {_followup_main_text(followup.text)}",
+            "",
+            "Original reviewer notes:",
+        ]
+    )
+    for source in followup.sources:
+        lines.append(f"- {_plan_source_label(source)}: {source.text}")
+        for note in source.notes:
+            lines.append(f"  - Update from {note}")
+    lines.extend(
+        [
+            "",
+            "This was approved as future work during planning. It is outside the current "
+            "implementation scope and is not a PR-review prior item.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _create_plan_approved_followup_issues(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    issue_number: int,
+    plan_hash: str,
+    plan_subject: str,
+    reconciliation: PlanApprovedFollowupReconciliation,
+) -> list[str]:
+    issue_urls: list[str] = []
+    for followup in reconciliation.selected_groups:
+        issue_url = create_issue(
+            runner,
+            config=config,
+            title=_plan_followup_issue_title(followup),
+            body=_plan_followup_issue_body(
+                issue_number=issue_number,
+                plan_hash=plan_hash,
+                plan_subject=plan_subject,
+                followup=followup,
+            ),
+        )
+        issue_urls.append(issue_url or "Created issue URL unavailable from GitHub CLI output.")
+    return issue_urls
 
 
 def _create_approved_followup_issues(
@@ -534,7 +758,10 @@ def _format_same_pr_followups(followups: Sequence[ApprovedFollowup]) -> str:
 def _format_plan_approval_summary_with_followups(
     issue_number: int,
     approved_plan: str,
-    future_followups: Sequence[ApprovedFollowup],
+    *,
+    reconciliation: PlanApprovedFollowupReconciliation | None = None,
+    issue_urls: Sequence[str] = (),
+    filing_enabled: bool = False,
 ) -> str:
     lines = [
         f"Planning complete for issue #{issue_number}.",
@@ -545,8 +772,113 @@ def _format_plan_approval_summary_with_followups(
         "",
         approved_plan,
     ]
-    if future_followups:
-        lines.extend(["", "Approved plan future follow-ups:", ""])
-        lines.extend(f"- {followup.text} ({followup.reviewer})" for followup in future_followups)
+    if reconciliation is not None and reconciliation.selected_groups:
+        if filing_enabled:
+            lines.extend(["", "Filed future follow-up issues:", ""])
+            unique_issue_urls = list(dict.fromkeys(issue_urls))
+            lines.extend(f"- {issue_url}" for issue_url in unique_issue_urls)
+            lines.extend(
+                [
+                    "",
+                    (
+                        f"Reconciliation: {len(reconciliation.selected_groups)} filed, "
+                        f"{reconciliation.deduplicated_count} deduplicated, "
+                        f"{reconciliation.skipped_by_cap} skipped by cap."
+                    ),
+                ]
+            )
+        else:
+            lines.extend(["", "Approved plan future follow-ups:", ""])
+            for followup in reconciliation.selected_groups:
+                reviewers = ", ".join(followup.reviewers)
+                lines.append(f"- {_followup_main_text(followup.text)} ({reviewers})")
+                for source in followup.sources:
+                    for note in source.notes:
+                        lines.append(f"  - Update from {note}")
+            lines.extend(
+                [
+                    "",
+                    (
+                        f"Reconciliation: {len(reconciliation.selected_groups)} summarized, "
+                        f"{reconciliation.deduplicated_count} deduplicated, "
+                        f"{reconciliation.skipped_by_cap} skipped by cap."
+                    ),
+                ]
+            )
+        lines.extend(
+            [
+                "",
+                "These planning-stage future follow-ups are future work outside the current "
+                "implementation scope. They are not carried into PR review and their plan "
+                "item IDs are not PR prior review items.",
+            ]
+        )
     lines.extend(["", "-- coding-review-agent-loop"])
     return "\n".join(lines)
+
+
+def _publish_plan_approved_followups(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    issue_number: int,
+    approved_plan: str,
+    plan_hash: str,
+    plan_subject: str,
+    issue_comments: Sequence[object],
+    sources: Sequence[PlanApprovedFollowupSource],
+) -> bool:
+    filing_enabled = config.approved_followups in ("issue", "fix-and-issue")
+    mode = "issue" if filing_enabled else "summarize"
+    if _has_plan_approved_followups_marker(
+        issue_comments,
+        issue_number=issue_number,
+        plan_hash=plan_hash,
+        mode=mode,
+    ):
+        log(
+            config,
+            f"Planning future follow-ups already recorded for issue #{issue_number} "
+            f"plan {plan_hash} ({mode})",
+        )
+        return False
+
+    reconciliation = (
+        reconcile_plan_approved_followups(sources, issue_limit=MAX_APPROVED_FOLLOWUP_ISSUES)
+        if sources
+        else None
+    )
+    issue_urls: list[str] = []
+    if reconciliation is not None and reconciliation.selected_groups:
+        log(
+            config,
+            f"Planning future follow-up reconciliation for issue #{issue_number}: "
+            f"{len(reconciliation.selected_groups)} selected, "
+            f"{reconciliation.deduplicated_count} deduplicated, "
+            f"{reconciliation.skipped_by_cap} skipped by cap",
+        )
+        if filing_enabled:
+            issue_urls = _create_plan_approved_followup_issues(
+                runner,
+                config=config,
+                issue_number=issue_number,
+                plan_hash=plan_hash,
+                plan_subject=plan_subject,
+                reconciliation=reconciliation,
+            )
+
+    body = _format_plan_approval_summary_with_followups(
+        issue_number,
+        approved_plan,
+        reconciliation=reconciliation,
+        issue_urls=issue_urls,
+        filing_enabled=filing_enabled,
+    )
+    body = _append_plan_approved_followups_marker(
+        body,
+        issue_number=issue_number,
+        plan_hash=plan_hash,
+        mode=mode,
+    )
+    post_issue_comment(runner, config=config, issue_number=issue_number, body=body)
+    return True

@@ -129,6 +129,7 @@ from .followups import (
     APPROVED_FOLLOWUP_MARKER_RE,
     GroupedApprovedFollowup,
     MAX_APPROVED_FOLLOWUP_ISSUES,
+    PlanApprovedFollowupSource,
     _append_approved_followups_marker,
     _approved_followup_from_unresolved_item,
     _approved_followups_marker,
@@ -139,9 +140,10 @@ from .followups import (
     _followup_issue_title,
     _format_approved_followup_summary,
     _format_created_followup_issue_summary,
-    _format_plan_approval_summary_with_followups,
     _format_same_pr_followups,
     _has_approved_followups_marker,
+    _plan_followup_source_from_unresolved_item,
+    _publish_plan_approved_followups,
     _normalize_followup_key,
     _publish_approved_followups,
 )
@@ -1233,7 +1235,7 @@ def _run_plan_first_loop(
     reviewer_session_ids: dict[AgentName, str | None] = {}
     unresolved_items: list[UnresolvedReviewItem] = []
     compact_prior_summaries: list[str] = []
-    approved_future_followups: list[ApprovedFollowup] = []
+    approved_future_followup_sources: list[PlanApprovedFollowupSource] = []
     next_unresolved_item_number = 1
     resume_state = _resume_plan_round(issue_context.comments, configured_reviewers=configured_reviewers)
     if resume_state is None:
@@ -1314,7 +1316,7 @@ def _run_plan_first_loop(
             and round_number >= 2
             and round_ledger_incomplete
         ) else ""
-        round_approved_future_followups: list[ApprovedFollowup] = []
+        round_approved_future_followup_sources: list[PlanApprovedFollowupSource] = []
         blocking_reviews: list[tuple[str, str]] = []
         approved_review_outputs: list[tuple[str, str]] = []
         all_approved = True
@@ -1445,7 +1447,9 @@ def _run_plan_first_loop(
                     round_new_unresolved_items.append(tracked_item)
                     reviewer_new_unresolved_items.append(tracked_item)
                     next_unresolved_item_number += 1
-                    round_approved_future_followups.append(item)
+                    round_approved_future_followup_sources.append(
+                        _plan_followup_source_from_unresolved_item(tracked_item)
+                    )
                 post_issue_comment(
                     runner,
                     config=config,
@@ -1476,8 +1480,8 @@ def _run_plan_first_loop(
                 )
             else:
                 round_new_unresolved_items.extend(reviewer_new_unresolved_items)
-                round_approved_future_followups.extend(
-                    _approved_followup_from_unresolved_item(item)
+                round_approved_future_followup_sources.extend(
+                    _plan_followup_source_from_unresolved_item(item)
                     for item in reviewer_new_unresolved_items
                     if item.status == "future"
                 )
@@ -1498,8 +1502,8 @@ def _run_plan_first_loop(
         )
         unresolved_items = [*unresolved_items, *round_new_unresolved_items]
         must_fix_items = [item for item in unresolved_items if item.status in {"blocking", "same-plan"}]
-        approved_future_followups.extend(
-            _approved_followup_from_unresolved_item(item) for item in future_from_prior_items
+        approved_future_followup_sources.extend(
+            _plan_followup_source_from_unresolved_item(item) for item in future_from_prior_items
         )
         if all_approved and not must_fix_items and issue_context.human_requirements:
             missing_acknowledgements = [
@@ -1623,18 +1627,20 @@ def _run_plan_first_loop(
                     all_approved = False
 
         if all_approved:
-            approved_future_followups.extend(round_approved_future_followups)
+            approved_future_followup_sources.extend(round_approved_future_followup_sources)
 
         if all_approved and not must_fix_items:
-            post_issue_comment(
+            plan_hash = approved_plan_hash(current_plan)
+            plan_subject = _plan_subject(current_plan)
+            _publish_plan_approved_followups(
                 runner,
                 config=config,
                 issue_number=issue_number,
-                body=_format_plan_approval_summary_with_followups(
-                    issue_number,
-                    current_plan,
-                    approved_future_followups,
-                ),
+                approved_plan=current_plan,
+                plan_hash=plan_hash,
+                plan_subject=plan_subject,
+                issue_comments=issue_context.comments,
+                sources=approved_future_followup_sources,
             )
             mode = config.plan_execution_mode
             if implement_after_approval:
