@@ -878,6 +878,20 @@ def test_workdir_guard_rejects_outside_home_path(tmp_path):
         )
 
 
+def test_workdir_guard_rejects_windows_path_with_clear_message(tmp_path):
+    assigned = tmp_path / "claude" / "repo"
+    assigned.mkdir(parents=True)
+
+    with pytest.raises(
+        AgentLoopError,
+        match="cannot be validated against the assigned Unix checkout",
+    ):
+        validate_test_commands_within_workdir(
+            (r"cd C:\Users\dev\repo && python -m pytest",),
+            assigned_workdir=assigned,
+        )
+
+
 def test_workdir_guard_accepts_assigned_absolute_path(tmp_path):
     assigned = tmp_path / "claude" / "repo"
     tests_dir = assigned / "tests"
@@ -921,6 +935,7 @@ def test_coder_prompts_include_assigned_workdir_rule(tmp_path):
 
     prompts = [
         build_issue_prompt(56, config),
+        build_issue_plan_prompt(56, config),
         build_issue_implementation_prompt(56, "1. Fix it.", config),
         build_task_prompt("Fix the bug.", config),
         build_followup_prompt(77, 1, "Needs tests.", config),
@@ -933,6 +948,38 @@ def test_coder_prompts_include_assigned_workdir_rule(tmp_path):
         assert "must stay in that directory" in prompt
         assert "Do not `cd` into sibling, home, deployment, or duplicate clones" in prompt
         assert "`pwd` and `git status --branch --short`" in prompt
+
+
+def test_reviewer_prompts_use_reviewer_assigned_workdir_rule(tmp_path):
+    config = make_config(
+        tmp_path,
+        coder="claude",
+        reviewer=("codex",),
+        claude_args=(),
+        codex_args=("--dangerously-bypass-approvals-and-sandbox",),
+    )
+    reviewer_assigned = str(config.codex_dir.resolve())
+    coder_assigned = str(config.claude_dir.resolve())
+
+    prompts = [
+        build_plan_review_prompt(56, 1, "Plan.", config, reviewer="codex"),
+        build_plan_review_prompt(
+            56,
+            1,
+            "Plan.",
+            config,
+            reviewer="codex",
+            compact_context=True,
+        ),
+        build_review_prompt(77, 1, config, reviewer="codex"),
+        build_review_prompt(77, 1, config, reviewer="codex", compact_context=True),
+    ]
+
+    for prompt in prompts:
+        assert f"Assigned checkout: `{reviewer_assigned}`" in prompt
+        assert f"Assigned checkout: `{coder_assigned}`" not in prompt
+        assert "Inspection must stay in that directory" in prompt
+        assert "Dangerous agent permissions are active" in prompt
 
 
 def _git(cwd: Path, *args: str) -> None:

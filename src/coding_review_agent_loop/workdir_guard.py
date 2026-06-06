@@ -75,8 +75,9 @@ def validate_test_commands_within_workdir(
                 continue
             if WINDOWS_PATH_RE.fullmatch(raw_path.strip().strip("`'\".,")):
                 raise AgentLoopError(
-                    "Coder reported tests from a Windows-style path outside the assigned "
-                    f"checkout: {raw_path!r} in command {command!r}. Assigned checkout: {assigned}"
+                    "Coder reported tests from a Windows-style path that cannot be "
+                    "validated against the assigned Unix checkout: "
+                    f"{raw_path!r} in command {command!r}. Assigned checkout: {assigned}"
                 )
             if path == assigned or _is_inside(path, assigned):
                 continue

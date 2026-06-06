@@ -19,7 +19,7 @@ from .protocol import (
     HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK,
     UnresolvedReviewItem,
 )
-from .workdirs import active_workdir
+from .workdirs import agent_workdir
 
 
 @dataclass(frozen=True)
@@ -85,8 +85,11 @@ def _coder_test_reporting_guidance() -> str:
     )
 
 
-def _coder_workdir_guidance(config: AgentLoopConfig, *, implementation: bool = True) -> str:
-    workdir = active_workdir(config).resolve()
+def _coder_workdir_guidance(
+    config: AgentLoopConfig, *, implementation: bool = True, agent: AgentName | None = None
+) -> str:
+    active_agent = agent or config.coder
+    workdir = agent_workdir(config, active_agent).resolve()
     repo_name = config.repo.rsplit("/", 1)[-1]
     scope = (
         "Implementation, inspection, tests, commits, and pushes"
@@ -102,7 +105,7 @@ def _coder_workdir_guidance(config: AgentLoopConfig, *, implementation: bool = T
         "claude": config.claude_args,
         "codex": config.codex_args,
         "gemini": config.gemini_args,
-    }[config.coder]
+    }[active_agent]
     dangerous_warning = ""
     if any(arg in dangerous_args for arg in active_args):
         dangerous_warning = (
@@ -695,6 +698,7 @@ footer.
 def _compact_plan_stable_prefix(
     *,
     config: AgentLoopConfig,
+    workdir_guidance: str,
     memory: AgentMemoryContext | None,
     issue_context: IssueContext | None,
     unresolved_items: Sequence[UnresolvedReviewItem],
@@ -708,6 +712,7 @@ def _compact_plan_stable_prefix(
         for part in (
             "Compact cache-aware planning context",
             f"Repository: {config.repo}",
+            workdir_guidance,
             _scratch_file_guidance(),
             response_protocol,
             _memory_block(memory),
@@ -915,6 +920,7 @@ Contradictory forms like `same-plan: none`, `still blocking: none`, and `future 
 
 Use this local checkout only to inspect context. Do not edit files, create a
 branch, commit, push, or open a pull request during this planning review.
+{_coder_workdir_guidance(config, implementation=False, agent=reviewer)}
 {_scratch_file_guidance()}
 {human_requirements_block}{_issue_context_block(issue_context)}
 {unresolved_items_block}{_memory_block(memory)}
@@ -1030,6 +1036,7 @@ Contradictory forms like `same-plan: none`, `still blocking: none`, and `future 
         unresolved_items_guidance = ""
     stable_prefix = _compact_plan_stable_prefix(
         config=config,
+        workdir_guidance=_coder_workdir_guidance(config, implementation=False, agent=reviewer),
         memory=memory,
         issue_context=issue_context,
         unresolved_items=unresolved_items,
@@ -1275,6 +1282,7 @@ def _build_compact_plan_revision_prompt(
     )
     stable_prefix = _compact_plan_stable_prefix(
         config=config,
+        workdir_guidance=_coder_workdir_guidance(config, implementation=False),
         memory=memory,
         issue_context=issue_context,
         unresolved_items=unresolved_items,
@@ -1511,6 +1519,7 @@ def _compact_coder_followup_block(
 def _compact_pr_review_stable_prefix(
     *,
     config: AgentLoopConfig,
+    workdir_guidance: str,
     memory: AgentMemoryContext | None,
     pr_metadata: PullRequestMetadata,
     issue_context: IssueContext | None,
@@ -1595,6 +1604,7 @@ adds a merge migration.
         for part in (
             "Compact cache-aware PR review context",
             f"Repository: {config.repo}",
+            workdir_guidance,
             _scratch_file_guidance(),
             response_schema,
             unresolved_items_guidance,
@@ -1727,6 +1737,7 @@ follow-ups for compatibility, but prefer `### Future follow-ups`.
 """
     stable_prefix = _compact_pr_review_stable_prefix(
         config=config,
+        workdir_guidance=_coder_workdir_guidance(config, implementation=False, agent=reviewer),
         memory=memory,
         pr_metadata=pr_metadata,
         issue_context=issue_context,
@@ -1940,6 +1951,7 @@ review round is about. If local files do not match that SHA, refresh/fetch the
 checkout before reviewing. Do not spend time discovering the PR
 branch. Do not report findings based on untracked files unless those files are
 present in the PR diff.
+{_coder_workdir_guidance(config, implementation=False, agent=reviewer)}
 {_scratch_file_guidance()}
 {checks_block}{_issue_context_block(issue_context)}
 {_human_requirements_block(human_requirements)}
