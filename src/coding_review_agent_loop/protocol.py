@@ -871,24 +871,6 @@ def _normalized_review_item_text(text: str) -> str:
     return normalized.casefold()
 
 
-def _dedupe_same_pr_against_blocking(
-    blocking_items: tuple[ApprovedFollowup, ...],
-    same_pr_followups: tuple[ApprovedFollowup, ...],
-) -> tuple[ApprovedFollowup, ...]:
-    blocking_texts = {
-        normalized
-        for item in blocking_items
-        if (normalized := _normalized_review_item_text(item.text))
-    }
-    if not blocking_texts:
-        return same_pr_followups
-    return tuple(
-        item
-        for item in same_pr_followups
-        if _normalized_review_item_text(item.text) not in blocking_texts
-    )
-
-
 def _dedupe_followups_against(
     items: tuple[ApprovedFollowup, ...],
     *authoritative_groups: tuple[ApprovedFollowup, ...],
@@ -912,6 +894,17 @@ def _dedupe_plan_review_items(items: PlanReviewItems) -> PlanReviewItems:
     if same_plan is items.same_plan and future is items.future:
         return items
     return PlanReviewItems(blocking=items.blocking, same_plan=same_plan, future=future)
+
+
+def _dedupe_pr_review_items(
+    blocking_items: tuple[ApprovedFollowup, ...],
+    followups: ApprovedFollowups,
+) -> ApprovedFollowups:
+    same_pr = _dedupe_followups_against(followups.same_pr, blocking_items)
+    future = _dedupe_followups_against(followups.future, blocking_items, same_pr)
+    if same_pr is followups.same_pr and future is followups.future:
+        return followups
+    return ApprovedFollowups(same_pr=same_pr, future=future)
 
 
 def parse_structured_pr_review(text: str, *, reviewer: str) -> ParsedReview | None:
@@ -963,21 +956,21 @@ def parse_structured_pr_review(text: str, *, reviewer: str) -> ParsedReview | No
         allowed_same_status="same-pr",
         is_plan_review=False,
     )
-    if state == "blocking" and future_followups:
-        raise AgentLoopError("Blocking structured reviews may not include future follow-ups.")
     structured_blocking_items = _structured_followups(blocking_items, reviewer=reviewer)
-    structured_same_pr_followups = _dedupe_same_pr_against_blocking(
+    followups = _dedupe_pr_review_items(
         structured_blocking_items,
-        _structured_followups(same_pr_followups, reviewer=reviewer),
+        ApprovedFollowups(
+            same_pr=_structured_followups(same_pr_followups, reviewer=reviewer),
+            future=_structured_followups(future_followups, reviewer=reviewer),
+        ),
     )
+    if state == "blocking" and followups.future:
+        raise AgentLoopError("Blocking structured reviews may not include future follow-ups.")
     return _finalize_parsed_review(
         state=state,
         summary=summary,
         blocking_items=structured_blocking_items,
-        followups=ApprovedFollowups(
-            same_pr=structured_same_pr_followups,
-            future=_structured_followups(future_followups, reviewer=reviewer),
-        ),
+        followups=followups,
         dispositions=dispositions,
     )
 
@@ -1549,10 +1542,7 @@ def parse_review(text: str, *, reviewer: str) -> ParsedReview:
     summary = review_freeform_summary_text(text)
     blocking_items = parse_pr_blocking_items(text, reviewer=reviewer)
     followups = parse_approved_followups(text, reviewer=reviewer)
-    followups = ApprovedFollowups(
-        same_pr=_dedupe_same_pr_against_blocking(blocking_items, followups.same_pr),
-        future=followups.future,
-    )
+    followups = _dedupe_pr_review_items(blocking_items, followups)
     dispositions = parse_unresolved_item_dispositions(text, reviewer=reviewer)
     return _finalize_parsed_review(
         state=state,
