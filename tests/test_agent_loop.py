@@ -7458,16 +7458,10 @@ def test_run_validated_agent_repairs_unknown_prior_item_disposition_when_ledger_
         prior_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
         reviewer="Google Gemini",
     )
-    repaired_review = structured_pr_review(
-        state="approved",
-        summary="LGTM.",
-        prior_item_dispositions=[],
-        reviewer="Google Gemini",
-    )
     runner = FakeRunner(gemini_outputs=[malformed_review])
     config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
 
-    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=repaired_review) as repair_mock:
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
         response = _run_validated_agent(
             runner,
             agent="gemini",
@@ -7485,13 +7479,11 @@ def test_run_validated_agent_repairs_unknown_prior_item_disposition_when_ledger_
             ledger_incomplete=False,
     )
 
-    assert response.text == repaired_review
-    repair_mock.assert_called_once()
-    assert repair_mock.call_args.args == (malformed_review, config.gemini_cmd)
-    assert repair_mock.call_args.kwargs["expected_kind"] == "pr_review"
-    assert repair_mock.call_args.kwargs["allowed_prior_item_ids"] == ()
-    assert repair_mock.call_args.kwargs["unknown_prior_item_ids"] == ("item-1",)
-    assert "Same-round findings are informational only" in repair_mock.call_args.kwargs["same_round_context"]
+    repair_mock.assert_not_called()
+    parsed_response = json.loads(response.text.split("\n")[0])
+    assert parsed_response["prior_item_dispositions"] == []
+    assert parsed_response["state"] == "approved"
+    assert parsed_response["summary"] == "LGTM."
 
 
 def test_run_validated_agent_skips_unknown_prior_item_repair_when_ledger_incomplete(tmp_path):
@@ -7528,6 +7520,16 @@ def test_run_validated_agent_skips_unknown_prior_item_repair_when_ledger_incompl
 
 
 def test_run_validated_agent_rejects_repair_that_invents_prior_item_id(tmp_path):
+    # item-3 is the legitimate carried prior item; item-1 is unknown and gets stripped
+    # deterministically, but item-3 is then missing → re-validation fails → falls through
+    # to generative repair → repair invents item-2 (also unknown) → rejected.
+    carried_item_3 = UnresolvedReviewItem(
+        item_id="item-3",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Must-fix prior item.",
+        status="blocking",
+    )
     malformed_review = structured_pr_review(
         state="approved",
         summary="LGTM.",
@@ -7554,11 +7556,11 @@ def test_run_validated_agent_rejects_repair_that_invents_prior_item_id(tmp_path)
                 validate=lambda text: _validate_review_response(
                     text,
                     reviewer="Google Gemini",
-                    unresolved_items=(),
+                    unresolved_items=(carried_item_3,),
                 ),
                 use_repair=True,
                 repair_expected_kind="pr_review",
-                repair_allowed_prior_item_ids=(),
+                repair_allowed_prior_item_ids=("item-3",),
             )
 
     assert "item-2" in str(exc_info.value)
@@ -7581,16 +7583,10 @@ def test_run_validated_agent_preserves_valid_disposition_when_repair_removes_unk
         ],
         reviewer="Google Gemini",
     )
-    repaired_review = structured_pr_review(
-        state="approved",
-        summary="LGTM.",
-        prior_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
-        reviewer="Google Gemini",
-    )
     runner = FakeRunner(gemini_outputs=[malformed_review])
     config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
 
-    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=repaired_review) as repair_mock:
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
         response = _run_validated_agent(
             runner,
             agent="gemini",
@@ -7607,9 +7603,9 @@ def test_run_validated_agent_preserves_valid_disposition_when_repair_removes_unk
             repair_allowed_prior_item_ids=("item-1",),
         )
 
+    repair_mock.assert_not_called()
     assert response.marker_value.dispositions[0].item_id == "item-1"
-    assert repair_mock.call_args.kwargs["allowed_prior_item_ids"] == ("item-1",)
-    assert repair_mock.call_args.kwargs["unknown_prior_item_ids"] == ("item-9",)
+    assert len(response.marker_value.dispositions) == 1
 
 
 def test_run_validated_agent_repairs_unknown_plan_revision_prior_disposition(tmp_path):
@@ -7625,11 +7621,10 @@ def test_run_validated_agent_repairs_unknown_plan_revision_prior_disposition(tmp
             {"item_id": "item-15", "disposition": "resolved"},
         ],
     )
-    repaired_revision = structured_plan_revision(prior_plan_item_dispositions=[])
     runner = FakeRunner(claude_outputs=[malformed_revision])
     config = make_config(tmp_path, coder="claude", agent_max_retries=0)
 
-    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=repaired_revision) as repair_mock:
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
         response = _run_validated_agent(
             runner,
             agent="claude",
@@ -7646,9 +7641,9 @@ def test_run_validated_agent_repairs_unknown_plan_revision_prior_disposition(tmp
             ledger_incomplete=False,
         )
 
-    assert response.text == repaired_revision
-    assert repair_mock.call_args.kwargs["allowed_prior_item_ids"] == ("item-12",)
-    assert repair_mock.call_args.kwargs["unknown_prior_item_ids"] == ("item-15",)
+    repair_mock.assert_not_called()
+    parsed_response = json.loads(response.text.split("\n")[0])
+    assert parsed_response["prior_plan_item_dispositions"] == []
 
 
 def test_run_validated_agent_plan_revision_unknown_prior_disposition_fails_when_ledger_incomplete(tmp_path):
@@ -16541,3 +16536,396 @@ def test_plan_loop_repair_blocking_records_same_plan_followups(tmp_path):
     claude_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
     assert any("regression test for the parser" in p for p in claude_prompts), \
         "Same-plan followup from repaired review must appear in coder prompt"
+
+
+# ---------------------------------------------------------------------------
+# Tests for issue #273: deterministic recovery of same-round prior-item dispositions
+# ---------------------------------------------------------------------------
+
+from coding_review_agent_loop.repair import strip_unknown_prior_item_dispositions
+
+
+# --- Unit tests for strip_unknown_prior_item_dispositions ---
+
+def test_strip_unknown_prior_item_dispositions_removes_unknown_from_empty_ledger():
+    raw = structured_plan_review(
+        state="approved",
+        summary="Plan review complete.",
+        prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+        reviewer="Google Gemini",
+    )
+    result = strip_unknown_prior_item_dispositions(
+        raw, allowed_ids=frozenset(), expected_kind="plan_review"
+    )
+    assert result is not None
+    payload, json_end = json.JSONDecoder().raw_decode(result.lstrip())
+    assert payload["prior_plan_item_dispositions"] == []
+    trailing = result.lstrip()[json_end:]
+    assert "<!-- AGENT_PLAN_STATE: approved -->" in trailing
+    assert "-- Google Gemini" in trailing
+
+
+def test_strip_unknown_prior_item_dispositions_preserves_valid_removes_unknown():
+    raw = structured_plan_review(
+        state="approved",
+        summary="Plan review complete.",
+        prior_plan_item_dispositions=[
+            {"item_id": "item-1", "disposition": "resolved"},
+            {"item_id": "item-9", "disposition": "resolved"},
+        ],
+        reviewer="Google Gemini",
+    )
+    result = strip_unknown_prior_item_dispositions(
+        raw, allowed_ids=frozenset({"item-1"}), expected_kind="plan_review"
+    )
+    assert result is not None
+    payload, _ = json.JSONDecoder().raw_decode(result.lstrip())
+    assert payload["prior_plan_item_dispositions"] == [{"item_id": "item-1", "disposition": "resolved"}]
+
+
+def test_strip_unknown_prior_item_dispositions_preserves_all_other_fields():
+    raw = structured_plan_review(
+        state="approved",
+        summary="Looks good overall.",
+        same_plan_followups=["Consider adding benchmarks."],
+        future_followups=["Improve error messages later."],
+        prior_plan_item_dispositions=[{"item_id": "item-9", "disposition": "resolved"}],
+        reviewer="Google Gemini",
+    )
+    result = strip_unknown_prior_item_dispositions(
+        raw, allowed_ids=frozenset(), expected_kind="plan_review"
+    )
+    assert result is not None
+    payload, _ = json.JSONDecoder().raw_decode(result.lstrip())
+    assert payload["summary"] == "Looks good overall."
+    assert payload["same_plan_followups"] == ["Consider adding benchmarks."]
+    assert payload["future_followups"] == ["Improve error messages later."]
+    assert payload["state"] == "approved"
+    assert payload["prior_plan_item_dispositions"] == []
+
+
+def test_strip_unknown_prior_item_dispositions_removes_from_pr_review():
+    raw = structured_pr_review(
+        state="approved",
+        summary="LGTM.",
+        prior_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+        reviewer="Google Gemini",
+    )
+    result = strip_unknown_prior_item_dispositions(
+        raw, allowed_ids=frozenset(), expected_kind="pr_review"
+    )
+    assert result is not None
+    payload, _ = json.JSONDecoder().raw_decode(result.lstrip())
+    assert payload["prior_item_dispositions"] == []
+    assert payload["kind"] == "pr_review"
+
+
+def test_strip_unknown_prior_item_dispositions_returns_none_if_nothing_to_remove():
+    raw = structured_plan_review(
+        state="approved",
+        summary="Plan review complete.",
+        prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+        reviewer="Google Gemini",
+    )
+    result = strip_unknown_prior_item_dispositions(
+        raw, allowed_ids=frozenset({"item-1"}), expected_kind="plan_review"
+    )
+    assert result is None
+
+
+def test_strip_unknown_prior_item_dispositions_returns_none_for_markdown():
+    raw = "## Plan Review\n\nLooks good.\n\n<!-- AGENT_PLAN_STATE: approved -->\n-- Google Gemini"
+    result = strip_unknown_prior_item_dispositions(
+        raw, allowed_ids=frozenset(), expected_kind="plan_review"
+    )
+    assert result is None
+
+
+def test_strip_unknown_prior_item_dispositions_returns_none_for_wrong_kind():
+    raw = structured_pr_review(
+        state="approved",
+        summary="LGTM.",
+        prior_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+        reviewer="Google Gemini",
+    )
+    result = strip_unknown_prior_item_dispositions(
+        raw, allowed_ids=frozenset(), expected_kind="plan_review"
+    )
+    assert result is None
+
+
+def test_strip_unknown_prior_item_dispositions_returns_none_for_unsupported_kind():
+    raw = structured_pr_review(
+        state="approved",
+        summary="LGTM.",
+        prior_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+        reviewer="Google Gemini",
+    )
+    result = strip_unknown_prior_item_dispositions(
+        raw, allowed_ids=frozenset(), expected_kind="coder_followup"
+    )
+    assert result is None
+
+
+# --- Integration tests via _run_validated_agent ---
+
+def test_run_validated_agent_deterministically_strips_unknown_plan_review_without_repair(tmp_path):
+    malformed_review = structured_plan_review(
+        state="approved",
+        summary="Plan approved.",
+        prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+        reviewer="Google Gemini",
+    )
+    runner = FakeRunner(gemini_outputs=[malformed_review])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
+        response = _run_validated_agent(
+            runner,
+            agent="gemini",
+            config=config,
+            prompt="Review the plan.",
+            marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+            validate=lambda text: _validate_plan_review_response(
+                text,
+                reviewer="Google Gemini",
+                unresolved_items=(),
+            ),
+            use_repair=True,
+            repair_expected_kind="plan_review",
+            repair_allowed_prior_item_ids=(),
+            ledger_incomplete=False,
+        )
+
+    repair_mock.assert_not_called()
+    parsed = json.loads(response.text.split("\n")[0])
+    assert parsed["prior_plan_item_dispositions"] == []
+    assert parsed["state"] == "approved"
+
+
+def test_run_validated_agent_deterministically_strips_unknown_pr_review_without_repair(tmp_path):
+    malformed_review = structured_pr_review(
+        state="approved",
+        summary="LGTM.",
+        prior_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+        reviewer="Google Gemini",
+    )
+    runner = FakeRunner(gemini_outputs=[malformed_review])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
+        response = _run_validated_agent(
+            runner,
+            agent="gemini",
+            config=config,
+            prompt="Review the PR.",
+            marker_description="<!-- AGENT_STATE: approved|blocking -->",
+            validate=lambda text: _validate_review_response(
+                text,
+                reviewer="Google Gemini",
+                unresolved_items=(),
+            ),
+            use_repair=True,
+            repair_expected_kind="pr_review",
+            repair_allowed_prior_item_ids=(),
+            ledger_incomplete=False,
+        )
+
+    repair_mock.assert_not_called()
+    parsed = json.loads(response.text.split("\n")[0])
+    assert parsed["prior_item_dispositions"] == []
+    assert parsed["kind"] == "pr_review"
+
+
+def test_run_validated_agent_deterministic_strip_preserves_valid_removes_unknown_mixed(tmp_path):
+    carried_item = UnresolvedReviewItem(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Must-fix prior item.",
+        status="blocking",
+    )
+    malformed_review = structured_pr_review(
+        state="approved",
+        summary="LGTM.",
+        prior_item_dispositions=[
+            {"item_id": "item-1", "disposition": "resolved"},
+            {"item_id": "item-9", "disposition": "resolved"},
+        ],
+        reviewer="Google Gemini",
+    )
+    runner = FakeRunner(gemini_outputs=[malformed_review])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
+        response = _run_validated_agent(
+            runner,
+            agent="gemini",
+            config=config,
+            prompt="Review the PR.",
+            marker_description="<!-- AGENT_STATE: approved|blocking -->",
+            validate=lambda text: _validate_review_response(
+                text,
+                reviewer="Google Gemini",
+                unresolved_items=(carried_item,),
+            ),
+            use_repair=True,
+            repair_expected_kind="pr_review",
+            repair_allowed_prior_item_ids=("item-1",),
+            ledger_incomplete=False,
+        )
+
+    repair_mock.assert_not_called()
+    assert response.marker_value.dispositions[0].item_id == "item-1"
+    assert len(response.marker_value.dispositions) == 1
+
+
+def test_run_validated_agent_deterministic_strip_logs_removed_and_allowed_ids(tmp_path, capsys):
+    malformed_review = structured_plan_review(
+        state="approved",
+        summary="Plan approved.",
+        prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+        reviewer="Google Gemini",
+    )
+    runner = FakeRunner(gemini_outputs=[malformed_review])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0, quiet=False)
+
+    _run_validated_agent(
+        runner,
+        agent="gemini",
+        config=config,
+        prompt="Review the plan.",
+        marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+        validate=lambda text: _validate_plan_review_response(
+            text,
+            reviewer="Google Gemini",
+            unresolved_items=(),
+        ),
+        use_repair=True,
+        repair_expected_kind="plan_review",
+        repair_allowed_prior_item_ids=(),
+        ledger_incomplete=False,
+    )
+
+    output = capsys.readouterr().err
+    assert "deterministically removed unknown prior-item disposition ID(s)" in output
+    assert "item-1" in output
+    assert "(none)" in output
+
+
+def test_run_validated_agent_deterministic_strip_falls_through_to_repair_on_secondary_failure(tmp_path):
+    missing_item = UnresolvedReviewItem(
+        item_id="item-2",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Must-fix item not dispositioned.",
+        status="blocking",
+    )
+    malformed_review = structured_pr_review(
+        state="approved",
+        summary="LGTM.",
+        prior_item_dispositions=[{"item_id": "item-9", "disposition": "resolved"}],
+        reviewer="Google Gemini",
+    )
+    repaired_review = structured_pr_review(
+        state="approved",
+        summary="LGTM.",
+        prior_item_dispositions=[{"item_id": "item-2", "disposition": "resolved"}],
+        reviewer="Google Gemini",
+    )
+    runner = FakeRunner(gemini_outputs=[malformed_review])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch(
+        "coding_review_agent_loop.orchestrator.attempt_repair", return_value=repaired_review
+    ) as repair_mock:
+        response = _run_validated_agent(
+            runner,
+            agent="gemini",
+            config=config,
+            prompt="Review the PR.",
+            marker_description="<!-- AGENT_STATE: approved|blocking -->",
+            validate=lambda text: _validate_review_response(
+                text,
+                reviewer="Google Gemini",
+                unresolved_items=(missing_item,),
+            ),
+            use_repair=True,
+            repair_expected_kind="pr_review",
+            repair_allowed_prior_item_ids=("item-2",),
+            ledger_incomplete=False,
+        )
+
+    repair_mock.assert_called_once()
+    assert response.text == repaired_review
+
+
+def test_run_validated_agent_real_264_shape_approved_plan_review_same_round_item1_future_followups(tmp_path):
+    malformed_review = structured_plan_review(
+        state="approved",
+        summary="Plan is sound.",
+        future_followups=["Consider adding retries."],
+        prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved", "note": "Now covered."}],
+        reviewer="Google Gemini",
+    )
+    runner = FakeRunner(gemini_outputs=[malformed_review])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
+        response = _run_validated_agent(
+            runner,
+            agent="gemini",
+            config=config,
+            prompt="Review the plan.",
+            marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+            validate=lambda text: _validate_plan_review_response(
+                text,
+                reviewer="Google Gemini",
+                unresolved_items=(),
+                current_round_items=(),
+            ),
+            use_repair=True,
+            repair_expected_kind="plan_review",
+            repair_allowed_prior_item_ids=(),
+            ledger_incomplete=False,
+        )
+
+    repair_mock.assert_not_called()
+    parsed = json.loads(response.text.split("\n")[0])
+    assert parsed["prior_plan_item_dispositions"] == []
+    assert parsed["state"] == "approved"
+    assert parsed["future_followups"] == ["Consider adding retries."]
+    assert parsed["summary"] == "Plan is sound."
+
+
+def test_run_validated_agent_deterministic_strip_skipped_when_ledger_incomplete(tmp_path):
+    malformed_review = structured_plan_review(
+        state="approved",
+        summary="Plan approved.",
+        prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+        reviewer="Google Gemini",
+    )
+    runner = FakeRunner(gemini_outputs=[malformed_review])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
+        with pytest.raises(AgentLoopError) as exc_info:
+            _run_validated_agent(
+                runner,
+                agent="gemini",
+                config=config,
+                prompt="Review the plan.",
+                marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+                validate=lambda text: _validate_plan_review_response(
+                    text,
+                    reviewer="Google Gemini",
+                    unresolved_items=(),
+                ),
+                use_repair=True,
+                repair_expected_kind="plan_review",
+                repair_allowed_prior_item_ids=(),
+                ledger_incomplete=True,
+            )
+
+    repair_mock.assert_not_called()
+    assert "item-1" in str(exc_info.value)

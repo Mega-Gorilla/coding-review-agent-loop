@@ -27,6 +27,50 @@ _logger = logging.getLogger(__name__)
 _SIGNATURE_LINE_RE = re.compile(r"(?m)^--\s+\S[^\n]*")
 
 
+def strip_unknown_prior_item_dispositions(
+    raw: str,
+    *,
+    allowed_ids: frozenset[str],
+    expected_kind: str | None,
+) -> str | None:
+    """Remove disposition entries whose item_id is not in allowed_ids.
+
+    Returns the normalized text (JSON + trailing footer/signature) on success,
+    or None when the input cannot be parsed or nothing needs to be removed.
+    The caller must re-validate the returned text before using it.
+    """
+    if expected_kind not in {"pr_review", "plan_review", "plan_revision"}:
+        return None
+    disposition_field = (
+        "prior_item_dispositions"
+        if expected_kind == "pr_review"
+        else "prior_plan_item_dispositions"
+    )
+    stripped = raw.lstrip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        payload, json_end = json.JSONDecoder().raw_decode(stripped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("kind") != expected_kind:
+        return None
+    dispositions = payload.get(disposition_field)
+    if not isinstance(dispositions, list):
+        return None
+    filtered = [
+        e for e in dispositions if isinstance(e, dict) and e.get("item_id") in allowed_ids
+    ]
+    if len(filtered) == len(dispositions):
+        return None
+    return (
+        json.dumps({**payload, disposition_field: filtered}, ensure_ascii=False)
+        + stripped[json_end:]
+    )
+
+
 def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> str | None:
     """Trim envelope-only trailing material without changing structured JSON."""
     if expected_kind not in {"pr_review", "plan_review", "plan_revision", "coder_followup"}:
