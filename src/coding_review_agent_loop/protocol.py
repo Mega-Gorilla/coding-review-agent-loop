@@ -21,6 +21,8 @@ PLAN_STATE_RE = re.compile(r"<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*--
 PR_RE = re.compile(r"<!--\s*AGENT_PR:\s*(\d+)\s*-->", re.I)
 GH_PR_URL_RE = re.compile(r"/pull/(\d+)(?:\b|$)")
 CLARIFY_RE = re.compile(r"<!--\s*AGENT_CLARIFY\s*-->", re.I)
+# Standalone variant: AGENT_CLARIFY only when it occupies its own line.
+_STANDALONE_CLARIFY_RE = re.compile(r"(?m)^\s*<!--\s*AGENT_CLARIFY\s*-->\s*$", re.I)
 HUMAN_REVIEWER_SIGNATURE_RE = re.compile(r"^\s*--\s*Human Reviewer\s*$", re.I | re.M)
 HUMAN_REQUIREMENTS_RESOLVED_RE = re.compile(
     r"<!--\s*HUMAN_REQUIREMENTS_RESOLVED\s*-->",
@@ -222,24 +224,30 @@ def parse_plan_state(text: str) -> str:
 
 
 def parse_pr_number(text: str) -> int | None:
-    marker = PR_RE.search(text)
-    if marker:
-        return int(marker.group(1))
-    url = GH_PR_URL_RE.search(text)
-    if url:
-        return int(url.group(1))
+    # Use the final marker as authoritative, consistent with parse_agent_state.
+    markers = list(PR_RE.finditer(text))
+    if markers:
+        return int(markers[-1].group(1))
+    urls = list(GH_PR_URL_RE.finditer(text))
+    if urls:
+        return int(urls[-1].group(1))
     return None
 
 
 def is_clarification_request(text: str) -> bool:
-    clarify_matches = list(CLARIFY_RE.finditer(text))
+    # Only standalone occurrences (own line) count; inline examples in prose are ignored.
+    clarify_matches = list(_STANDALONE_CLARIFY_RE.finditer(text))
     if not clarify_matches:
         return False
     last_clarify_pos = clarify_matches[-1].start()
-    # A valid AGENT_STATE or AGENT_PLAN_STATE marker appearing after the last
-    # AGENT_CLARIFY takes precedence, so embedded examples in plan/PR prose do
-    # not trigger clarification handling.
-    state_matches = list(STATE_RE.finditer(text)) + list(PLAN_STATE_RE.finditer(text))
+    # Any valid final-state marker appearing after the last standalone AGENT_CLARIFY
+    # takes precedence: AGENT_STATE, AGENT_PLAN_STATE, AGENT_PR, or a PR URL.
+    state_matches = (
+        list(STATE_RE.finditer(text))
+        + list(PLAN_STATE_RE.finditer(text))
+        + list(PR_RE.finditer(text))
+        + list(GH_PR_URL_RE.finditer(text))
+    )
     if state_matches and max(m.start() for m in state_matches) > last_clarify_pos:
         return False
     return True

@@ -5690,6 +5690,20 @@ def test_parse_pr_number_accepts_marker_and_url():
     assert parse_pr_number("no pr here") is None
 
 
+def test_parse_pr_number_uses_final_marker():
+    # When multiple AGENT_PR markers are present, the last one is authoritative.
+    assert parse_pr_number("<!-- AGENT_PR: 10 -->\n<!-- AGENT_PR: 20 -->") == 20
+    # Same for PR URLs.
+    assert (
+        parse_pr_number(
+            "https://github.com/OWNER/REPO/pull/1 and https://github.com/OWNER/REPO/pull/2"
+        )
+        == 2
+    )
+    # Marker takes precedence over URL when both present (marker checked first).
+    assert parse_pr_number("https://github.com/OWNER/REPO/pull/5\n<!-- AGENT_PR: 7 -->") == 7
+
+
 def test_issue_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
     runner = FakeRunner(
         claude_outputs=[
@@ -14723,7 +14737,8 @@ def test_is_clarification_request_detects_marker():
 
 
 def test_is_clarification_request_state_marker_after_clarify_takes_precedence():
-    # AGENT_PLAN_STATE after embedded AGENT_CLARIFY example: issue #216 / #278 shape.
+    # AGENT_PLAN_STATE after inline AGENT_CLARIFY example: issue #216 / #278 shape.
+    # Inline (non-standalone) AGENT_CLARIFY never triggers, regardless of state markers.
     plan_with_embedded_clarify = (
         "Here is my plan.\n\n"
         "If I needed clarification I would emit <!-- AGENT_CLARIFY --> as a marker.\n\n"
@@ -14733,7 +14748,14 @@ def test_is_clarification_request_state_marker_after_clarify_takes_precedence():
     )
     assert not is_clarification_request(plan_with_embedded_clarify)
 
-    # AGENT_STATE after embedded AGENT_CLARIFY example: PR/coder blocking response.
+    # Inline AGENT_CLARIFY without any state marker: still not clarification.
+    inline_only = (
+        "The protocol supports <!-- AGENT_CLARIFY --> for clarification requests.\n\n"
+        "Here is my fix."
+    )
+    assert not is_clarification_request(inline_only)
+
+    # AGENT_STATE after inline AGENT_CLARIFY example: PR/coder blocking response.
     pr_response_with_embedded_clarify = (
         "The protocol supports <!-- AGENT_CLARIFY --> for clarification requests.\n\n"
         "Here is my fix.\n\n"
@@ -14741,23 +14763,49 @@ def test_is_clarification_request_state_marker_after_clarify_takes_precedence():
     )
     assert not is_clarification_request(pr_response_with_embedded_clarify)
 
-    # Real clarification request: AGENT_CLARIFY is the final marker, no state marker.
+    # AGENT_PR after inline AGENT_CLARIFY example: coder PR-creation response.
+    pr_created_with_embedded_clarify = (
+        "Use <!-- AGENT_CLARIFY --> if you need more info.\n\n"
+        "Implemented the fix.\n\n"
+        "<!-- AGENT_PR: 42 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    assert not is_clarification_request(pr_created_with_embedded_clarify)
+
+    # PR URL after inline AGENT_CLARIFY: treated as final state marker.
+    pr_url_with_embedded_clarify = (
+        "Use <!-- AGENT_CLARIFY --> for questions.\n\n"
+        "See https://github.com/OWNER/REPO/pull/99 for the PR."
+    )
+    assert not is_clarification_request(pr_url_with_embedded_clarify)
+
+    # Real clarification request: standalone AGENT_CLARIFY is the final marker.
     real_clarify = "Which endpoint should I use?\n<!-- AGENT_CLARIFY -->\n-- Anthropic Claude"
     assert is_clarification_request(real_clarify)
 
-    # AGENT_CLARIFY after a state marker: clarify is final and takes precedence.
+    # Standalone AGENT_CLARIFY on its own line, after a state marker in prose.
     clarify_after_state = (
-        "Round 1 ended with <!-- AGENT_STATE: blocking -->, "
-        "but I still need more info.\n<!-- AGENT_CLARIFY -->"
+        "Round 1 ended with <!-- AGENT_STATE: blocking -->, but I still need more info.\n"
+        "<!-- AGENT_CLARIFY -->"
     )
     assert is_clarification_request(clarify_after_state)
 
-    # AGENT_PLAN_STATE before AGENT_CLARIFY: clarify is final.
-    plan_clarify_last = (
-        "<!-- AGENT_PLAN_STATE: blocking --> was used before, "
-        "but now I need: <!-- AGENT_CLARIFY -->"
+    # Standalone AGENT_CLARIFY on its own line, appearing after AGENT_PLAN_STATE in prose.
+    plan_state_in_prose_clarify_last = (
+        "The previous round used <!-- AGENT_PLAN_STATE: blocking --> to signal issues,\n"
+        "but now I have a question:\n"
+        "<!-- AGENT_CLARIFY -->"
     )
-    assert is_clarification_request(plan_clarify_last)
+    assert is_clarification_request(plan_state_in_prose_clarify_last)
+
+
+def test_is_clarification_request_pr_marker_takes_precedence():
+    # AGENT_PR: N standalone marker after standalone AGENT_CLARIFY.
+    pr_after_clarify = (
+        "<!-- AGENT_CLARIFY -->\n"
+        "Actually I have enough info.\n"
+        "<!-- AGENT_PR: 55 -->"
+    )
+    assert not is_clarification_request(pr_after_clarify)
 
 
 def test_task_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
