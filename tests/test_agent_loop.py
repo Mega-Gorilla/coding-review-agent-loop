@@ -14722,6 +14722,44 @@ def test_is_clarification_request_detects_marker():
     assert not is_clarification_request("done\n<!-- AGENT_STATE: blocking -->")
 
 
+def test_is_clarification_request_state_marker_after_clarify_takes_precedence():
+    # AGENT_PLAN_STATE after embedded AGENT_CLARIFY example: issue #216 / #278 shape.
+    plan_with_embedded_clarify = (
+        "Here is my plan.\n\n"
+        "If I needed clarification I would emit <!-- AGENT_CLARIFY --> as a marker.\n\n"
+        "But I have enough information, so here is the full plan:\n\n"
+        "1. Do step one\n2. Do step two\n\n"
+        "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    assert not is_clarification_request(plan_with_embedded_clarify)
+
+    # AGENT_STATE after embedded AGENT_CLARIFY example: PR/coder blocking response.
+    pr_response_with_embedded_clarify = (
+        "The protocol supports <!-- AGENT_CLARIFY --> for clarification requests.\n\n"
+        "Here is my fix.\n\n"
+        "<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    assert not is_clarification_request(pr_response_with_embedded_clarify)
+
+    # Real clarification request: AGENT_CLARIFY is the final marker, no state marker.
+    real_clarify = "Which endpoint should I use?\n<!-- AGENT_CLARIFY -->\n-- Anthropic Claude"
+    assert is_clarification_request(real_clarify)
+
+    # AGENT_CLARIFY after a state marker: clarify is final and takes precedence.
+    clarify_after_state = (
+        "Round 1 ended with <!-- AGENT_STATE: blocking -->, "
+        "but I still need more info.\n<!-- AGENT_CLARIFY -->"
+    )
+    assert is_clarification_request(clarify_after_state)
+
+    # AGENT_PLAN_STATE before AGENT_CLARIFY: clarify is final.
+    plan_clarify_last = (
+        "<!-- AGENT_PLAN_STATE: blocking --> was used before, "
+        "but now I need: <!-- AGENT_CLARIFY -->"
+    )
+    assert is_clarification_request(plan_clarify_last)
+
+
 def test_task_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
     runner = FakeRunner(
         claude_outputs=[

@@ -232,7 +232,17 @@ def parse_pr_number(text: str) -> int | None:
 
 
 def is_clarification_request(text: str) -> bool:
-    return bool(CLARIFY_RE.search(text))
+    clarify_matches = list(CLARIFY_RE.finditer(text))
+    if not clarify_matches:
+        return False
+    last_clarify_pos = clarify_matches[-1].start()
+    # A valid AGENT_STATE or AGENT_PLAN_STATE marker appearing after the last
+    # AGENT_CLARIFY takes precedence, so embedded examples in plan/PR prose do
+    # not trigger clarification handling.
+    state_matches = list(STATE_RE.finditer(text)) + list(PLAN_STATE_RE.finditer(text))
+    if state_matches and max(m.start() for m in state_matches) > last_clarify_pos:
+        return False
+    return True
 
 
 def parse_signed_human_requirement_body(text: str | None) -> str | None:
