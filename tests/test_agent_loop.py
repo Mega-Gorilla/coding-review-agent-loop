@@ -14798,9 +14798,9 @@ def test_is_clarification_request_state_marker_after_clarify_takes_precedence():
     assert is_clarification_request(plan_state_in_prose_clarify_last)
 
 
-def test_is_clarification_request_standalone_state_suppresses_regardless_of_position():
+def test_is_clarification_request_standalone_marker_positional_semantics():
     # Standalone AGENT_PLAN_STATE footer appearing BEFORE a standalone AGENT_CLARIFY
-    # (e.g. in an appendix) takes precedence — AGENT_CLARIFY is not the final type marker.
+    # does NOT suppress it — AGENT_CLARIFY is the final marker and wins.
     plan_footer_then_clarify_appendix = (
         "Plan content.\n\n"
         "<!-- AGENT_PLAN_STATE: blocking -->\n"
@@ -14808,15 +14808,22 @@ def test_is_clarification_request_standalone_state_suppresses_regardless_of_posi
         "Appendix:\n"
         "<!-- AGENT_CLARIFY -->"
     )
-    assert not is_clarification_request(plan_footer_then_clarify_appendix)
+    assert is_clarification_request(plan_footer_then_clarify_appendix)
 
-    # Standalone AGENT_STATE anywhere suppresses AGENT_CLARIFY.
+    # Standalone AGENT_STATE appearing BEFORE AGENT_CLARIFY also does not suppress.
     state_then_clarify = (
         "<!-- AGENT_STATE: blocking -->\n\n"
         "Note:\n"
         "<!-- AGENT_CLARIFY -->"
     )
-    assert not is_clarification_request(state_then_clarify)
+    assert is_clarification_request(state_then_clarify)
+
+    # Standalone AGENT_STATE appearing AFTER AGENT_CLARIFY does suppress it.
+    clarify_then_state = (
+        "<!-- AGENT_CLARIFY -->\n"
+        "<!-- AGENT_STATE: blocking -->"
+    )
+    assert not is_clarification_request(clarify_then_state)
 
     # Inline (non-standalone) AGENT_STATE in prose does NOT suppress AGENT_CLARIFY —
     # it may be a quoted reference to a previous round's state.
@@ -14836,7 +14843,7 @@ def test_is_clarification_request_standalone_state_suppresses_regardless_of_posi
 
 
 def test_is_clarification_request_pr_marker_takes_precedence():
-    # AGENT_PR: N standalone marker (before or after) suppresses AGENT_CLARIFY.
+    # AGENT_PR: N standalone marker appearing AFTER AGENT_CLARIFY suppresses it.
     pr_after_clarify = (
         "<!-- AGENT_CLARIFY -->\n"
         "Actually I have enough info.\n"
@@ -14844,14 +14851,15 @@ def test_is_clarification_request_pr_marker_takes_precedence():
     )
     assert not is_clarification_request(pr_after_clarify)
 
-    # AGENT_PR: N standalone marker appearing BEFORE AGENT_CLARIFY also suppresses.
+    # AGENT_PR: N standalone marker appearing BEFORE AGENT_CLARIFY does NOT suppress —
+    # AGENT_CLARIFY is the final marker and wins.
     pr_before_clarify = (
         "<!-- AGENT_PR: 55 -->\n"
         "<!-- AGENT_STATE: blocking -->\n\n"
         "Note:\n"
         "<!-- AGENT_CLARIFY -->"
     )
-    assert not is_clarification_request(pr_before_clarify)
+    assert is_clarification_request(pr_before_clarify)
 
 
 def test_is_clarification_request_ignores_fenced_code_block_examples():

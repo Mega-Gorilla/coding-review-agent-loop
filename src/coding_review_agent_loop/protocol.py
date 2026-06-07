@@ -276,15 +276,16 @@ def is_clarification_request(text: str) -> bool:
     if not active_clarify:
         return False
     last_clarify_pos = active_clarify[-1].start()
-    # Any standalone AGENT_STATE / AGENT_PLAN_STATE / AGENT_PR marker that is NOT
-    # inside a code block takes precedence, regardless of its position in the text.
-    # Inline markers in prose (non-standalone) are ignored so that quoted examples
-    # don't suppress a real clarification request.
+    # A standalone AGENT_STATE / AGENT_PLAN_STATE / AGENT_PR marker that is NOT inside a
+    # code block AND appears AFTER the last active AGENT_CLARIFY takes precedence.
+    # Markers appearing before the final AGENT_CLARIFY (e.g. from an earlier round's footer
+    # quoted in prose, or a plan state preceding an appendix question) do not suppress it.
+    # Inline markers in prose (non-standalone) are also ignored.
     for regex in (_STANDALONE_STATE_RE, _STANDALONE_PLAN_STATE_RE, _STANDALONE_PR_RE):
         for m in regex.finditer(text):
-            if not _in_code_block(m.start()):
+            if not _in_code_block(m.start()) and m.start() > last_clarify_pos:
                 return False
-    # GH_PR_URL is positional: a non-code-block PR URL appearing after the last
+    # GH_PR_URL is likewise positional: a non-code-block PR URL appearing after the last
     # active AGENT_CLARIFY also takes precedence.
     if any(
         not _in_code_block(m.start()) and m.start() > last_clarify_pos
