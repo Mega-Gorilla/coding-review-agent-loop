@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from .errors import AgentLoopError
 
@@ -44,6 +45,7 @@ class Runner:
         cwd: Path,
         input_text: str | None = None,
         check: bool = True,
+        env: Mapping[str, str] | None = None,
     ) -> CommandResult:
         cmd = [str(a) for a in args]
         if self.dry_run:
@@ -60,6 +62,7 @@ class Runner:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             check=False,
+            env={**os.environ, **env} if env is not None else None,
         )
         result = CommandResult(cmd, cwd, proc.stdout, proc.stderr, proc.returncode)
         if check and proc.returncode != 0:
@@ -78,6 +81,7 @@ class Runner:
         label: str,
         progress_interval_seconds: int,
         check: bool = True,
+        env: Mapping[str, str] | None = None,
     ) -> CommandResult:
         cmd = [str(a) for a in args]
         if self.dry_run:
@@ -99,6 +103,7 @@ class Runner:
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
                 text=True,
+                env={**os.environ, **env} if env is not None else None,
             )
             try:
                 while True:

@@ -94,6 +94,7 @@ class ClaudeBackend:
             label="Claude",
             progress_interval_seconds=config.progress_interval_seconds,
             check=False,
+            env={"AGENT_LOOP_WORKDIR": str(config.claude_dir.resolve())},
         )
         log(config, f"Claude finished; log: {log_path}")
         message_text, new_session_id, usage, raw_usage = _parse_claude_output(result.stdout)

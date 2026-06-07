@@ -19,6 +19,7 @@ from .protocol import (
     HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK,
     UnresolvedReviewItem,
 )
+from .workdirs import agent_workdir
 
 
 @dataclass(frozen=True)
@@ -81,6 +82,45 @@ def _coder_test_reporting_guidance() -> str:
         "locally. In your final response, include a short `Tests:` line listing "
         "the exact commands run and whether they passed. If you cannot run tests, "
         "explain why in that `Tests:` line.\n"
+    )
+
+
+def _coder_workdir_guidance(
+    config: AgentLoopConfig, *, implementation: bool = True, agent: AgentName | None = None
+) -> str:
+    active_agent = agent or config.coder
+    workdir = agent_workdir(config, active_agent).resolve()
+    repo_name = config.repo.rsplit("/", 1)[-1]
+    scope = (
+        "Implementation, inspection, tests, commits, and pushes"
+        if implementation
+        else "Inspection"
+    )
+    dangerous_args = {
+        "--dangerously-skip-permissions",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--yolo",
+    }
+    active_args = {
+        "claude": config.claude_args,
+        "codex": config.codex_args,
+        "gemini": config.gemini_args,
+    }[active_agent]
+    dangerous_warning = ""
+    if any(arg in dangerous_args for arg in active_args):
+        dangerous_warning = (
+            " Dangerous agent permissions are active, so the CLI may allow writes "
+            "outside this checkout; treat the assigned-workdir rule as mandatory."
+        )
+    return (
+        f"Assigned checkout: `{workdir}`. `AGENT_LOOP_WORKDIR` is set to this path "
+        "for agent subprocesses. "
+        f"{scope} must stay in that directory unless the user explicitly authorizes "
+        "a different path. Do not `cd` into sibling, home, deployment, or duplicate "
+        f"clones such as `~/{repo_name}` or `~/claude-code/{repo_name}`. Before "
+        "running tests or committing, run `pwd` and `git status --branch --short` "
+        "and confirm the path is the assigned checkout."
+        f"{dangerous_warning}\n"
     )
 
 
@@ -658,6 +698,7 @@ footer.
 def _compact_plan_stable_prefix(
     *,
     config: AgentLoopConfig,
+    workdir_guidance: str,
     memory: AgentMemoryContext | None,
     issue_context: IssueContext | None,
     unresolved_items: Sequence[UnresolvedReviewItem],
@@ -671,6 +712,7 @@ def _compact_plan_stable_prefix(
         for part in (
             "Compact cache-aware planning context",
             f"Repository: {config.repo}",
+            workdir_guidance,
             _scratch_file_guidance(),
             response_protocol,
             _memory_block(memory),
@@ -743,6 +785,7 @@ def build_issue_prompt(
 
 Use this local checkout as your workspace. Create a branch, implement the fix,
 run relevant tests, commit, push, and open a pull request against {config.base}.
+{_coder_workdir_guidance(config)}
 {_scratch_file_guidance()}
 {_coder_test_reporting_guidance()}
 {_issue_pr_reference_guidance(issue_number)}
@@ -787,6 +830,7 @@ Use this local checkout only to inspect context. Do not edit files, create a
 branch, commit, push, or open a pull request during this planning stage.
 Write a concise implementation plan covering the intended approach, key files or
 areas to change, edge cases, and test strategy.
+{_coder_workdir_guidance(config, implementation=False)}
 {_scratch_file_guidance()}
 {human_requirements_context.block}{_coder_human_requirements_guidance(
     human_requirements_context,
@@ -876,6 +920,7 @@ Contradictory forms like `same-plan: none`, `still blocking: none`, and `future 
 
 Use this local checkout only to inspect context. Do not edit files, create a
 branch, commit, push, or open a pull request during this planning review.
+{_coder_workdir_guidance(config, implementation=False, agent=reviewer)}
 {_scratch_file_guidance()}
 {human_requirements_block}{_issue_context_block(issue_context)}
 {unresolved_items_block}{_memory_block(memory)}
@@ -991,6 +1036,7 @@ Contradictory forms like `same-plan: none`, `still blocking: none`, and `future 
         unresolved_items_guidance = ""
     stable_prefix = _compact_plan_stable_prefix(
         config=config,
+        workdir_guidance=_coder_workdir_guidance(config, implementation=False, agent=reviewer),
         memory=memory,
         issue_context=issue_context,
         unresolved_items=unresolved_items,
@@ -1236,6 +1282,7 @@ def _build_compact_plan_revision_prompt(
     )
     stable_prefix = _compact_plan_stable_prefix(
         config=config,
+        workdir_guidance=_coder_workdir_guidance(config, implementation=False),
         memory=memory,
         issue_context=issue_context,
         unresolved_items=unresolved_items,
@@ -1303,6 +1350,7 @@ def build_issue_implementation_prompt(
 Use this local checkout as your workspace. Create a branch, implement the
 approved plan, run relevant tests, commit, push, and open a pull request against
 {config.base}.
+{_coder_workdir_guidance(config)}
 {_scratch_file_guidance()}
 {_coder_test_reporting_guidance()}
 {_issue_pr_reference_guidance(issue_number)}
@@ -1346,6 +1394,7 @@ Task:
 {_memory_block(memory)}
 
 Use this local checkout as your workspace. Decide between two paths:
+{_coder_workdir_guidance(config)}
 
 (a) If the task is clear enough to implement, create a branch, implement the
     change, run relevant tests, commit, push, and open a pull request against
@@ -1470,6 +1519,7 @@ def _compact_coder_followup_block(
 def _compact_pr_review_stable_prefix(
     *,
     config: AgentLoopConfig,
+    workdir_guidance: str,
     memory: AgentMemoryContext | None,
     pr_metadata: PullRequestMetadata,
     issue_context: IssueContext | None,
@@ -1554,6 +1604,7 @@ adds a merge migration.
         for part in (
             "Compact cache-aware PR review context",
             f"Repository: {config.repo}",
+            workdir_guidance,
             _scratch_file_guidance(),
             response_schema,
             unresolved_items_guidance,
@@ -1686,6 +1737,7 @@ follow-ups for compatibility, but prefer `### Future follow-ups`.
 """
     stable_prefix = _compact_pr_review_stable_prefix(
         config=config,
+        workdir_guidance=_coder_workdir_guidance(config, implementation=False, agent=reviewer),
         memory=memory,
         pr_metadata=pr_metadata,
         issue_context=issue_context,
@@ -1899,6 +1951,7 @@ review round is about. If local files do not match that SHA, refresh/fetch the
 checkout before reviewing. Do not spend time discovering the PR
 branch. Do not report findings based on untracked files unless those files are
 present in the PR diff.
+{_coder_workdir_guidance(config, implementation=False, agent=reviewer)}
 {_scratch_file_guidance()}
 {checks_block}{_issue_context_block(issue_context)}
 {_human_requirements_block(human_requirements)}
@@ -2013,6 +2066,7 @@ def build_followup_prompt(
 Address the review below in this local checkout. Pull/sync the PR branch if
 needed, implement fixes, run relevant tests, commit, and push to the same PR.
 Do not create a new PR.
+{_coder_workdir_guidance(config)}
 {_scratch_file_guidance()}
 {_coder_test_reporting_guidance()}
 {_issue_context_block(issue_context)}
@@ -2057,6 +2111,7 @@ def build_same_pr_followup_prompt(
 Address the follow-up items below in this local checkout. Pull/sync the PR
 branch if needed, implement fixes, run relevant tests, commit, and push to the
 same PR. Do not create a new PR.
+{_coder_workdir_guidance(config)}
 These same-PR follow-ups are intended to be small, localized cleanup for the
 current PR. Keep the change narrowly scoped to the listed items. Do not take on
 larger redesigns or unrelated future work; call that out instead. The PR

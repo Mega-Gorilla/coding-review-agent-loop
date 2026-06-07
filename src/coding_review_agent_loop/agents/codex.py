@@ -128,6 +128,7 @@ class CodexBackend:
                     prompt,
                 ],
                 cwd=config.codex_dir,
+                env={"AGENT_LOOP_WORKDIR": str(config.codex_dir.resolve())},
             )
             log(config, f"Codex finished; log: {log_path}")
             return AgentResult(
@@ -159,6 +160,7 @@ class CodexBackend:
                 label="Codex",
                 progress_interval_seconds=config.progress_interval_seconds,
                 check=False,
+                env={"AGENT_LOOP_WORKDIR": str(config.codex_dir.resolve())},
             )
             response_file_text = read_public_response_file(response_path)
             message_text = _read_codex_message_file(Path(output_path)) or result.stdout

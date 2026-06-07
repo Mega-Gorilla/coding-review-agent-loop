@@ -352,6 +352,22 @@ Explicit workdirs remain conservative. A dirty explicit git checkout fails
 clearly, and an explicit checkout whose origin does not match `--repo` is
 rejected.
 
+Coder prompts name the active assigned checkout as an absolute path and set
+`AGENT_LOOP_WORKDIR` to that same path for the agent subprocess. Implementation,
+inspection, tests, commits, and pushes are expected to stay in that checkout
+unless the user explicitly authorizes another path. Coder prompts also ask the
+agent to run `pwd` and `git status --branch --short` before tests or commits,
+and to avoid sibling, home, deployment, or duplicate clones such as `~/REPO` or
+`~/claude-code/REPO`.
+
+The orchestrator validates coder-reported test commands before posting normal
+coder progress. If a `Tests:` report or structured `tests_run` entry references
+an absolute, `$HOME`, or `~/` path outside the assigned checkout, the loop fails
+with an `AgentLoopError` naming the offending command and assigned checkout.
+For initial issue, task, and approved-plan implementations, the loop also
+checks that the assigned checkout `HEAD` advanced when the coder reports a PR;
+unchanged `HEAD` is rejected before the coder PR comment is posted.
+
 These temporary checkouts may disappear after reboot or `/tmp` cleanup. Large
 projects and long-lived agent setups should use explicit persistent workdirs to
 avoid repeated clone, dependency setup, and indexing costs.
@@ -468,6 +484,10 @@ This applies:
 | `claude` | `--dangerously-skip-permissions` |
 | `codex exec` | `--dangerously-bypass-approvals-and-sandbox` |
 | `gemini` | `--yolo --skip-trust` |
+
+Dangerous permissions do not relax the assigned-checkout rule. They make it
+more important: the CLI may allow cross-checkout mutation, but the prompt and
+response validation still require coder work to remain in `AGENT_LOOP_WORKDIR`.
 
 You can also provide exact per-agent replacements. Repeat once per token:
 

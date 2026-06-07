@@ -119,6 +119,7 @@ from coding_review_agent_loop.prompts import (
     build_issue_implementation_prompt,
     build_issue_plan_prompt,
     build_issue_prompt,
+    build_task_prompt,
     build_same_pr_followup_prompt,
     build_plan_review_prompt,
     build_plan_revision_prompt,
@@ -154,6 +155,11 @@ from coding_review_agent_loop.protocol import (
     validate_structured_coder_followup,
     validate_structured_human_requirements_acknowledgement,
     validate_structured_plan_revision,
+)
+from coding_review_agent_loop.workdir_guard import (
+    extract_reported_tests_from_response,
+    validate_response_tests_within_workdir,
+    validate_test_commands_within_workdir,
 )
 
 from unittest.mock import MagicMock, patch
@@ -214,6 +220,7 @@ class FakeRunner(Runner):
         diff_stderr="",
         issue_urls=None,
         public_response_outputs=None,
+        advance_git_head_on_pr=True,
     ):
         super().__init__(dry_run=False)
         self.claude_outputs = list(claude_outputs or [])
@@ -273,6 +280,8 @@ class FakeRunner(Runner):
         self.diff_stderr = diff_stderr
         self.issue_urls = list(issue_urls) if issue_urls is not None else None
         self.public_response_outputs = list(public_response_outputs or [])
+        self.advance_git_head_on_pr = advance_git_head_on_pr
+        self._agent_pr_counter = 0
 
     def _normalize_legacy_agent_output(self, output: str, prompt: str) -> str:
         stripped = output.lstrip()
@@ -412,6 +421,14 @@ class FakeRunner(Runner):
             response = self._normalize_legacy_agent_output(response, prompt)
         response_path.write_text(response, encoding="utf-8")
 
+    def _maybe_advance_git_head_for_agent_pr(self, text: str) -> None:
+        if not self.advance_git_head_on_pr:
+            return
+        if "<!-- AGENT_PR:" not in text and "github.com/OWNER/REPO/pull/" not in text:
+            return
+        self._agent_pr_counter += 1
+        self.git_head = f"{self.git_head}-agent-{self._agent_pr_counter}"
+
     def run_with_log(
         self,
         args,
@@ -421,6 +438,7 @@ class FakeRunner(Runner):
         label,
         progress_interval_seconds,
         check=True,
+        env=None,
     ):
         cmd, cwd_path = self._record_command(args, cwd)
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -431,6 +449,7 @@ class FakeRunner(Runner):
             if isinstance(output, str):
                 output = self._normalize_legacy_agent_output(output, "\n".join(cmd))
             self._maybe_write_public_response_file(cmd)
+            self._maybe_advance_git_head_for_agent_pr(output)
             log_path.write_text(f"$ {' '.join(cmd)}\n\n{output}", encoding="utf-8")
             return CommandResult(cmd, cwd_path, output, "", returncode)
 
@@ -451,6 +470,7 @@ class FakeRunner(Runner):
             if "--output-last-message" in cmd:
                 out_path = Path(cmd[cmd.index("--output-last-message") + 1])
                 out_path.write_text(public_response, encoding="utf-8")
+            self._maybe_advance_git_head_for_agent_pr(public_response)
             log_path.write_text(f"$ {' '.join(cmd)}\n\ncodex completed", encoding="utf-8")
             return CommandResult(cmd, cwd_path, stdout, "", returncode)
 
@@ -467,18 +487,20 @@ class FakeRunner(Runner):
             if isinstance(output, str) and not explicit_stdout:
                 output = self._normalize_legacy_agent_output(output, "\n".join(cmd))
             self._maybe_write_public_response_file(cmd)
+            self._maybe_advance_git_head_for_agent_pr(output)
             log_path.write_text(f"$ {' '.join(cmd)}\n\n{output}", encoding="utf-8")
             return CommandResult(cmd, cwd_path, output, "", returncode)
 
         return self.run(args, cwd=cwd, check=check)
 
-    def run(self, args, *, cwd, input_text=None, check=True):
+    def run(self, args, *, cwd, input_text=None, check=True, env=None):
         cmd, cwd_path = self._record_command(args, cwd)
 
         if cmd[:1] == ["claude"]:
             output, returncode = self._next_agent_output(self.claude_outputs)
             if isinstance(output, str):
                 output = self._normalize_legacy_agent_output(output, "\n".join(cmd))
+            self._maybe_advance_git_head_for_agent_pr(output)
             return CommandResult(cmd, cwd_path, output, "", returncode)
 
         if cmd[:2] == ["codex", "exec"]:
@@ -497,6 +519,7 @@ class FakeRunner(Runner):
             if "--output-last-message" in cmd:
                 out_path = Path(cmd[cmd.index("--output-last-message") + 1])
                 out_path.write_text(public_response, encoding="utf-8")
+            self._maybe_advance_git_head_for_agent_pr(public_response)
             return CommandResult(cmd, cwd_path, stdout, "", returncode)
 
         if cmd[:3] == ["gh", "pr", "comment"]:
@@ -842,6 +865,121 @@ def make_config(tmp_path, *, create_dirs=True, **overrides):
         config["codex_dir"].mkdir(parents=True, exist_ok=True)
         config["gemini_dir"].mkdir(parents=True, exist_ok=True)
     return AgentLoopConfig(**config)
+
+
+def test_workdir_guard_rejects_outside_home_path(tmp_path):
+    assigned = tmp_path / "claude" / "repo"
+    assigned.mkdir(parents=True)
+
+    with pytest.raises(AgentLoopError, match="outside the assigned checkout"):
+        validate_test_commands_within_workdir(
+            ("cd ~/llm-dialectic && python -m pytest",),
+            assigned_workdir=assigned,
+        )
+
+
+def test_workdir_guard_rejects_windows_path_with_clear_message(tmp_path):
+    assigned = tmp_path / "claude" / "repo"
+    assigned.mkdir(parents=True)
+
+    with pytest.raises(
+        AgentLoopError,
+        match="cannot be validated against the assigned Unix checkout",
+    ):
+        validate_test_commands_within_workdir(
+            (r"cd C:\Users\dev\repo && python -m pytest",),
+            assigned_workdir=assigned,
+        )
+
+
+def test_workdir_guard_accepts_assigned_absolute_path(tmp_path):
+    assigned = tmp_path / "claude" / "repo"
+    tests_dir = assigned / "tests"
+    tests_dir.mkdir(parents=True)
+
+    validate_test_commands_within_workdir(
+        (f"cd {assigned} && python -m pytest {tests_dir}",),
+        assigned_workdir=assigned,
+    )
+
+
+def test_workdir_guard_accepts_relative_test_commands(tmp_path):
+    assigned = tmp_path / "claude" / "repo"
+    assigned.mkdir(parents=True)
+
+    validate_test_commands_within_workdir(
+        ("python -m pytest tests/test_agent_loop.py", "make test"),
+        assigned_workdir=assigned,
+    )
+
+
+def test_workdir_guard_extracts_tests_section_only(tmp_path):
+    assigned = tmp_path / "claude" / "repo"
+    assigned.mkdir(parents=True)
+    text = (
+        "Issue context mentioned Tests: cd ~/other && pytest.\n\n"
+        "Implemented.\n"
+        "Tests: python -m pytest tests/test_agent_loop.py passed.\n"
+        "<!-- AGENT_PR: 77 -->"
+    )
+
+    assert extract_reported_tests_from_response(text) == (
+        "python -m pytest tests/test_agent_loop.py passed.",
+    )
+    validate_response_tests_within_workdir(text, assigned_workdir=assigned)
+
+
+def test_coder_prompts_include_assigned_workdir_rule(tmp_path):
+    config = make_config(tmp_path, coder="codex")
+    assigned = str(config.codex_dir.resolve())
+
+    prompts = [
+        build_issue_prompt(56, config),
+        build_issue_plan_prompt(56, config),
+        build_issue_implementation_prompt(56, "1. Fix it.", config),
+        build_task_prompt("Fix the bug.", config),
+        build_followup_prompt(77, 1, "Needs tests.", config),
+        build_same_pr_followup_prompt(77, 1, "Tighten docs.", config),
+    ]
+
+    for prompt in prompts:
+        assert f"Assigned checkout: `{assigned}`" in prompt
+        assert "`AGENT_LOOP_WORKDIR` is set to this path" in prompt
+        assert "must stay in that directory" in prompt
+        assert "Do not `cd` into sibling, home, deployment, or duplicate clones" in prompt
+        assert "`pwd` and `git status --branch --short`" in prompt
+
+
+def test_reviewer_prompts_use_reviewer_assigned_workdir_rule(tmp_path):
+    config = make_config(
+        tmp_path,
+        coder="claude",
+        reviewer=("codex",),
+        claude_args=(),
+        codex_args=("--dangerously-bypass-approvals-and-sandbox",),
+    )
+    reviewer_assigned = str(config.codex_dir.resolve())
+    coder_assigned = str(config.claude_dir.resolve())
+
+    prompts = [
+        build_plan_review_prompt(56, 1, "Plan.", config, reviewer="codex"),
+        build_plan_review_prompt(
+            56,
+            1,
+            "Plan.",
+            config,
+            reviewer="codex",
+            compact_context=True,
+        ),
+        build_review_prompt(77, 1, config, reviewer="codex"),
+        build_review_prompt(77, 1, config, reviewer="codex", compact_context=True),
+    ]
+
+    for prompt in prompts:
+        assert f"Assigned checkout: `{reviewer_assigned}`" in prompt
+        assert f"Assigned checkout: `{coder_assigned}`" not in prompt
+        assert "Inspection must stay in that directory" in prompt
+        assert "Dangerous agent permissions are active" in prompt
 
 
 def _git(cwd: Path, *args: str) -> None:
@@ -14632,6 +14770,51 @@ def test_codex_issue_loop_requires_codex_to_report_pr_number(tmp_path):
     assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
 
 
+def test_issue_loop_rejects_outside_workdir_tests_before_posting_pr_comment(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Fixed issue.\n"
+            "Tests: cd ~/llm-dialectic && python -m pytest\n"
+            "<!-- AGENT_PR: 77 -->\n"
+            "<!-- AGENT_STATE: blocking -->\n"
+            "-- OpenAI Codex",
+        ],
+        claude_outputs=[
+            "Looks good.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+    )
+    config = make_config(tmp_path, coder="codex", reviewer="claude")
+
+    with pytest.raises(AgentLoopError, match="outside the assigned checkout"):
+        run_issue_loop(runner, issue_number=56, config=config)
+
+    assert runner.comments == []
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+
+
+def test_issue_loop_rejects_reported_pr_when_assigned_head_unchanged(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            "Fixed issue.\n"
+            "Tests: python -m pytest passed.\n"
+            "<!-- AGENT_PR: 77 -->\n"
+            "<!-- AGENT_STATE: blocking -->\n"
+            "-- OpenAI Codex",
+        ],
+        claude_outputs=[
+            "Looks good.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+        advance_git_head_on_pr=False,
+    )
+    config = make_config(tmp_path, coder="codex", reviewer="claude")
+
+    with pytest.raises(AgentLoopError, match="HEAD did not advance"):
+        run_issue_loop(runner, issue_number=56, config=config)
+
+    assert runner.comments == []
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+
+
 def test_codex_task_loop_creates_pr_then_claude_approves(tmp_path):
     runner = FakeRunner(
         codex_outputs=[
@@ -14648,6 +14831,36 @@ def test_codex_task_loop_creates_pr_then_claude_approves(tmp_path):
     assert len(runner.comments) == 2
     assert runner.comments[0].startswith("Implemented task.")
     assert runner.comments[1].startswith("**Review verdict:** Approved\n\nShip it.")
+
+
+def test_pr_loop_rejects_structured_followup_outside_workdir_tests_before_posting(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            structured_pr_review(
+                state="blocking",
+                summary="Needs a test.",
+                blocking_items=["Add a regression test."],
+                reviewer="Anthropic Claude",
+            ),
+            "Looks good.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            structured_coder_followup(
+                summary="Added the test.",
+                addressed_items=["item-1"],
+                tests_run=["cd ~/llm-dialectic && python -m pytest"],
+                reviewer="OpenAI Codex",
+            ),
+        ],
+    )
+    config = make_config(tmp_path, coder="codex", reviewer="claude")
+
+    with pytest.raises(AgentLoopError, match="outside the assigned checkout"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert len(runner.comments) == 1
+    assert runner.comments[0].startswith("**Review verdict:** Blocking")
+    assert not any("Added the test." in comment for comment in runner.comments)
 
 
 def test_codex_task_loop_picks_up_pr_url_when_marker_missing(tmp_path):
