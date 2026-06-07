@@ -21,6 +21,15 @@ PLAN_STATE_RE = re.compile(r"<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*--
 PR_RE = re.compile(r"<!--\s*AGENT_PR:\s*(\d+)\s*-->", re.I)
 GH_PR_URL_RE = re.compile(r"/pull/(\d+)(?:\b|$)")
 CLARIFY_RE = re.compile(r"<!--\s*AGENT_CLARIFY\s*-->", re.I)
+# Standalone variants: marker must occupy its own line.
+_STANDALONE_CLARIFY_RE = re.compile(r"(?m)^\s*<!--\s*AGENT_CLARIFY\s*-->\s*$", re.I)
+_STANDALONE_STATE_RE = re.compile(r"(?m)^\s*<!--\s*AGENT_STATE:\s*(approved|blocking)\s*-->\s*$", re.I)
+_STANDALONE_PLAN_STATE_RE = re.compile(
+    r"(?m)^\s*<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*-->\s*$", re.I
+)
+_STANDALONE_PR_RE = re.compile(r"(?m)^\s*<!--\s*AGENT_PR:\s*(\d+)\s*-->\s*$", re.I)
+# Matches the opening or closing line of a fenced code block (``` or ~~~, 3+ chars).
+_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})", re.M)
 HUMAN_REVIEWER_SIGNATURE_RE = re.compile(r"^\s*--\s*Human Reviewer\s*$", re.I | re.M)
 HUMAN_REQUIREMENTS_RESOLVED_RE = re.compile(
     r"<!--\s*HUMAN_REQUIREMENTS_RESOLVED\s*-->",
@@ -222,17 +231,78 @@ def parse_plan_state(text: str) -> str:
 
 
 def parse_pr_number(text: str) -> int | None:
-    marker = PR_RE.search(text)
-    if marker:
-        return int(marker.group(1))
-    url = GH_PR_URL_RE.search(text)
-    if url:
-        return int(url.group(1))
+    # Use the final marker as authoritative, consistent with parse_agent_state.
+    markers = list(PR_RE.finditer(text))
+    if markers:
+        return int(markers[-1].group(1))
+    urls = list(GH_PR_URL_RE.finditer(text))
+    if urls:
+        return int(urls[-1].group(1))
     return None
 
 
+def _fenced_code_block_ranges(text: str) -> list[tuple[int, int]]:
+    """Return (start, end) character ranges for each complete fenced code block."""
+    ranges: list[tuple[int, int]] = []
+    open_char: str | None = None
+    open_len: int = 0
+    open_start: int = 0
+    for m in _FENCE_RE.finditer(text):
+        fence_chars = m.group(1)
+        char = fence_chars[0]
+        length = len(fence_chars)
+        if open_char is None:
+            open_char, open_len, open_start = char, length, m.start()
+        elif char == open_char and length >= open_len:
+            line_end = text.find("\n", m.start())
+            end = (line_end + 1) if line_end != -1 else len(text)
+            ranges.append((open_start, end))
+            open_char = None
+    return ranges
+
+
 def is_clarification_request(text: str) -> bool:
-    return bool(CLARIFY_RE.search(text))
+    # Only standalone AGENT_CLARIFY (own line) counts; inline examples are ignored.
+    clarify_matches = list(_STANDALONE_CLARIFY_RE.finditer(text))
+    if not clarify_matches:
+        return False
+    # Exclude matches inside fenced code blocks.
+    code_ranges = _fenced_code_block_ranges(text)
+
+    def _in_code_block(pos: int) -> bool:
+        return any(start <= pos < end for start, end in code_ranges)
+
+    active_clarify = [m for m in clarify_matches if not _in_code_block(m.start())]
+    if not active_clarify:
+        return False
+    last_clarify_pos = active_clarify[-1].start()
+    # A standalone AGENT_STATE / AGENT_PLAN_STATE / AGENT_PR marker that is NOT inside a
+    # code block AND appears AFTER the last active AGENT_CLARIFY takes precedence.
+    # Markers appearing before the final AGENT_CLARIFY (e.g. from an earlier round's footer
+    # quoted in prose, or a plan state preceding an appendix question) do not suppress it.
+    # Inline markers in prose (non-standalone) are also ignored.
+    for regex in (_STANDALONE_STATE_RE, _STANDALONE_PLAN_STATE_RE, _STANDALONE_PR_RE):
+        for m in regex.finditer(text):
+            if not _in_code_block(m.start()) and m.start() > last_clarify_pos:
+                return False
+    # GH_PR_URL is likewise positional: a non-code-block PR URL appearing after the last
+    # active AGENT_CLARIFY also takes precedence.
+    if any(
+        not _in_code_block(m.start()) and m.start() > last_clarify_pos
+        for m in GH_PR_URL_RE.finditer(text)
+    ):
+        return False
+    # AGENT_CLARIFY must be the final content: only blank lines and/or
+    # signature lines (``-- Name``) may follow the last active marker.
+    last_m = active_clarify[-1]
+    after_clarify = text[last_m.end():]
+    for line in after_clarify.splitlines():
+        if not line.strip():
+            continue
+        if SIGNATURE_RE.match(line):
+            continue
+        return False
+    return True
 
 
 def parse_signed_human_requirement_body(text: str | None) -> str | None:
