@@ -21,8 +21,13 @@ PLAN_STATE_RE = re.compile(r"<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*--
 PR_RE = re.compile(r"<!--\s*AGENT_PR:\s*(\d+)\s*-->", re.I)
 GH_PR_URL_RE = re.compile(r"/pull/(\d+)(?:\b|$)")
 CLARIFY_RE = re.compile(r"<!--\s*AGENT_CLARIFY\s*-->", re.I)
-# Standalone variant: AGENT_CLARIFY only when it occupies its own line.
+# Standalone variants: marker must occupy its own line.
 _STANDALONE_CLARIFY_RE = re.compile(r"(?m)^\s*<!--\s*AGENT_CLARIFY\s*-->\s*$", re.I)
+_STANDALONE_STATE_RE = re.compile(r"(?m)^\s*<!--\s*AGENT_STATE:\s*(approved|blocking)\s*-->\s*$", re.I)
+_STANDALONE_PLAN_STATE_RE = re.compile(
+    r"(?m)^\s*<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*-->\s*$", re.I
+)
+_STANDALONE_PR_RE = re.compile(r"(?m)^\s*<!--\s*AGENT_PR:\s*(\d+)\s*-->\s*$", re.I)
 # Matches the opening or closing line of a fenced code block (``` or ~~~, 3+ chars).
 _FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})", re.M)
 HUMAN_REVIEWER_SIGNATURE_RE = re.compile(r"^\s*--\s*Human Reviewer\s*$", re.I | re.M)
@@ -257,28 +262,34 @@ def _fenced_code_block_ranges(text: str) -> list[tuple[int, int]]:
 
 
 def is_clarification_request(text: str) -> bool:
-    # Only standalone occurrences (own line) count; inline examples in prose are ignored.
+    # Only standalone AGENT_CLARIFY (own line) counts; inline examples are ignored.
     clarify_matches = list(_STANDALONE_CLARIFY_RE.finditer(text))
     if not clarify_matches:
         return False
     # Exclude matches inside fenced code blocks.
     code_ranges = _fenced_code_block_ranges(text)
-    active_clarify = [
-        m for m in clarify_matches
-        if not any(start <= m.start() < end for start, end in code_ranges)
-    ]
+
+    def _in_code_block(pos: int) -> bool:
+        return any(start <= pos < end for start, end in code_ranges)
+
+    active_clarify = [m for m in clarify_matches if not _in_code_block(m.start())]
     if not active_clarify:
         return False
     last_clarify_pos = active_clarify[-1].start()
-    # Any valid final-state marker appearing after the last active AGENT_CLARIFY
-    # takes precedence: AGENT_STATE, AGENT_PLAN_STATE, AGENT_PR, or a PR URL.
-    state_matches = (
-        list(STATE_RE.finditer(text))
-        + list(PLAN_STATE_RE.finditer(text))
-        + list(PR_RE.finditer(text))
-        + list(GH_PR_URL_RE.finditer(text))
-    )
-    if state_matches and max(m.start() for m in state_matches) > last_clarify_pos:
+    # Any standalone AGENT_STATE / AGENT_PLAN_STATE / AGENT_PR marker that is NOT
+    # inside a code block takes precedence, regardless of its position in the text.
+    # Inline markers in prose (non-standalone) are ignored so that quoted examples
+    # don't suppress a real clarification request.
+    for regex in (_STANDALONE_STATE_RE, _STANDALONE_PLAN_STATE_RE, _STANDALONE_PR_RE):
+        for m in regex.finditer(text):
+            if not _in_code_block(m.start()):
+                return False
+    # GH_PR_URL is positional: a non-code-block PR URL appearing after the last
+    # active AGENT_CLARIFY also takes precedence.
+    if any(
+        not _in_code_block(m.start()) and m.start() > last_clarify_pos
+        for m in GH_PR_URL_RE.finditer(text)
+    ):
         return False
     return True
 
