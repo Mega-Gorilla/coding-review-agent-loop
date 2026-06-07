@@ -1188,6 +1188,7 @@ def build_plan_revision_prompt(
 
 Revise the plan in this local checkout without editing code. Do not create a
 branch, commit, push, or open a pull request during this planning stage.
+{_coder_workdir_guidance(config, implementation=False)}
 {_scratch_file_guidance()}
 {human_requirements_context.block}{_coder_human_requirements_guidance(
     human_requirements_context,

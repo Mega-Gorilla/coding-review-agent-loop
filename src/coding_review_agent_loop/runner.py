@@ -96,6 +96,9 @@ class Runner:
         with log_path.open("w", encoding="utf-8") as log_file:
             log_file.write(header)
             log_file.flush()
+            # stderr=subprocess.STDOUT merges stderr into the log file.
+            # All agent backends (Claude, Codex, Gemini) use run_with_log,
+            # so stderr capture is uniform across them (issue #266).
             proc = subprocess.Popen(
                 cmd,
                 cwd=cwd,

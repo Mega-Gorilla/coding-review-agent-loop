@@ -1026,6 +1026,46 @@ def _run_validated_agent(
                     if normalized is not None:
                         try:
                             marker_value = validate(normalized)
+                        except UnknownPriorItemDispositionError as norm_exc:
+                            # Combined fix (issue #274): envelope normalization removed the
+                            # trailing defect but the normalized candidate still has unknown
+                            # prior dispositions. Try stripping them from the normalized text
+                            # so both defects are resolved in one deterministic pass.
+                            # Only apply when the original error was structural; when it was
+                            # already UnknownPriorItemDispositionError, block 2 handles it.
+                            if (
+                                not isinstance(exc, UnknownPriorItemDispositionError)
+                                and not ledger_incomplete
+                                and repair_expected_kind in {"pr_review", "plan_review", "plan_revision"}
+                            ):
+                                stripped_from_normalized = strip_unknown_prior_item_dispositions(
+                                    normalized,
+                                    allowed_ids=frozenset(norm_exc.allowed_ids),
+                                    expected_kind=repair_expected_kind,
+                                )
+                                if stripped_from_normalized is not None:
+                                    try:
+                                        marker_value = validate(stripped_from_normalized)
+                                    except AgentLoopError:
+                                        pass
+                                    else:
+                                        removed = ", ".join(sorted(norm_exc.unknown_ids))
+                                        allowed_str = ", ".join(sorted(norm_exc.allowed_ids)) or "(none)"
+                                        log(
+                                            config,
+                                            f"{agent_name}: combined envelope normalization and "
+                                            f"deterministic strip recovered malformed response; "
+                                            f"removed prior-item ID(s) {removed}; "
+                                            f"allowed carried prior IDs: {allowed_str}",
+                                        )
+                                        if usage_record is not None:
+                                            usage_record.validation_status = "validated"
+                                        return ValidatedAgentResponse(
+                                            text=stripped_from_normalized,
+                                            session_id=result.session_id,
+                                            marker_value=marker_value,
+                                            usage=usage,
+                                        )
                         except AgentLoopError:
                             pass
                         else:
