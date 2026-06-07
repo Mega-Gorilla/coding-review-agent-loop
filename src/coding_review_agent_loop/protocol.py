@@ -232,7 +232,17 @@ def parse_pr_number(text: str) -> int | None:
 
 
 def is_clarification_request(text: str) -> bool:
-    return bool(CLARIFY_RE.search(text))
+    matches = list(CLARIFY_RE.finditer(text))
+    if not matches:
+        return False
+    last_clarify_pos = matches[-1].end()
+    # A valid final AGENT_STATE, AGENT_PLAN_STATE, or AGENT_PR marker appearing after the last
+    # AGENT_CLARIFY takes precedence. This prevents embedded clarification marker examples
+    # (e.g. in prose or code blocks describing the protocol) from overriding a valid footer.
+    remaining = text[last_clarify_pos:]
+    if STATE_RE.search(remaining) or PLAN_STATE_RE.search(remaining) or PR_RE.search(remaining):
+        return False
+    return True
 
 
 def parse_signed_human_requirement_body(text: str | None) -> str | None:

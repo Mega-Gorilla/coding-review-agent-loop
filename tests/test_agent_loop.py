@@ -14722,6 +14722,67 @@ def test_is_clarification_request_detects_marker():
     assert not is_clarification_request("done\n<!-- AGENT_STATE: blocking -->")
 
 
+def test_is_clarification_request_state_marker_after_clarify_wins():
+    # AGENT_PLAN_STATE after embedded AGENT_CLARIFY → not clarification (issue #278)
+    plan_with_embedded_clarify = (
+        "Here is the plan.\n"
+        "The protocol supports `<!-- AGENT_CLARIFY -->` for asking questions.\n"
+        "\n"
+        "<!-- AGENT_PLAN_STATE: blocking -->\n"
+        "-- Anthropic Claude"
+    )
+    assert not is_clarification_request(plan_with_embedded_clarify)
+
+    # AGENT_STATE after embedded AGENT_CLARIFY → not clarification
+    response_with_embedded_clarify = (
+        "Here is my work.\n"
+        "Use `<!-- AGENT_CLARIFY -->` to request more info.\n"
+        "\n"
+        "<!-- AGENT_STATE: blocking -->\n"
+        "-- Anthropic Claude"
+    )
+    assert not is_clarification_request(response_with_embedded_clarify)
+
+    # AGENT_PR after embedded AGENT_CLARIFY → not clarification
+    pr_response_with_embedded_clarify = (
+        "PR created.\n"
+        "If needed, use `<!-- AGENT_CLARIFY -->` to ask questions.\n"
+        "\n"
+        "<!-- AGENT_PR: 42 -->\n"
+        "<!-- AGENT_STATE: blocking -->\n"
+        "-- Anthropic Claude"
+    )
+    assert not is_clarification_request(pr_response_with_embedded_clarify)
+
+
+def test_is_clarification_request_clarify_as_final_marker_is_still_detected():
+    # AGENT_CLARIFY as the final marker → still a clarification
+    assert is_clarification_request(
+        "What endpoint should I use?\n<!-- AGENT_CLARIFY -->\n-- Anthropic Claude"
+    )
+    # AGENT_STATE in body then AGENT_CLARIFY at end → clarification wins
+    assert is_clarification_request(
+        "Prior state: <!-- AGENT_STATE: blocking -->\n"
+        "But I need clarification.\n"
+        "<!-- AGENT_CLARIFY -->\n"
+        "-- Anthropic Claude"
+    )
+
+
+def test_is_clarification_request_code_block_example_does_not_trigger():
+    # Embedded in a fenced code block with AGENT_PLAN_STATE at end
+    response = (
+        "To request clarification, use:\n"
+        "```\n"
+        "<!-- AGENT_CLARIFY -->\n"
+        "```\n"
+        "\n"
+        "<!-- AGENT_PLAN_STATE: blocking -->\n"
+        "-- Anthropic Claude"
+    )
+    assert not is_clarification_request(response)
+
+
 def test_task_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
     runner = FakeRunner(
         claude_outputs=[
