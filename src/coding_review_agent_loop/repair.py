@@ -8,13 +8,98 @@ treats the result as blocking per the issue guardrails.
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import subprocess
 from collections.abc import Sequence
 
 from .agents.gemini import _parse_gemini_payload
+from .protocol import (
+    HUMAN_REQUIREMENTS_RESOLVED_RE,
+    PLAN_STATE_RE,
+    STATE_RE,
+    parse_human_requirements_acknowledgement,
+)
 
 _logger = logging.getLogger(__name__)
+
+_SIGNATURE_LINE_RE = re.compile(r"(?m)^--\s+\S[^\n]*")
+
+
+def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> str | None:
+    """Trim envelope-only trailing material without changing structured JSON."""
+    if expected_kind not in {"pr_review", "plan_review", "plan_revision", "coder_followup"}:
+        return None
+
+    stripped = raw.lstrip()
+    if not stripped.startswith("{"):
+        return None
+    try:
+        payload, json_end = json.JSONDecoder().raw_decode(stripped)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    json_text = stripped[:json_end].rstrip()
+    trailing = stripped[json_end:]
+    state_re = PLAN_STATE_RE if expected_kind in {"plan_review", "plan_revision"} else STATE_RE
+    state_match = state_re.search(trailing)
+    if state_match is None:
+        return None
+
+    before_footer = trailing[: state_match.start()]
+    preserved_before = ""
+    if expected_kind in {"pr_review", "plan_review"}:
+        before_lstripped = before_footer.lstrip()
+        marker_match = HUMAN_REQUIREMENTS_RESOLVED_RE.match(before_lstripped)
+        if marker_match is not None and before_lstripped[marker_match.end() :].strip() == "":
+            preserved_before = before_lstripped[: marker_match.end()].strip()
+        elif before_footer.strip():
+            return None
+    elif expected_kind == "plan_revision" and before_footer.strip():
+        parsed_human_requirements = parse_human_requirements_acknowledgement(before_footer)
+        if (
+            parsed_human_requirements.marker_present
+            and parsed_human_requirements.section_present
+        ):
+            preserved_before = before_footer.strip()
+        else:
+            return None
+    elif before_footer.strip():
+        return None
+
+    footer = trailing[state_match.start() : state_match.end()].strip()
+    after_footer = trailing[state_match.end() :]
+    after_footer_lstripped = after_footer.lstrip()
+    preserved_after = ""
+    if expected_kind == "pr_review":
+        marker_match = HUMAN_REQUIREMENTS_RESOLVED_RE.match(after_footer_lstripped)
+        if marker_match is not None:
+            preserved_after = after_footer_lstripped[: marker_match.end()].strip()
+            after_footer_lstripped = after_footer_lstripped[marker_match.end() :]
+        signature_match = _SIGNATURE_LINE_RE.match(after_footer_lstripped.lstrip())
+    else:
+        signature_match = _SIGNATURE_LINE_RE.search(after_footer_lstripped)
+
+    if signature_match is None:
+        return None
+    signature_source = (
+        after_footer_lstripped.lstrip()
+        if expected_kind == "pr_review"
+        else after_footer_lstripped
+    )
+    signature = signature_source[signature_match.start() : signature_match.end()].strip()
+
+    parts = [json_text]
+    if preserved_before:
+        parts.append(preserved_before)
+    parts.append(footer)
+    if preserved_after:
+        parts.append(preserved_after)
+    parts.append(signature)
+    return "\n".join(parts)
 
 # v13 prompt — adds repair guidance for human-requirements marker, active approved dispositions,
 # blocking+future dispositions, approved+current-plan future_followups, and same-round confusion:

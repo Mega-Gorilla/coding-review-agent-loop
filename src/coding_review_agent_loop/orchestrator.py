@@ -95,7 +95,7 @@ from .protocol import (
     validate_structured_plan_revision,
 )
 from .protocol import parse_review
-from .repair import attempt_repair
+from .repair import attempt_envelope_normalization, attempt_repair
 from .runner import Runner
 from .usage import RunUsageContext, UsageMetadata, estimate_usage
 from .workdirs import active_workdir
@@ -1002,6 +1002,37 @@ def _run_validated_agent(
                             marker_value=marker_value,
                             usage=usage,
                         )
+                if (
+                    use_repair
+                    and not public_text_is_transient
+                    and repair_expected_kind in STRUCTURED_PUBLIC_RESPONSE_KINDS
+                    and not (
+                        isinstance(exc, UnknownPriorItemDispositionError)
+                        and ledger_incomplete
+                    )
+                ):
+                    normalized = attempt_envelope_normalization(
+                        text,
+                        expected_kind=repair_expected_kind,
+                    )
+                    if normalized is not None:
+                        try:
+                            marker_value = validate(normalized)
+                        except AgentLoopError:
+                            pass
+                        else:
+                            log(
+                                config,
+                                f"{agent_name}: envelope normalization recovered malformed response",
+                            )
+                            if usage_record is not None:
+                                usage_record.validation_status = "validated"
+                            return ValidatedAgentResponse(
+                                text=normalized,
+                                session_id=result.session_id,
+                                marker_value=marker_value,
+                                usage=usage,
+                            )
                 if (
                     use_repair
                     and not public_text_is_transient

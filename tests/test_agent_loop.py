@@ -6788,7 +6788,7 @@ def test_public_response_structured_json_after_known_artifact_is_not_transient()
     assert not _is_transient_public_response(text, repair_expected_kind="coder_followup")
 
 
-def test_structured_plan_review_transient_terms_with_trailing_prose_runs_repair(tmp_path):
+def test_structured_plan_review_transient_terms_with_trailing_prose_normalizes(tmp_path):
     malformed_review = (
         structured_plan_review(
             state="approved",
@@ -6800,15 +6800,10 @@ def test_structured_plan_review_transient_terms_with_trailing_prose_runs_repair(
         )
         + "\nTrailing prose after the signature should be repaired."
     )
-    repaired_review = structured_plan_review(
-        state="approved",
-        summary="Plan review repaired.",
-        reviewer="Google Gemini",
-    )
     runner = FakeRunner(gemini_outputs=[malformed_review])
     config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
 
-    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=repaired_review) as repair_mock:
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
         response = _run_validated_agent(
             runner,
             agent="gemini",
@@ -6824,16 +6819,19 @@ def test_structured_plan_review_transient_terms_with_trailing_prose_runs_repair(
             repair_expected_kind="plan_review",
         )
 
-    assert response.text == repaired_review
-    repair_mock.assert_called_once_with(
-        malformed_review,
-        config.gemini_cmd,
-        expected_kind="plan_review",
+    assert response.text == structured_plan_review(
+        state="approved",
+        summary=(
+            "The plan discusses 429, quota, resource exhausted, timeout, capacity, "
+            "and transient retry handling as domain text."
+        ),
+        reviewer="Google Gemini",
     )
+    repair_mock.assert_not_called()
     assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
 
 
-def test_structured_pr_review_transient_terms_duplicate_footer_fails_deterministically(tmp_path):
+def test_structured_pr_review_transient_terms_duplicate_footer_normalizes(tmp_path):
     malformed_review = (
         structured_pr_review(
             state="approved",
@@ -6848,31 +6846,31 @@ def test_structured_pr_review_transient_terms_duplicate_footer_fails_determinist
     runner = FakeRunner(gemini_outputs=[malformed_review])
     config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
 
-    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value="still invalid") as repair_mock:
-        with pytest.raises(AgentLoopError) as exc_info:
-            _run_validated_agent(
-                runner,
-                agent="gemini",
-                config=config,
-                prompt="Review the PR.",
-                marker_description="<!-- AGENT_STATE: approved|blocking -->",
-                validate=lambda text: _validate_review_response(
-                    text,
-                    reviewer="Google Gemini",
-                    unresolved_items=(),
-                ),
-                use_repair=True,
-                repair_expected_kind="pr_review",
-            )
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
+        response = _run_validated_agent(
+            runner,
+            agent="gemini",
+            config=config,
+            prompt="Review the PR.",
+            marker_description="<!-- AGENT_STATE: approved|blocking -->",
+            validate=lambda text: _validate_review_response(
+                text,
+                reviewer="Google Gemini",
+                unresolved_items=(),
+            ),
+            use_repair=True,
+            repair_expected_kind="pr_review",
+        )
 
-    repair_mock.assert_called_once_with(
-        malformed_review,
-        config.gemini_cmd,
-        expected_kind="pr_review",
+    assert response.text == structured_pr_review(
+        state="approved",
+        summary=(
+            "The review covers capacity, timeout, 429, quota, resource-exhausted, "
+            "and transient classifier behavior."
+        ),
+        reviewer="Google Gemini",
     )
-    message = str(exc_info.value)
-    assert "Failure category: deterministic" in message
-    assert "Failure category: transient" not in message
+    repair_mock.assert_not_called()
     assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
 
 
@@ -7693,7 +7691,7 @@ def test_run_validated_agent_plan_revision_unknown_prior_disposition_fails_when_
     assert "item-18" in str(exc_info.value)
 
 
-def test_gemini_duplicate_trailing_agent_state_marker_is_repairable(tmp_path):
+def test_gemini_duplicate_trailing_agent_state_marker_normalizes_without_repair(tmp_path):
     malformed_public_review = (
         structured_pr_review(
             state="approved",
@@ -7703,24 +7701,15 @@ def test_gemini_duplicate_trailing_agent_state_marker_is_repairable(tmp_path):
         + "\n\n<!-- AGENT_STATE: approved -->"
     )
     raw_stdout = f"{PUBLIC_RESPONSE_MARKER}\n{malformed_public_review}"
-    repaired_review = structured_pr_review(
-        state="approved",
-        summary="Duplicate marker repaired.",
-        reviewer="Google Gemini",
-    )
     runner = FakeRunner(gemini_outputs=[{"stdout": raw_stdout}])
     config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
 
-    with patch("coding_review_agent_loop.orchestrator.attempt_repair", return_value=repaired_review) as repair_mock:
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
         assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
-    repair_mock.assert_called_once_with(
-        malformed_public_review,
-        config.gemini_cmd,
-        expected_kind="pr_review",
-        allowed_prior_item_ids=(),
-    )
-    assert any("Duplicate marker repaired." in comment for comment in runner.comments)
+    repair_mock.assert_not_called()
+    assert any("Found one issue." in comment for comment in runner.comments)
+    assert all(comment.count("<!-- AGENT_STATE: approved -->") == 1 for comment in runner.comments)
 
 
 def test_gemini_pre_marker_429_malformed_public_response_fails_deterministically(tmp_path):
@@ -15077,7 +15066,212 @@ def test_claude_review_loop_rejects_non_open_pr(tmp_path):
 # Repair pass tests
 # ---------------------------------------------------------------------------
 
-from coding_review_agent_loop.repair import attempt_repair, _REPAIR_PROMPT
+from coding_review_agent_loop.repair import (
+    _REPAIR_PROMPT,
+    attempt_envelope_normalization,
+    attempt_repair,
+)
+
+
+def test_envelope_normalization_duplicate_pr_state_footer_preserves_dispositions():
+    raw = (
+        structured_pr_review(
+            state="approved",
+            reviewer="Google Gemini",
+            prior_item_dispositions=[
+                {"item_id": "item-1", "disposition": "resolved"},
+                {"item_id": "item-2", "disposition": "future"},
+                {"item_id": "item-3", "disposition": "resolved"},
+            ],
+        )
+        + "\n\n<!-- AGENT_STATE: approved -->"
+    )
+
+    normalized = attempt_envelope_normalization(raw, expected_kind="pr_review")
+
+    assert normalized is not None
+    parsed = parse_structured_pr_review(normalized, reviewer="Google Gemini")
+    assert parsed is not None
+    assert {
+        disposition.item_id: disposition.disposition
+        for disposition in parsed.dispositions
+    } == {
+        "item-1": "resolved",
+        "item-2": "future",
+        "item-3": "resolved",
+    }
+    assert normalized.count("<!-- AGENT_STATE: approved -->") == 1
+
+
+def test_envelope_normalization_trailing_prose_after_signature():
+    raw = (
+        structured_pr_review(state="approved", reviewer="Google Gemini")
+        + "\n\nExtra prose after the signature."
+    )
+
+    normalized = attempt_envelope_normalization(raw, expected_kind="pr_review")
+
+    assert normalized is not None
+    assert "Extra prose" not in normalized
+    assert parse_structured_pr_review(normalized, reviewer="Google Gemini") is not None
+
+
+def test_envelope_normalization_duplicate_plan_state_footer():
+    raw = (
+        structured_plan_review(
+            state="approved",
+            reviewer="Google Gemini",
+            prior_plan_item_dispositions=[
+                {"item_id": "item-1", "disposition": "resolved"},
+            ],
+        )
+        + "\n\n<!-- AGENT_PLAN_STATE: approved -->"
+    )
+
+    normalized = attempt_envelope_normalization(raw, expected_kind="plan_review")
+
+    assert normalized is not None
+    parsed = parse_structured_plan_review(normalized, reviewer="Google Gemini")
+    assert parsed is not None
+    assert [(item.item_id, item.disposition) for item in parsed.dispositions] == [
+        ("item-1", "resolved")
+    ]
+    assert normalized.count("<!-- AGENT_PLAN_STATE: approved -->") == 1
+
+
+def test_envelope_normalization_preserves_hr_resolved_before_footer_for_reviews():
+    for expected_kind, raw, parser in (
+        (
+            "pr_review",
+            structured_pr_review(
+                state="approved",
+                reviewer="Google Gemini",
+                human_requirements_resolved=True,
+            ),
+            parse_structured_pr_review,
+        ),
+        (
+            "plan_review",
+            structured_plan_review(
+                state="approved",
+                reviewer="Google Gemini",
+                human_requirements_resolved=True,
+            ),
+            parse_structured_plan_review,
+        ),
+    ):
+        normalized = attempt_envelope_normalization(
+            raw + "\n\nTrailing prose.",
+            expected_kind=expected_kind,
+        )
+
+        assert normalized is not None
+        assert "<!-- HUMAN_REQUIREMENTS_RESOLVED -->" in normalized
+        assert parser(normalized, reviewer="Google Gemini") is not None
+
+
+def test_envelope_normalization_preserves_hr_resolved_after_footer_for_pr_review():
+    raw = (
+        structured_pr_review(state="approved", reviewer="Google Gemini").replace(
+            "\n-- Google Gemini",
+            "\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n-- Google Gemini",
+        )
+        + "\n\n<!-- AGENT_STATE: approved -->"
+    )
+
+    normalized = attempt_envelope_normalization(raw, expected_kind="pr_review")
+
+    assert normalized is not None
+    assert "<!-- HUMAN_REQUIREMENTS_RESOLVED -->" in normalized
+    assert parse_structured_pr_review(normalized, reviewer="Google Gemini") is not None
+
+
+def test_envelope_normalization_plan_review_drops_after_footer_hr_marker():
+    raw = (
+        structured_plan_review(
+            state="approved",
+            reviewer="Google Gemini",
+            prior_plan_item_dispositions=[
+                {"item_id": "item-1", "disposition": "resolved"},
+                {"item_id": "item-2", "disposition": "future"},
+            ],
+        ).replace(
+            "\n-- Google Gemini",
+            "\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->\n-- Google Gemini",
+        )
+        + "\n\n<!-- AGENT_PLAN_STATE: approved -->\nTrailing prose."
+    )
+
+    normalized = attempt_envelope_normalization(raw, expected_kind="plan_review")
+
+    assert normalized is not None
+    assert "<!-- HUMAN_REQUIREMENTS_RESOLVED -->" not in normalized
+    parsed = parse_structured_plan_review(normalized, reviewer="Google Gemini")
+    assert parsed is not None
+    assert {
+        disposition.item_id: disposition.disposition
+        for disposition in parsed.dispositions
+    } == {
+        "item-1": "resolved",
+        "item-2": "future",
+    }
+
+
+def test_envelope_normalization_returns_none_when_no_footer():
+    raw = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "pr_review",
+            "state": "approved",
+            "summary": "Review complete.",
+            "prior_item_dispositions": [],
+        }
+    )
+
+    assert attempt_envelope_normalization(raw, expected_kind="pr_review") is None
+
+
+def test_envelope_normalization_returns_none_when_no_signature():
+    raw = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "approved",
+                "summary": "Review complete.",
+                "prior_item_dispositions": [],
+            }
+        )
+        + "\n<!-- AGENT_STATE: approved -->"
+    )
+
+    assert attempt_envelope_normalization(raw, expected_kind="pr_review") is None
+
+
+def test_envelope_normalization_returns_none_when_json_invalid():
+    raw = '{"schema_version": 1,\n<!-- AGENT_STATE: approved -->\n-- Google Gemini'
+
+    assert attempt_envelope_normalization(raw, expected_kind="pr_review") is None
+
+
+def test_envelope_normalization_semantic_defect_still_fails_validate():
+    raw = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "pr_review",
+                "state": "approved",
+                "summary": "Review complete.",
+            }
+        )
+        + "\n<!-- AGENT_STATE: approved -->\n-- Google Gemini\n\nTrailing prose."
+    )
+
+    normalized = attempt_envelope_normalization(raw, expected_kind="pr_review")
+
+    assert normalized is not None
+    with pytest.raises(AgentLoopError):
+        parse_structured_pr_review(normalized, reviewer="Google Gemini")
 
 
 def test_attempt_repair_returns_none_when_subprocess_fails(monkeypatch):
@@ -15327,6 +15521,89 @@ def test_run_pr_loop_uses_repair_pass_on_format_failure(tmp_path):
 
     assert len(captured_repairs) == 1
     assert "AGENT_STATE: approved" in captured_repairs[0]
+
+
+def test_run_validated_agent_envelope_normalization_recovers_duplicate_footer(tmp_path):
+    malformed_review = (
+        structured_pr_review(
+            state="approved",
+            reviewer="Google Gemini",
+            prior_item_dispositions=[
+                {"item_id": "item-1", "disposition": "resolved"},
+                {"item_id": "item-2", "disposition": "future"},
+                {"item_id": "item-3", "disposition": "resolved"},
+            ],
+        )
+        + "\n\n<!-- AGENT_STATE: approved -->"
+    )
+    runner = FakeRunner(gemini_outputs=[malformed_review])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
+        response = _run_validated_agent(
+            runner,
+            agent="gemini",
+            config=config,
+            prompt="Review the PR.",
+            marker_description="<!-- AGENT_STATE: approved|blocking -->",
+            validate=lambda text: parse_structured_pr_review(
+                text,
+                reviewer="Google Gemini",
+            ).state,
+            use_repair=True,
+            repair_expected_kind="pr_review",
+        )
+
+    repair_mock.assert_not_called()
+    parsed = parse_structured_pr_review(response.text, reviewer="Google Gemini")
+    assert parsed is not None
+    assert {
+        disposition.item_id: disposition.disposition
+        for disposition in parsed.dispositions
+    } == {
+        "item-1": "resolved",
+        "item-2": "future",
+        "item-3": "resolved",
+    }
+
+
+def test_run_validated_agent_envelope_normalization_semantic_defect_uses_repair(tmp_path):
+    malformed_review = (
+        structured_pr_review(
+            state="approved",
+            reviewer="Google Gemini",
+            blocking_items=["This is semantically inconsistent."],
+        )
+        + "\n\n<!-- AGENT_STATE: approved -->"
+    )
+    repaired_review = structured_pr_review(state="approved", reviewer="Google Gemini")
+    runner = FakeRunner(gemini_outputs=[malformed_review])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch(
+        "coding_review_agent_loop.orchestrator.attempt_repair",
+        return_value=repaired_review,
+    ) as repair_mock:
+        response = _run_validated_agent(
+            runner,
+            agent="gemini",
+            config=config,
+            prompt="Review the PR.",
+            marker_description="<!-- AGENT_STATE: approved|blocking -->",
+            validate=lambda text: parse_structured_pr_review(
+                text,
+                reviewer="Google Gemini",
+            ).state,
+            use_repair=True,
+            repair_expected_kind="pr_review",
+        )
+
+    assert response.text == repaired_review
+    repair_mock.assert_called_once_with(
+        malformed_review,
+        config.gemini_cmd,
+        expected_kind="pr_review",
+    )
 
 
 def test_run_pr_loop_repairs_format_failure_with_5xx_source_line_reference(tmp_path):
