@@ -4202,6 +4202,38 @@ def test_plan_revision_prompt_includes_unresolved_ledger_and_required_dispositio
     assert "fall back to markdown" not in prompt.lower()
 
 
+def test_non_compact_plan_revision_prompt_includes_workdir_guidance(tmp_path):
+    """Non-compact build_plan_revision_prompt must include workdir guidance (issue #269)."""
+    config = make_config(tmp_path)
+    prompt = build_plan_revision_prompt(
+        56,
+        1,
+        "Previous plan text.",
+        "Claude plan review:\n\nBlocking issue found.",
+        config,
+        compact_context=False,
+    )
+
+    assert "Assigned checkout:" in prompt
+    assert "AGENT_LOOP_WORKDIR" in prompt
+
+
+def test_compact_plan_revision_prompt_includes_workdir_guidance(tmp_path):
+    """Compact build_plan_revision_prompt also includes workdir guidance (regression guard)."""
+    config = make_config(tmp_path)
+    prompt = build_plan_revision_prompt(
+        56,
+        1,
+        "Previous plan text.",
+        "Claude plan review:\n\nBlocking issue found.",
+        config,
+        compact_context=True,
+    )
+
+    assert "Assigned checkout:" in prompt
+    assert "AGENT_LOOP_WORKDIR" in prompt
+
+
 def _compact_issue_context() -> IssueContext:
     return IssueContext(
         number=56,
@@ -7549,6 +7581,175 @@ def test_run_validated_agent_skips_unknown_prior_item_repair_when_ledger_incompl
 
     repair_mock.assert_not_called()
     assert "item-1" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Issue #271: coder_followup path through attempt_envelope_normalization
+# ---------------------------------------------------------------------------
+
+def test_envelope_normalization_coder_followup_duplicate_state_footer():
+    """attempt_envelope_normalization handles coder_followup with a duplicate AGENT_STATE footer."""
+    raw = (
+        structured_coder_followup(
+            state="approved",
+            reviewer="Anthropic Claude",
+            addressed_items=["item-1"],
+        )
+        + "\n\n<!-- AGENT_STATE: approved -->"
+    )
+
+    normalized = attempt_envelope_normalization(raw, expected_kind="coder_followup")
+
+    assert normalized is not None
+    parsed = validate_structured_coder_followup(normalized)
+    assert parsed is not None
+    assert parsed.addressed_items == ("item-1",)
+    assert normalized.count("<!-- AGENT_STATE: approved -->") == 1
+
+
+def test_envelope_normalization_coder_followup_trailing_prose_after_signature():
+    """attempt_envelope_normalization strips trailing prose after coder_followup signature."""
+    raw = (
+        structured_coder_followup(
+            state="blocking",
+            reviewer="Anthropic Claude",
+            remaining_items=["item-2"],
+        )
+        + "\n\nExtra prose that should be stripped."
+    )
+
+    normalized = attempt_envelope_normalization(raw, expected_kind="coder_followup")
+
+    assert normalized is not None
+    assert "Extra prose" not in normalized
+    parsed = validate_structured_coder_followup(normalized)
+    assert parsed is not None
+    assert parsed.remaining_items == ("item-2",)
+
+
+def test_envelope_normalization_coder_followup_returns_none_when_prose_before_footer():
+    """attempt_envelope_normalization returns None for coder_followup with prose before the footer."""
+    raw = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "coder_followup",
+                "state": "approved",
+                "summary": "Done.",
+                "addressed_items": [],
+                "remaining_items": [],
+                "human_requirements": {"addressed_ids": [], "checked_discussion_directly": False},
+            }
+        )
+        + "\nSome unexpected prose here.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude"
+    )
+
+    assert attempt_envelope_normalization(raw, expected_kind="coder_followup") is None
+
+
+# ---------------------------------------------------------------------------
+# Issue #275: strip_unknown_prior_item_dispositions with tightly-packed input
+# ---------------------------------------------------------------------------
+
+def test_strip_unknown_prior_item_dispositions_tightly_packed_no_newline_before_footer():
+    """strip_unknown_prior_item_dispositions inserts a newline when the original had none."""
+    payload = {
+        "schema_version": 1,
+        "kind": "pr_review",
+        "state": "approved",
+        "summary": "LGTM.",
+        "blocking_items": [],
+        "same_pr_followups": [],
+        "future_followups": [],
+        "prior_item_dispositions": [{"item_id": "item-99", "disposition": "resolved"}],
+    }
+    # Tightly packed: no newline between JSON and footer
+    raw = json.dumps(payload) + "<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+
+    result = strip_unknown_prior_item_dispositions(
+        raw, allowed_ids=frozenset(), expected_kind="pr_review"
+    )
+
+    assert result is not None
+    # Validate parses correctly even after tight packing
+    parsed_payload, json_end = json.JSONDecoder().raw_decode(result.lstrip())
+    assert parsed_payload["prior_item_dispositions"] == []
+    tail = result.lstrip()[json_end:]
+    assert "<!-- AGENT_STATE: approved -->" in tail
+    assert "-- Google Gemini" in tail
+    # The footer must be separated from the JSON by at least a newline
+    assert tail.startswith("\n")
+
+
+def test_strip_unknown_prior_item_dispositions_tightly_packed_result_validates():
+    """Tight-packing case validates successfully through parse_structured_pr_review."""
+    payload = {
+        "schema_version": 1,
+        "kind": "pr_review",
+        "state": "approved",
+        "summary": "LGTM.",
+        "blocking_items": [],
+        "same_pr_followups": [],
+        "future_followups": [],
+        "prior_item_dispositions": [{"item_id": "item-99", "disposition": "resolved"}],
+    }
+    raw = json.dumps(payload) + "<!-- AGENT_STATE: approved -->\n-- Google Gemini"
+
+    result = strip_unknown_prior_item_dispositions(
+        raw, allowed_ids=frozenset(), expected_kind="pr_review"
+    )
+
+    assert result is not None
+    parsed = parse_structured_pr_review(result, reviewer="Google Gemini")
+    assert parsed is not None
+    assert parsed.dispositions == ()
+
+
+# ---------------------------------------------------------------------------
+# Issue #274: combined envelope+disposition strip via _run_validated_agent
+# ---------------------------------------------------------------------------
+
+def test_run_validated_agent_combined_envelope_and_disposition_fix(tmp_path):
+    """When a response has both an envelope defect and unknown prior dispositions,
+    stripping dispositions from the envelope-normalized candidate recovers it."""
+    # Build a plan_review with an unknown disposition AND a duplicate footer (envelope defect).
+    # strip_unknown_prior_item_dispositions on the original fails to validate because the
+    # duplicate footer is still present. Envelope normalization on the original produces a
+    # normalized candidate; stripping dispositions from that candidate should succeed.
+    base = structured_plan_review(
+        state="approved",
+        summary="Plan approved.",
+        prior_plan_item_dispositions=[{"item_id": "item-99", "disposition": "resolved"}],
+        reviewer="Google Gemini",
+    )
+    # Add a duplicate footer to create the envelope defect
+    malformed = base + "\n\n<!-- AGENT_PLAN_STATE: approved -->"
+
+    runner = FakeRunner(gemini_outputs=[malformed])
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    with patch("coding_review_agent_loop.orchestrator.attempt_repair") as repair_mock:
+        response = _run_validated_agent(
+            runner,
+            agent="gemini",
+            config=config,
+            prompt="Review the plan.",
+            marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+            validate=lambda text: _validate_plan_review_response(
+                text,
+                reviewer="Google Gemini",
+                unresolved_items=(),
+            ),
+            use_repair=True,
+            repair_expected_kind="plan_review",
+            repair_allowed_prior_item_ids=(),
+            ledger_incomplete=False,
+        )
+
+    repair_mock.assert_not_called()
+    parsed = json.loads(response.text.split("\n")[0])
+    assert parsed["prior_plan_item_dispositions"] == []
+    assert parsed["state"] == "approved"
 
 
 def test_run_validated_agent_rejects_repair_that_invents_prior_item_id(tmp_path):

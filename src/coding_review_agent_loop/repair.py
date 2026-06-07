@@ -65,10 +65,11 @@ def strip_unknown_prior_item_dispositions(
     ]
     if len(filtered) == len(dispositions):
         return None
-    return (
-        json.dumps({**payload, disposition_field: filtered}, ensure_ascii=False)
-        + stripped[json_end:]
-    )
+    json_str = json.dumps({**payload, disposition_field: filtered}, ensure_ascii=False)
+    tail = stripped[json_end:]
+    if tail and not tail.startswith("\n"):
+        tail = "\n" + tail
+    return json_str + tail
 
 
 def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> str | None:
