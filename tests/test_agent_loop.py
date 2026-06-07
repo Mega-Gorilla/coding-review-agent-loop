@@ -14912,6 +14912,58 @@ def test_is_clarification_request_ignores_fenced_code_block_examples():
     assert is_clarification_request(inside_and_outside)
 
 
+def test_is_clarification_request_requires_clarify_at_end():
+    # Non-blank, non-signature content after AGENT_CLARIFY means it's embedded.
+    embedded_with_trailing = (
+        "<!-- AGENT_CLARIFY -->\n\n"
+        "Some trailing prose that isn't a signature.\n"
+        "<!-- AGENT_STATE: blocking -->"
+    )
+    # AGENT_STATE suppresses it via the presence-based check above.
+    assert not is_clarification_request(embedded_with_trailing)
+
+    # Standalone AGENT_CLARIFY with only blank lines after it: valid.
+    clarify_then_blank = "<!-- AGENT_CLARIFY -->\n\n"
+    assert is_clarification_request(clarify_then_blank)
+
+    # Standalone AGENT_CLARIFY with only a signature after it: valid.
+    clarify_then_sig = "<!-- AGENT_CLARIFY -->\n-- Anthropic Claude\n"
+    assert is_clarification_request(clarify_then_sig)
+
+    # Standalone AGENT_CLARIFY with real prose content after it (no state marker):
+    # should NOT be treated as an active clarification.
+    clarify_then_prose = (
+        "<!-- AGENT_CLARIFY -->\n\n"
+        "Continuing thoughts about the plan.\n"
+    )
+    assert not is_clarification_request(clarify_then_prose)
+
+    # AGENT_CLARIFY in plan body with plan footer after: suppressed by state marker
+    # (presence-based check catches it before trailing-content check).
+    in_plan_body = (
+        "Here are my questions:\n\n"
+        "<!-- AGENT_CLARIFY -->\n\n"
+        "More explanation here.\n\n"
+        "<!-- AGENT_PLAN_STATE: blocking -->\n"
+    )
+    assert not is_clarification_request(in_plan_body)
+
+    # Multiple AGENT_CLARIFY; last one has only signature trailing: valid.
+    multi_clarify = (
+        "First question set:\n<!-- AGENT_CLARIFY -->\n\nOther text.\n\n"
+        "<!-- AGENT_CLARIFY -->\n-- Anthropic Claude\n"
+    )
+    assert is_clarification_request(multi_clarify)
+
+    # Multiple AGENT_CLARIFY; last one has prose trailing: not valid.
+    multi_clarify_bad = (
+        "<!-- AGENT_CLARIFY -->\n\n"
+        "<!-- AGENT_CLARIFY -->\n\n"
+        "But wait, there's more content.\n"
+    )
+    assert not is_clarification_request(multi_clarify_bad)
+
+
 def test_task_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
     runner = FakeRunner(
         claude_outputs=[

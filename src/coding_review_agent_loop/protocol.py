@@ -291,6 +291,16 @@ def is_clarification_request(text: str) -> bool:
         for m in GH_PR_URL_RE.finditer(text)
     ):
         return False
+    # AGENT_CLARIFY must be the final content: only blank lines and/or
+    # signature lines (``-- Name``) may follow the last active marker.
+    last_m = active_clarify[-1]
+    after_clarify = text[last_m.end():]
+    for line in after_clarify.splitlines():
+        if not line.strip():
+            continue
+        if SIGNATURE_RE.match(line):
+            continue
+        return False
     return True
 
 
