@@ -95,7 +95,7 @@ from .protocol import (
     validate_structured_plan_revision,
 )
 from .protocol import parse_review
-from .repair import attempt_envelope_normalization, attempt_repair
+from .repair import attempt_envelope_normalization, attempt_repair, strip_unknown_prior_item_dispositions
 from .runner import Runner
 from .usage import RunUsageContext, UsageMetadata, estimate_usage
 from .workdirs import active_workdir
@@ -1029,6 +1029,39 @@ def _run_validated_agent(
                                 usage_record.validation_status = "validated"
                             return ValidatedAgentResponse(
                                 text=normalized,
+                                session_id=result.session_id,
+                                marker_value=marker_value,
+                                usage=usage,
+                            )
+                if (
+                    use_repair
+                    and not public_text_is_transient
+                    and isinstance(exc, UnknownPriorItemDispositionError)
+                    and not ledger_incomplete
+                    and repair_expected_kind in {"pr_review", "plan_review", "plan_revision"}
+                ):
+                    stripped_text = strip_unknown_prior_item_dispositions(
+                        text,
+                        allowed_ids=frozenset(exc.allowed_ids),
+                        expected_kind=repair_expected_kind,
+                    )
+                    if stripped_text is not None:
+                        try:
+                            marker_value = validate(stripped_text)
+                        except AgentLoopError:
+                            pass
+                        else:
+                            removed = ", ".join(sorted(exc.unknown_ids))
+                            allowed_str = ", ".join(sorted(exc.allowed_ids)) or "(none)"
+                            log(
+                                config,
+                                f"{agent_name}: deterministically removed unknown prior-item "
+                                f"disposition ID(s) {removed}; allowed carried prior IDs: {allowed_str}",
+                            )
+                            if usage_record is not None:
+                                usage_record.validation_status = "validated"
+                            return ValidatedAgentResponse(
+                                text=stripped_text,
                                 session_id=result.session_id,
                                 marker_value=marker_value,
                                 usage=usage,
