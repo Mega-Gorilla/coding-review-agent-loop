@@ -42,6 +42,7 @@ from coding_review_agent_loop.cli import (
 )
 from coding_review_agent_loop.errors import QuotaResetExceededError, UnknownPriorItemDispositionError
 from coding_review_agent_loop.orchestrator import (
+    _decode_public_response_json_prefix,
     _format_reset_duration,
     _failure_category,
     _is_transient_agent_output,
@@ -3885,6 +3886,37 @@ def test_response_file_marker_normalization_reports_unrecoverable_marker():
 
     assert normalized == text
     assert status == "leading-public-response-marker-not-recoverable"
+
+
+def test_public_response_json_prefix_strips_marker_variants():
+    text = "==== AGENT_LOOP_PUBLIC_RESPONSE_BELOW ====\n" + json.dumps(
+        {"error": {"status": 429, "message": "quota exceeded"}}
+    )
+
+    payload = _decode_public_response_json_prefix(text)
+
+    assert payload == {"error": {"status": 429, "message": "quota exceeded"}}
+    assert _is_transient_public_response(text)
+
+
+def test_failure_category_threads_public_response_expected_kind():
+    text = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "plan_review",
+            "message": "quota exceeded",
+        }
+    )
+
+    assert _failure_category(text, public_response=True) == "deterministic"
+    assert (
+        _failure_category(
+            text,
+            public_response=True,
+            repair_expected_kind="future_structured_kind",
+        )
+        == "transient"
+    )
 
 
 @pytest.mark.parametrize(
@@ -15333,6 +15365,11 @@ def test_attempt_repair_includes_expected_kind_instruction():
     assert "Output no other `kind` value" in prompt
 
 
+def test_attempt_repair_format_d_marks_human_requirements_optional():
+    assert "omit the `<!-- HUMAN_REQUIREMENTS_ADDRESSED -->` marker" in _REPAIR_PROMPT
+    assert "the `### Human requirements` section from Format D" in _REPAIR_PROMPT
+
+
 def test_attempt_repair_includes_prior_item_disposition_repair_context():
     repaired = structured_plan_revision(prior_plan_item_dispositions=[])
     mock_result = MagicMock()
@@ -15356,6 +15393,26 @@ def test_attempt_repair_includes_prior_item_disposition_repair_context():
     assert "Allowed carried prior item IDs: item-12" in prompt
     assert "Unknown prior item disposition IDs to remove: item-15, item-18" in prompt
     assert "Same-round findings are informational only" in prompt
+
+
+def test_attempt_repair_prior_item_disposition_context_is_not_duplicated():
+    repaired = structured_plan_revision(prior_plan_item_dispositions=[])
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = repaired
+
+    with patch("coding_review_agent_loop.repair.subprocess.run", return_value=mock_result) as mock_run:
+        attempt_repair(
+            "malformed plan revision",
+            "gemini",
+            expected_kind="plan_revision",
+            same_round_context="item-1 matches a same-round finding, not a carried prior item.",
+        )
+
+    cmd = mock_run.call_args.args[0]
+    prompt = cmd[cmd.index("--prompt") + 1]
+    assert prompt.count("item-1 matches a same-round finding") == 1
+    assert "Context: item-1 matches a same-round finding" not in prompt
 
 
 def test_attempt_repair_includes_coder_followup_required_item_ids():
@@ -15454,6 +15511,16 @@ def test_attempt_repair_rejects_unresolved_item_ids_for_non_coder_kind():
             "gemini",
             expected_kind="plan_review",
             unresolved_item_ids=["item-1"],
+        )
+
+
+def test_attempt_repair_rejects_surfaced_requirement_ids_for_non_coder_kind():
+    with pytest.raises(ValueError, match="surfaced_requirement_ids"):
+        attempt_repair(
+            "malformed plan review",
+            "gemini",
+            expected_kind="plan_review",
+            surfaced_requirement_ids=["Requirement 1"],
         )
 
 

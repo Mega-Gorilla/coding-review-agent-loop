@@ -47,6 +47,9 @@ flowchart LR
     Protocol --> RoundState
     Repair --> Protocol
 
+    %% The orchestrator owns repair invocation: it catches validation failures,
+    %% calls repair.py, then re-runs Protocol validation on the repaired output.
+
     Registry --> Claude[Claude backend<br/>claude]
     Registry --> Codex[Codex backend<br/>codex exec]
     Registry --> Gemini[Gemini backend<br/>gemini --prompt]
@@ -73,6 +76,8 @@ flowchart LR
     GitHub --> RoundState
     Followups --> GitHubOps
 ```
+
+The orchestrator owns the repair pass: it catches structured-response validation failures, invokes `repair.py`, and then sends the repaired output back through protocol validation before anything is posted.
 
 At runtime, the orchestrator drives one of three entrypoints:
 
