@@ -23,6 +23,8 @@ GH_PR_URL_RE = re.compile(r"/pull/(\d+)(?:\b|$)")
 CLARIFY_RE = re.compile(r"<!--\s*AGENT_CLARIFY\s*-->", re.I)
 # Standalone variant: AGENT_CLARIFY only when it occupies its own line.
 _STANDALONE_CLARIFY_RE = re.compile(r"(?m)^\s*<!--\s*AGENT_CLARIFY\s*-->\s*$", re.I)
+# Matches the opening or closing line of a fenced code block (``` or ~~~, 3+ chars).
+_FENCE_RE = re.compile(r"^[ \t]{0,3}(`{3,}|~{3,})", re.M)
 HUMAN_REVIEWER_SIGNATURE_RE = re.compile(r"^\s*--\s*Human Reviewer\s*$", re.I | re.M)
 HUMAN_REQUIREMENTS_RESOLVED_RE = re.compile(
     r"<!--\s*HUMAN_REQUIREMENTS_RESOLVED\s*-->",
@@ -234,13 +236,41 @@ def parse_pr_number(text: str) -> int | None:
     return None
 
 
+def _fenced_code_block_ranges(text: str) -> list[tuple[int, int]]:
+    """Return (start, end) character ranges for each complete fenced code block."""
+    ranges: list[tuple[int, int]] = []
+    open_char: str | None = None
+    open_len: int = 0
+    open_start: int = 0
+    for m in _FENCE_RE.finditer(text):
+        fence_chars = m.group(1)
+        char = fence_chars[0]
+        length = len(fence_chars)
+        if open_char is None:
+            open_char, open_len, open_start = char, length, m.start()
+        elif char == open_char and length >= open_len:
+            line_end = text.find("\n", m.start())
+            end = (line_end + 1) if line_end != -1 else len(text)
+            ranges.append((open_start, end))
+            open_char = None
+    return ranges
+
+
 def is_clarification_request(text: str) -> bool:
     # Only standalone occurrences (own line) count; inline examples in prose are ignored.
     clarify_matches = list(_STANDALONE_CLARIFY_RE.finditer(text))
     if not clarify_matches:
         return False
-    last_clarify_pos = clarify_matches[-1].start()
-    # Any valid final-state marker appearing after the last standalone AGENT_CLARIFY
+    # Exclude matches inside fenced code blocks.
+    code_ranges = _fenced_code_block_ranges(text)
+    active_clarify = [
+        m for m in clarify_matches
+        if not any(start <= m.start() < end for start, end in code_ranges)
+    ]
+    if not active_clarify:
+        return False
+    last_clarify_pos = active_clarify[-1].start()
+    # Any valid final-state marker appearing after the last active AGENT_CLARIFY
     # takes precedence: AGENT_STATE, AGENT_PLAN_STATE, AGENT_PR, or a PR URL.
     state_matches = (
         list(STATE_RE.finditer(text))

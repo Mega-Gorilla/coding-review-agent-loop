@@ -14808,6 +14808,64 @@ def test_is_clarification_request_pr_marker_takes_precedence():
     assert not is_clarification_request(pr_after_clarify)
 
 
+def test_is_clarification_request_ignores_fenced_code_block_examples():
+    # AGENT_CLARIFY on its own line inside a backtick fence: not clarification.
+    fenced_no_state = (
+        "Here's how the marker looks:\n\n"
+        "```\n"
+        "<!-- AGENT_CLARIFY -->\n"
+        "```\n\n"
+        "That's all."
+    )
+    assert not is_clarification_request(fenced_no_state)
+
+    # Fenced example with AGENT_PLAN_STATE after the block: still not clarification.
+    fenced_with_plan_state = (
+        "Protocol example:\n\n"
+        "```\n"
+        "<!-- AGENT_CLARIFY -->\n"
+        "```\n\n"
+        "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    )
+    assert not is_clarification_request(fenced_with_plan_state)
+
+    # Fenced example where the code block appears AFTER a state marker: not clarification.
+    state_then_fenced = (
+        "<!-- AGENT_PLAN_STATE: blocking -->\n\n"
+        "Appendix:\n\n"
+        "```\n"
+        "<!-- AGENT_CLARIFY -->\n"
+        "```"
+    )
+    assert not is_clarification_request(state_then_fenced)
+
+    # Tilde fence also excluded.
+    tilde_fenced = (
+        "~~~\n"
+        "<!-- AGENT_CLARIFY -->\n"
+        "~~~"
+    )
+    assert not is_clarification_request(tilde_fenced)
+
+    # Real standalone AGENT_CLARIFY outside a fence: still detected.
+    outside_fence = (
+        "```\n"
+        "some code\n"
+        "```\n\n"
+        "<!-- AGENT_CLARIFY -->"
+    )
+    assert is_clarification_request(outside_fence)
+
+    # AGENT_CLARIFY both inside and outside a fence: outside occurrence is active.
+    inside_and_outside = (
+        "```\n"
+        "<!-- AGENT_CLARIFY -->\n"
+        "```\n\n"
+        "<!-- AGENT_CLARIFY -->"
+    )
+    assert is_clarification_request(inside_and_outside)
+
+
 def test_task_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
     runner = FakeRunner(
         claude_outputs=[
