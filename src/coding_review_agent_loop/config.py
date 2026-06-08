@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
+import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -133,6 +134,23 @@ def ensure_workdir(path: Path, option_name: str) -> None:
         raise AgentLoopError(f"Could not create {option_name} at {path}: {exc}") from exc
 
 
+_TOOL_ARTIFACT_NAMES = frozenset({
+    ".agent-loop-logs",
+    ".agent-loop",
+    ".agent-loop-responses",
+})
+
+
+def _is_stale_default_workdir(path: Path) -> bool:
+    """Return True if path has no git checkout and contains only tool-owned log artifacts."""
+    if not path.is_dir():
+        return False
+    if (path / ".git").exists():
+        return False
+    contents = {item.name for item in path.iterdir()}
+    return bool(contents) and contents.issubset(_TOOL_ARTIFACT_NAMES)
+
+
 def _looks_like_repo_remote(remote_url: str, repo: str) -> bool:
     normalized = remote_url.strip().removesuffix(".git").lower()
     repo = repo.lower()
@@ -226,6 +244,10 @@ def _sync_base_branch(
 
 
 def ensure_temp_checkout(path: Path, *, agent: AgentName, config: AgentLoopConfig, runner: Runner) -> None:
+    if _is_stale_default_workdir(path):
+        log(config, f"Stale default {agent} workdir detected (no checkout, only logs remain); recreating: {path}")
+        shutil.rmtree(path)
+
     if not path.exists():
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
