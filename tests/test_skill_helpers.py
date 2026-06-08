@@ -407,3 +407,42 @@ class TestRunExternal:
         # The dry-run stub must contain a valid plan_review JSON and AGENT_PLAN_STATE marker
         assert "AGENT_PLAN_STATE: approved" in content
         assert '"state": "approved"' in content
+
+    def test_dry_run_coder_role_exits_zero_and_writes_plan_state_stub(self) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as pf:
+            pf.write("Implement the feature.")
+            prompt_path = pf.name
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as of:
+            output_path = of.name
+
+        result = _run(
+            "helpers.run_external",
+            "--agent",
+            "codex",
+            "--role",
+            "coder",
+            "--prompt-file",
+            prompt_path,
+            "--output",
+            output_path,
+            "--workdir",
+            "/tmp",
+            "--dry-run",
+        )
+        assert result.returncode == 0
+        content = Path(output_path).read_text(encoding="utf-8")
+        # Coder dry-run stub must be a valid plan_state (no JSON, just markdown + marker)
+        assert "AGENT_PLAN_STATE: approved" in content
+        # Must NOT be a plan_review JSON blob
+        assert '"kind": "plan_review"' not in content
+
+        # Confirm the stub passes plan_state validation
+        stub_path = _write_tmp(content)
+        validate_result = _run(
+            "helpers.validate_response",
+            "--file",
+            stub_path,
+            "--kind",
+            "plan_state",
+        )
+        assert "validation passed: plan_state" in validate_result.stdout

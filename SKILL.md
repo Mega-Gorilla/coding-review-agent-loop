@@ -216,6 +216,54 @@ for validation.
 
 ---
 
+## Reversed roles (Codex as coder, Claude as reviewer)
+
+When `--coder codex` is requested, replace Step 2 and Step 6 as follows.
+All other steps (1, 3, 4, 5, 7, 8) are unchanged.
+
+### Step 2 (coder turn) — Codex writes the plan
+
+Instead of Claude writing the plan directly, invoke Codex:
+
+```bash
+python -m helpers.run_external \
+  --agent codex \
+  --role coder \
+  --prompt-file /tmp/agent-loop-skill/{session-id}/coder-prompt.md \
+  --output /tmp/agent-loop-skill/{session-id}/plan.md \
+  --workdir /path/to/codex/checkout
+```
+
+The prompt file must contain the issue context and plan-format instructions
+(including the `<!-- AGENT_PLAN_STATE: approved -->` footer requirement).
+
+### Step 3 — Validate the plan (same as normal)
+
+```bash
+python -m helpers.validate_response \
+  --file /tmp/agent-loop-skill/{session-id}/plan.md \
+  --kind plan_state
+```
+
+### Steps 4–5 — Attach metadata and post (same as normal)
+
+Use `--agent Codex` in the `attach-metadata` call instead of `--agent Claude`.
+
+### Step 6 (review turn) — Claude writes the structured review
+
+Claude (the session host) writes the structured JSON review directly to a temp file:
+
+```
+/tmp/agent-loop-skill/{session-id}/claude-review.md
+```
+
+The file must be a valid `plan_review` JSON followed by the `<!-- AGENT_PLAN_STATE: ... -->` footer.
+
+Validate, render, and post as in the normal reviewer flow (Step 6), using
+`--reviewer Claude` and `--agent Claude` in the respective commands.
+
+---
+
 ## Billing and terms note
 
 This skill runs Claude turns inside your active interactive Claude Code session.
