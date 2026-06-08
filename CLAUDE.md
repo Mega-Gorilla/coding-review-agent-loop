@@ -2,13 +2,14 @@
 
 ## Skill mode
 
-When a user asks you to run the agent loop for an issue or PR (e.g. "run the
-agent loop for issue #42", "review PR #99 with gemini"), load and follow the
-instructions in `SKILL.md`.  That file contains the full step-by-step
-orchestration procedure.
+When a user asks you to run the agent loop for an issue or PR, load and follow
+the instructions in `SKILL.md`.
 
-**Invocation examples the user may give:**
+**Slash command** (preferred): the user can type `/coding-review-agent-loop`
+followed by arguments — Claude Code loads `.claude/commands/coding-review-agent-loop.md`
+which prompts you to read `SKILL.md` and start orchestration.
 
+**Natural language** also works:
 - "Run the agent-loop skill for issue #123 in OWNER/REPO with gemini as reviewer"
 - "Start agent-loop plan-first for issue #42, reviewers: codex and gemini"
 - "Run agent-loop pr 99 in OWNER/REPO"
