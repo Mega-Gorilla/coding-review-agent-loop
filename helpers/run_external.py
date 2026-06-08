@@ -55,6 +55,7 @@ def main() -> None:
     parser.add_argument("--output", required=True, help="Path to write the agent response.")
     parser.add_argument("--workdir", required=True, help="Working directory for the agent.")
     parser.add_argument("--cmd", default=None, help="Agent CLI command (overrides default).")
+    parser.add_argument("--diff-file", default=None, help="Path to a pre-fetched PR diff to embed in the prompt.")
     parser.add_argument("--dry-run", action="store_true", help="Write a canned stub and exit.")
     args = parser.parse_args()
 
@@ -71,6 +72,19 @@ def main() -> None:
     except OSError as exc:
         print(f"run_external: cannot read prompt file: {exc}", file=sys.stderr)
         sys.exit(1)
+
+    if args.diff_file:
+        try:
+            diff_text = Path(args.diff_file).read_text(encoding="utf-8")
+            injection = f"\n\n## PR diff\n\n```diff\n{diff_text}\n```\n"
+            insert_at = prompt.find("Suggested commands:")
+            if insert_at >= 0:
+                prompt = prompt[:insert_at] + injection + prompt[insert_at:]
+            else:
+                prompt = prompt + injection
+        except OSError as exc:
+            print(f"run_external: cannot read diff file: {exc}", file=sys.stderr)
+            sys.exit(1)
 
     workdir = Path(args.workdir)
 
@@ -105,8 +119,8 @@ def main() -> None:
         gemini_cmd=cmd if agent_name == "gemini" else "gemini",
         gh_cmd="gh",
         claude_args=(),
-        codex_args=(),
-        gemini_args=(),
+        codex_args=("--dangerously-bypass-approvals-and-sandbox",),
+        gemini_args=("--skip-trust",),
         test_command=None,
         pre_review_tests=False,
         ci_check_name="",
