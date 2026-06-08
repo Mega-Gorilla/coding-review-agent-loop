@@ -12076,6 +12076,79 @@ def test_existing_auto_agent_dir_must_be_git_checkout(tmp_path):
     assert not any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
 
 
+def test_stale_default_workdir_only_logs_is_recreated(tmp_path, capsys):
+    runner = FakeRunner(
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+    )
+    codex_dir = tmp_path / "codex"
+    codex_dir.mkdir()
+    (codex_dir / ".agent-loop-logs").mkdir()
+
+    config = make_config(
+        tmp_path,
+        codex_dir=codex_dir,
+        reviewer="codex",
+        auto_agent_dirs=("codex",),
+        create_dirs=False,
+        quiet=False,
+    )
+    config.claude_dir.mkdir(parents=True)
+    config.gemini_dir.mkdir(parents=True)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    clone_cmds = [cmd for cmd, _cwd in runner.commands if cmd[:3] == ["gh", "repo", "clone"]]
+    assert any(cmd[4] == str(codex_dir) for cmd in clone_cmds), "Expected fresh clone of stale workdir"
+
+    captured = capsys.readouterr()
+    assert "Stale default codex workdir detected" in captured.err
+    assert "recreating" in captured.err
+
+
+def test_stale_default_workdir_with_unknown_files_still_fails(tmp_path):
+    runner = FakeRunner(git_inside=False)
+    codex_dir = tmp_path / "codex"
+    codex_dir.mkdir()
+    (codex_dir / ".agent-loop-logs").mkdir()
+    (codex_dir / "some-user-file.py").write_text("# user work", encoding="utf-8")
+
+    config = make_config(
+        tmp_path,
+        codex_dir=codex_dir,
+        reviewer="codex",
+        auto_agent_dirs=("codex",),
+        create_dirs=False,
+    )
+    config.claude_dir.mkdir(parents=True)
+    config.gemini_dir.mkdir(parents=True)
+
+    with pytest.raises(AgentLoopError, match="not a git checkout"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert not any(cmd[:3] == ["gh", "repo", "clone"] for cmd, _cwd in runner.commands)
+
+
+def test_explicit_dir_not_git_checkout_is_not_recreated(tmp_path):
+    runner = FakeRunner(git_inside=False)
+    codex_dir = tmp_path / "codex"
+    codex_dir.mkdir()
+    (codex_dir / ".agent-loop-logs").mkdir()
+
+    config = make_config(
+        tmp_path,
+        codex_dir=codex_dir,
+        reviewer="codex",
+        create_dirs=False,
+    )
+    config.claude_dir.mkdir(parents=True)
+    config.gemini_dir.mkdir(parents=True)
+
+    with pytest.raises(AgentLoopError, match="not a git checkout"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert not any(cmd[:3] == ["gh", "repo", "clone"] for cmd, _cwd in runner.commands)
+
+
 def test_existing_auto_agent_dir_must_match_requested_repo(tmp_path):
     runner = FakeRunner(git_remote="git@github.com:OTHER/REPO.git")
     codex_dir = tmp_path / "codex"
