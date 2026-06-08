@@ -17,7 +17,9 @@ def test_demo_loop_dry_run() -> None:
     - exits 0
     - prints "validation passed: plan_state"
     - prints "validation passed: plan_review"
+    - produces metadata-tagged comments with AGENT_LOOP_META
     - writes a session file with last_completed_step=post_review
+    - verifies _resume_plan_round can reconstruct the round from the metadata
     """
     repo = "demo/skill-loop-test"
     issue = 88888
@@ -46,6 +48,9 @@ def test_demo_loop_dry_run() -> None:
 
     assert "validation passed: plan_state" in result.stdout, result.stdout
     assert "validation passed: plan_review" in result.stdout, result.stdout
+
+    # demo_loop now also verifies _resume_plan_round internally
+    assert "_resume_plan_round found round" in result.stdout, result.stdout
 
     # Verify session state was written with last_completed_step=post_review
     slug = repo.replace("/", "-").replace(":", "-")

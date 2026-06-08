@@ -11,6 +11,21 @@ Subcommands:
     _resume_plan_round or _resume_pr_round from the existing library.  Outputs
     a JSON resume descriptor to stdout.
 
+  attach-metadata
+    --body-file PATH --output PATH
+    --flow plan|pr --role coder|reviewer --agent NAME
+    --round-number N --state approved|blocking
+    (--subject SHA | --subject-plan-file PATH)
+    [--prior-items-file PATH]
+    [--dispositions-file PATH]
+    [--new-items-file PATH]
+    [--canonical-plan-file PATH]
+
+    Reads the comment body from --body-file, builds a PostedRoundMetadata
+    object, and writes the body with AGENT_LOOP_META appended to --output.
+    The resulting file can be posted via gh_ops post-issue-comment and will
+    be recognized by build-resume's _resume_plan_round / _resume_pr_round.
+
   write-session
     --issue N --repo REPO --fields JSON
 
@@ -48,10 +63,16 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from coding_review_agent_loop.agents.base import AgentName
 from coding_review_agent_loop.errors import AgentLoopError
 from coding_review_agent_loop.round_state import (
+    PostedRoundMetadata,
+    _attach_round_metadata,
+    _deserialize_disposition,
+    _deserialize_unresolved_item,
+    _plan_subject,
     _resume_plan_round,
     _resume_pr_round,
     _serialize_unresolved_item,
 )
+from coding_review_agent_loop.protocol import ReviewItemDisposition, UnresolvedReviewItem
 
 
 def _session_path(repo: str, issue: int) -> Path:
@@ -192,6 +213,74 @@ def cmd_build_resume(args: argparse.Namespace) -> None:
     print(json.dumps(descriptor, indent=2))
 
 
+def _load_item_list(path: str | None) -> list[object]:
+    if not path:
+        return []
+    try:
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"state_manager: cannot read {path}: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_attach_metadata(args: argparse.Namespace) -> None:
+    try:
+        body = Path(args.body_file).read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"state_manager: cannot read body file: {exc}", file=sys.stderr)
+        sys.exit(1)
+
+    # Compute subject
+    if args.subject:
+        subject = args.subject
+    elif args.subject_plan_file:
+        try:
+            plan_text = Path(args.subject_plan_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"state_manager: cannot read subject plan file: {exc}", file=sys.stderr)
+            sys.exit(1)
+        subject = _plan_subject(plan_text)
+    else:
+        print("state_manager attach-metadata: provide --subject or --subject-plan-file", file=sys.stderr)
+        sys.exit(1)
+
+    # Load optional item lists
+    raw_prior = _load_item_list(args.prior_items_file)
+    raw_dispositions = _load_item_list(args.dispositions_file)
+    raw_new_items = _load_item_list(args.new_items_file)
+
+    prior_items = tuple(_deserialize_unresolved_item(item) for item in raw_prior)
+    dispositions = tuple(_deserialize_disposition(d) for d in raw_dispositions)
+    new_items = tuple(_deserialize_unresolved_item(item) for item in raw_new_items)
+
+    canonical_plan: str | None = None
+    if args.canonical_plan_file:
+        try:
+            canonical_plan = Path(args.canonical_plan_file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"state_manager: cannot read canonical plan file: {exc}", file=sys.stderr)
+            sys.exit(1)
+
+    metadata = PostedRoundMetadata(
+        flow=args.flow,
+        role=args.role,
+        agent=args.agent,
+        round_number=args.round_number,
+        subject=subject,
+        prior_items=prior_items,
+        dispositions=dispositions,
+        new_items=new_items,
+        state=args.state,
+        canonical_plan=canonical_plan,
+    )
+    augmented = _attach_round_metadata(body, metadata)
+
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(augmented, encoding="utf-8")
+    print(f"metadata attached: {output_path}")
+
+
 def cmd_write_session(args: argparse.Namespace) -> None:
     path = _session_path(args.repo, args.issue)
     existing = _load_session(path)
@@ -232,6 +321,30 @@ def main() -> None:
     parser.add_argument("--gh-cmd", default="gh")
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
 
+    # attach-metadata
+    p_meta = subparsers.add_parser(
+        "attach-metadata",
+        help="Attach AGENT_LOOP_META to a comment body so build-resume can reconstruct the round.",
+    )
+    p_meta.add_argument("--body-file", required=True, help="Input comment body file.")
+    p_meta.add_argument("--output", required=True, help="Output file with AGENT_LOOP_META attached.")
+    p_meta.add_argument("--flow", required=True, choices=["plan", "pr"])
+    p_meta.add_argument("--role", required=True, choices=["coder", "reviewer"])
+    p_meta.add_argument("--agent", required=True, help="Agent display name (e.g. 'Claude', 'Codex').")
+    p_meta.add_argument("--round-number", type=int, required=True)
+    p_meta.add_argument("--state", required=True, choices=["approved", "blocking"])
+    p_meta.add_argument("--subject", default=None, help="Pre-computed subject SHA256 hex string.")
+    p_meta.add_argument("--subject-plan-file", default=None,
+                        help="Compute subject as sha256(plan text) from this file.")
+    p_meta.add_argument("--prior-items-file", default=None,
+                        help="JSON array of serialized UnresolvedReviewItem.")
+    p_meta.add_argument("--dispositions-file", default=None,
+                        help="JSON array of serialized ReviewItemDisposition.")
+    p_meta.add_argument("--new-items-file", default=None,
+                        help="JSON array of serialized UnresolvedReviewItem (new items from this turn).")
+    p_meta.add_argument("--canonical-plan-file", default=None,
+                        help="Plan text file (written as canonical_plan for coder turns).")
+
     # build-resume
     p_resume = subparsers.add_parser("build-resume", help="Build a resume descriptor from GitHub comments.")
     p_resume.add_argument("--issue", type=int, required=True)
@@ -265,6 +378,7 @@ def main() -> None:
 
     args = parser.parse_args()
     dispatch = {
+        "attach-metadata": cmd_attach_metadata,
         "build-resume": cmd_build_resume,
         "write-session": cmd_write_session,
         "read-session": cmd_read_session,

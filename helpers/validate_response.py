@@ -33,14 +33,13 @@ from pathlib import Path
 # Make src importable when run from the repo root as `python -m helpers.validate_response`
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-from coding_review_agent_loop.errors import AgentLoopError
-from coding_review_agent_loop.protocol import parse_plan_state
+from coding_review_agent_loop.errors import AgentLoopError, UnknownPriorItemDispositionError
+from coding_review_agent_loop.protocol import parse_plan_state, validate_structured_plan_revision
 from coding_review_agent_loop.unresolved_items import (
     _validate_plan_review_response,
     _validate_review_response,
     _validate_coder_followup_response,
 )
-from coding_review_agent_loop.protocol import validate_structured_plan_revision
 from coding_review_agent_loop.round_state import _deserialize_unresolved_item
 from coding_review_agent_loop.github import HumanReviewRequirement
 
@@ -134,9 +133,26 @@ def main() -> None:
                 human_requirements=human_requirements or None,
             )
         elif kind == "plan_revision":
-            result = validate_structured_plan_revision(text)
-            if result is None:
+            parsed = validate_structured_plan_revision(text)
+            if parsed is None:
                 raise AgentLoopError("Response did not parse as a structured plan_revision.")
+            # Validate that dispositions only reference known prior item IDs,
+            # matching the check in the headless orchestrator's _validate_plan_revision_response.
+            if prior_items:
+                allowed_ids = {item.item_id for item in prior_items}
+                unknown = {
+                    disposition.item_id
+                    for disposition in parsed.prior_plan_item_dispositions
+                } - allowed_ids
+                if unknown:
+                    raise UnknownPriorItemDispositionError(
+                        unknown_ids=tuple(sorted(unknown)),
+                        allowed_ids=tuple(sorted(allowed_ids)),
+                        same_round_description=(
+                            "Same-round findings are informational only and must not be "
+                            "dispositioned as prior carried items."
+                        ),
+                    )
     except AgentLoopError as exc:
         print(f"validation failed: {kind}: {exc}", file=sys.stderr)
         sys.exit(1)

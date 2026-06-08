@@ -63,19 +63,37 @@ python -m helpers.validate_response \
   --kind plan_state
 ```
 
-### Step 4 — Save as pending comment
+### Step 4 — Attach AGENT_LOOP_META to the plan comment
+
+The comment posted to GitHub must carry an `AGENT_LOOP_META` marker so that
+`build-resume` can reconstruct the round state in future sessions.  Use
+`attach-metadata` to produce a metadata-tagged version of the plan file:
+
+```bash
+python -m helpers.state_manager attach-metadata \
+  --body-file /tmp/agent-loop-skill/{session-id}/plan-{uuid}.md \
+  --output /tmp/agent-loop-skill/{session-id}/plan-tagged.md \
+  --flow plan --role coder --agent Claude \
+  --round-number {round_number} --state approved \
+  --subject-plan-file /tmp/agent-loop-skill/{session-id}/plan-{uuid}.md \
+  --canonical-plan-file /tmp/agent-loop-skill/{session-id}/plan-{uuid}.md \
+  [--prior-items-file /tmp/agent-loop-skill/{session-id}/prior_items.json]
+```
+
+`prior_items.json` is the `prior_items` array from the `build-resume` JSON
+output.  Omit the flag when `prior_items` is empty (round 1).
+
+### Step 5 — Save as pending comment and post
 
 ```bash
 python -m helpers.state_manager write-pending-comment \
   --issue ISSUE --repo OWNER/REPO \
-  --body /tmp/agent-loop-skill/{session-id}/plan-{uuid}.md
+  --body /tmp/agent-loop-skill/{session-id}/plan-tagged.md
 ```
-
-### Step 5 — Post the plan comment
 
 ```bash
 python -m helpers.gh_ops post-issue-comment \
-  --issue ISSUE --file /tmp/agent-loop-skill/{session-id}/plan-{uuid}.md \
+  --issue ISSUE --file /tmp/agent-loop-skill/{session-id}/plan-tagged.md \
   --repo OWNER/REPO
 ```
 
@@ -115,11 +133,24 @@ The `context.json` must contain:
 }
 ```
 
-Post the reviewer comment:
+Attach AGENT_LOOP_META to the reviewer comment (subject must match the coder comment):
+
+```bash
+python -m helpers.state_manager attach-metadata \
+  --body-file /tmp/agent-loop-skill/{session-id}/codex-review.md \
+  --output /tmp/agent-loop-skill/{session-id}/codex-review-tagged.md \
+  --flow plan --role reviewer --agent Codex \
+  --round-number {round_number} --state approved \
+  --subject-plan-file /tmp/agent-loop-skill/{session-id}/plan-{uuid}.md \
+  [--prior-items-file /tmp/agent-loop-skill/{session-id}/prior_items.json] \
+  [--dispositions-file /tmp/agent-loop-skill/{session-id}/codex_dispositions.json]
+```
+
+Post the reviewer comment (with metadata):
 
 ```bash
 python -m helpers.gh_ops post-issue-comment \
-  --issue ISSUE --file /tmp/agent-loop-skill/{session-id}/codex-review.md \
+  --issue ISSUE --file /tmp/agent-loop-skill/{session-id}/codex-review-tagged.md \
   --repo OWNER/REPO
 ```
 

@@ -11,6 +11,10 @@ from pathlib import Path
 import pytest
 
 HELPERS = Path(__file__).parent.parent / "helpers"
+SRC = Path(__file__).parent.parent / "src"
+
+# Make library importable for direct calls in this test file
+sys.path.insert(0, str(SRC))
 
 
 def _run(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -95,7 +99,6 @@ class TestValidateResponse:
         assert "validation passed: plan_review" in result.stdout
 
     def test_plan_review_with_unknown_prior_item_rejected(self) -> None:
-        # A review that disposes unknown prior item IDs must be rejected.
         review = json.dumps(
             {
                 "schema_version": 1,
@@ -129,9 +132,91 @@ class TestValidateResponse:
         )
         assert result.returncode != 0
 
+    def test_plan_revision_with_unknown_prior_item_rejected(self) -> None:
+        """plan_revision must reject dispositions for item IDs not in the prior-items ledger."""
+        revision = json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_revision",
+                "state": "blocking",
+                "summary": "Revised plan.",
+                "prior_plan_item_dispositions": [
+                    {"item_id": "item-unknown-99", "disposition": "resolved"}
+                ],
+                "plan_steps": ["Step A", "Step B"],
+            }
+        ) + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude\n"
+
+        path = _write_tmp(revision)
+        # context has item-1 but revision references item-unknown-99
+        prior_item = {
+            "item_id": "item-1",
+            "reviewer": "Codex",
+            "source_round": 1,
+            "text": "Some issue.",
+            "status": "blocking",
+            "source_status": "blocking",
+            "notes": [],
+        }
+        ctx_path = _write_tmp(
+            json.dumps({"prior_items": [prior_item], "current_round_items": []}),
+            suffix=".json",
+        )
+        result = _run(
+            "helpers.validate_response",
+            "--file",
+            path,
+            "--kind",
+            "plan_revision",
+            "--context-file",
+            ctx_path,
+            check=False,
+        )
+        assert result.returncode != 0
+
+    def test_plan_revision_with_known_items_accepted(self) -> None:
+        """plan_revision with only known prior item IDs must be accepted."""
+        prior_item = {
+            "item_id": "item-1",
+            "reviewer": "Codex",
+            "source_round": 1,
+            "text": "Some issue.",
+            "status": "blocking",
+            "source_status": "blocking",
+            "notes": [],
+        }
+        revision = json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_revision",
+                "state": "blocking",
+                "summary": "Revised plan.",
+                "prior_plan_item_dispositions": [
+                    {"item_id": "item-1", "disposition": "resolved"}
+                ],
+                "plan_steps": ["Step A", "Step B"],
+            }
+        ) + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude\n"
+
+        path = _write_tmp(revision)
+        ctx_path = _write_tmp(
+            json.dumps({"prior_items": [prior_item], "current_round_items": []}),
+            suffix=".json",
+        )
+        result = _run(
+            "helpers.validate_response",
+            "--file",
+            path,
+            "--kind",
+            "plan_revision",
+            "--context-file",
+            ctx_path,
+        )
+        assert "validation passed: plan_revision" in result.stdout
+
 
 # ---------------------------------------------------------------------------
-# helpers/state_manager.py  (session round-trip, no live gh required)
+# helpers/state_manager.py  (session round-trip + attach-metadata)
 # ---------------------------------------------------------------------------
 
 class TestStateManager:
@@ -189,6 +274,108 @@ class TestStateManager:
         result = _run("helpers.state_manager", "read-session", "--issue", str(issue), "--repo", repo)
         data = json.loads(result.stdout)
         assert "pending_comment_body" not in data
+
+    def test_attach_metadata_produces_valid_agent_loop_meta(self) -> None:
+        """attach-metadata must embed AGENT_LOOP_META that _resume_plan_round recognizes."""
+        plan_body = _VALID_PLAN_STATE
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            body_file = Path(tmpdir) / "plan.md"
+            body_file.write_text(plan_body, encoding="utf-8")
+            output_file = Path(tmpdir) / "plan_tagged.md"
+
+            _run(
+                "helpers.state_manager",
+                "attach-metadata",
+                "--body-file",
+                str(body_file),
+                "--output",
+                str(output_file),
+                "--flow",
+                "plan",
+                "--role",
+                "coder",
+                "--agent",
+                "Claude",
+                "--round-number",
+                "1",
+                "--state",
+                "approved",
+                "--subject-plan-file",
+                str(body_file),
+                "--canonical-plan-file",
+                str(body_file),
+            )
+
+            tagged = output_file.read_text(encoding="utf-8")
+            assert "AGENT_LOOP_META" in tagged
+
+            # Verify _resume_plan_round can reconstruct from this comment alone
+            from coding_review_agent_loop.round_state import _resume_plan_round
+
+            class _FC:
+                def __init__(self, body: str) -> None:
+                    self.body = body
+
+            result = _resume_plan_round([_FC(tagged)], configured_reviewers=["codex"])
+            # A coder comment with no reviewer comments → returns the round so reviewers can run
+            assert result is not None, "build-resume could not find skill-posted coder round"
+            _plan_text, resumed = result
+            assert resumed.round_number == 1
+
+    def test_attach_metadata_reviewer_found_by_resume(self) -> None:
+        """Coder + reviewer comments both with AGENT_LOOP_META → resume finds completed reviewer."""
+        plan_body = _VALID_PLAN_STATE
+        reviewer_body = _VALID_PLAN_REVIEW
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plan_file = Path(tmpdir) / "plan.md"
+            plan_file.write_text(plan_body, encoding="utf-8")
+            plan_tagged = Path(tmpdir) / "plan_tagged.md"
+            review_file = Path(tmpdir) / "review.md"
+            review_file.write_text(reviewer_body, encoding="utf-8")
+            review_tagged = Path(tmpdir) / "review_tagged.md"
+
+            # Attach coder metadata
+            _run(
+                "helpers.state_manager",
+                "attach-metadata",
+                "--body-file", str(plan_file),
+                "--output", str(plan_tagged),
+                "--flow", "plan", "--role", "coder", "--agent", "Claude",
+                "--round-number", "1", "--state", "approved",
+                "--subject-plan-file", str(plan_file),
+                "--canonical-plan-file", str(plan_file),
+            )
+
+            # Attach reviewer metadata (same subject)
+            _run(
+                "helpers.state_manager",
+                "attach-metadata",
+                "--body-file", str(review_file),
+                "--output", str(review_tagged),
+                "--flow", "plan", "--role", "reviewer", "--agent", "Codex",
+                "--round-number", "1", "--state", "approved",
+                "--subject-plan-file", str(plan_file),
+            )
+
+            from coding_review_agent_loop.round_state import _resume_plan_round
+
+            class _FC:
+                def __init__(self, body: str) -> None:
+                    self.body = body
+
+            result = _resume_plan_round(
+                [_FC(plan_tagged.read_text(encoding="utf-8")),
+                 _FC(review_tagged.read_text(encoding="utf-8"))],
+                configured_reviewers=["codex"],
+            )
+            assert result is not None, "build-resume did not find the round"
+            _plan_text, resumed = result
+            assert resumed.round_number == 1
+            assert len(resumed.completed_reviews) == 1, (
+                f"Expected 1 completed reviewer (Codex), got {len(resumed.completed_reviews)}"
+            )
 
 
 # ---------------------------------------------------------------------------
