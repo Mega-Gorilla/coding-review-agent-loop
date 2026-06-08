@@ -14,6 +14,33 @@ GitHub operations go through `gh`.
 - `gemini` CLI installed (for Gemini reviewer turns).
 - The `coding-review-agent-loop` package importable from `src/` (run from repo root).
 
+## How to invoke this skill
+
+Open a Claude Code session **in the `coding-review-agent-loop` repo root** (or
+any directory where `helpers/` is on the Python path).  Then tell Claude what
+you want in natural language, for example:
+
+```
+Run the agent-loop skill for issue #123 in myorg/myrepo with gemini as reviewer.
+```
+
+```
+Start agent-loop plan-first for issue #42 in myorg/myrepo, reviewers: codex and gemini.
+```
+
+```
+Run agent-loop on PR #99 in myorg/myrepo.
+```
+
+```
+Resume the agent-loop skill for issue #123 in myorg/myrepo.
+```
+
+Claude will read this file and follow the orchestration steps below.  You do
+not need to type any slash command; natural-language requests are enough.
+
+---
+
 ## How to start a plan loop for an issue
 
 Provide the following information:
