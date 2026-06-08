@@ -16,7 +16,9 @@ Then follow the orchestration steps in `SKILL.md` from Step 1.
 When `--coder codex` is parsed, follow the **Reversed roles** section of `SKILL.md`
 instead of the default Claude-as-coder flow: Codex handles Step 2 (plan writing)
 via `run_external --role coder`, and Claude performs Step 6 (review turn) directly
-in the session.
+in the session.  **Important**: pass `--reviewers claude` (not `codex`/`gemini`)
+in the `build-resume` Step 1 call so Claude's completed review is tracked correctly
+for resume.
 
 Note: `task "<text>"` is not supported in skill mode. Direct the user to the
 headless CLI (`agent-loop task "..." --repo OWNER/REPO`) for task-based flows.

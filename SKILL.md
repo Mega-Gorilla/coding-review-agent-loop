@@ -218,8 +218,22 @@ for validation.
 
 ## Reversed roles (Codex as coder, Claude as reviewer)
 
-When `--coder codex` is requested, replace Step 2 and Step 6 as follows.
-All other steps (1, 3, 4, 5, 7, 8) are unchanged.
+When `--coder codex` is requested, the following steps differ from the normal flow.
+
+**Critical**: `build-resume` tracks completion by matching the posted review's
+`--agent` value against the `--reviewers` list.  In reversed-roles mode Claude
+is the reviewer, so **pass `--reviewers claude`** in Step 1 (not `codex` or
+`gemini`).  Using the wrong reviewers list causes `build-resume` to ignore
+Claude's completed review on any subsequent resume.
+
+### Step 1 — build-resume (reversed-roles variant)
+
+```bash
+python -m helpers.state_manager build-resume \
+  --issue ISSUE --repo OWNER/REPO \
+  --reviewers claude \
+  --flow plan
+```
 
 ### Step 2 (coder turn) — Codex writes the plan
 
@@ -261,6 +275,7 @@ The file must be a valid `plan_review` JSON followed by the `<!-- AGENT_PLAN_STA
 
 Validate, render, and post as in the normal reviewer flow (Step 6), using
 `--reviewer Claude` and `--agent Claude` in the respective commands.
+This ensures `build-resume --reviewers claude` recognizes the review on resume.
 
 ---
 
