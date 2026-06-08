@@ -160,11 +160,22 @@ The `context.json` must contain:
 }
 ```
 
-Attach AGENT_LOOP_META to the reviewer comment (subject must match the coder comment):
+Render the structured JSON to human-readable markdown before posting:
+
+```bash
+python -m helpers.render_response \
+  --file /tmp/agent-loop-skill/{session-id}/codex-review.md \
+  --kind plan_review \
+  --reviewer Codex \
+  --context-file /tmp/agent-loop-skill/{session-id}/context.json \
+  --output /tmp/agent-loop-skill/{session-id}/codex-review-rendered.md
+```
+
+Attach AGENT_LOOP_META to the rendered reviewer comment:
 
 ```bash
 python -m helpers.state_manager attach-metadata \
-  --body-file /tmp/agent-loop-skill/{session-id}/codex-review.md \
+  --body-file /tmp/agent-loop-skill/{session-id}/codex-review-rendered.md \
   --output /tmp/agent-loop-skill/{session-id}/codex-review-tagged.md \
   --flow plan --role reviewer --agent Codex \
   --round-number {round_number} --state approved \
@@ -173,7 +184,7 @@ python -m helpers.state_manager attach-metadata \
   [--dispositions-file /tmp/agent-loop-skill/{session-id}/codex_dispositions.json]
 ```
 
-Post the reviewer comment (with metadata):
+Post the rendered reviewer comment (with metadata):
 
 ```bash
 python -m helpers.gh_ops post-issue-comment \
