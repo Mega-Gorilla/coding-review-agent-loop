@@ -1,0 +1,137 @@
+# Claude Code Native Skill Mode
+
+## Overview
+
+`coding-review-agent-loop` includes a Claude Code skill that lets you run the
+multi-agent review loop directly inside an interactive Claude Code session
+instead of through `claude -p` subprocesses.
+
+| Aspect | Headless CLI mode | Skill mode |
+|--------|-------------------|------------|
+| Claude turns | `claude -p` subprocess (Agent SDK credits) | Active Claude Code session |
+| Codex turns | `codex exec` subprocess | Same `codex exec` subprocess |
+| Gemini turns | `gemini` subprocess | Same `gemini` subprocess |
+| GitHub ops | Python `gh` wrapper | Same `gh` wrapper |
+| Session resume | AGENT_LOOP_META in GitHub comments | Same markers + local session JSON |
+| Best for | Headless CI / unattended automation | Interactive development sessions |
+
+## Architecture
+
+```
+Claude Code (interactive session)
+│
+├── helpers/validate_response.py   ← validates structured protocol responses
+├── helpers/state_manager.py       ← session state + GitHub comment resume
+├── helpers/run_external.py        ← invokes codex/gemini CLIs
+├── helpers/gh_ops.py              ← GitHub issue/PR comment operations
+└── helpers/demo_loop.py           ← standalone dry-run demo
+```
+
+Claude performs coder/plan turns by writing files directly (using its Write
+tool or by producing structured JSON in its response).  External reviewers
+(Codex, Gemini) are still invoked as subprocesses via `run_external.py`.
+
+## Structured protocol compatibility
+
+The skill helpers reuse the same library entry points used by the headless CLI:
+
+- `_validate_plan_review_response` / `_validate_review_response` (unresolved_items)
+- `_resume_plan_round` / `_resume_pr_round` (round_state)
+- `parse_plan_state` / `validate_structured_plan_revision` (protocol)
+
+GitHub comment metadata markers (`AGENT_LOOP_META`) written by the skill are
+identical to those written by the headless CLI, so mixed-mode operation (start
+headless, resume in skill, or vice versa) is supported.
+
+## Session state
+
+Local session state is stored at:
+
+```
+~/.local/state/coding-review-agent-loop/skill-sessions/{owner-repo}/{issue}.json
+```
+
+This path is outside any git checkout so it never dirties a working tree.
+Fields written by `state_manager write-session`:
+
+| Field | Description |
+|-------|-------------|
+| `last_completed_step` | Most recently completed orchestration step |
+| `session_id` | Current skill session UUID prefix |
+| `round_number` | Current plan/PR round number |
+| `pending_comment_body` | Path to a comment body not yet posted |
+
+The `pending_comment_body` field provides crash recovery: if the session ends
+after writing the comment file but before posting it, the next `build-resume`
+call includes the path so Claude can re-post it.
+
+## Resume from existing round
+
+`state_manager build-resume` reads GitHub issue comments, extracts all
+`AGENT_LOOP_META` base64 blobs, calls `_resume_plan_round(comments,
+configured_reviewers=...)` or `_resume_pr_round(comments, head_sha=...,
+configured_reviewers=...)`, and outputs a JSON descriptor:
+
+```json
+{
+  "round_number": 2,
+  "prior_items": [...],
+  "compact_prior_summaries": [...],
+  "completed_reviewer_names": ["Codex"],
+  "pending_comment_body": null,
+  "current_plan": "..."
+}
+```
+
+The skill then skips already-completed reviewer turns and resumes from where
+the last session ended.
+
+**Important**: `--reviewers` must exactly match the configured reviewer list for
+the current invocation.  For PR-flow sessions, `--head-sha` or `--pr` is also
+required so `_resume_pr_round` can compare the current PR head SHA.
+
+## Billing and terms
+
+Running Claude turns inside an interactive Claude Code session may count
+differently toward billing than `claude -p` / Agent SDK invocations.  Whether
+this constitutes "interactive" or "programmatic" use depends on Anthropic's
+current terms and product behavior at the time of use.
+
+**Non-goals / constraints**:
+- Do not use this skill to proxy one user's session to other users.
+- Do not build unattended 24/7 automation that relies on pretending to be
+  interactive use.
+- Do not market this as free Claude access or billing bypass.
+- The existing headless `agent-loop` CLI path is unchanged and unaffected.
+
+## Install / setup for open-source users
+
+1. Clone the repository and install in development mode:
+   ```
+   pip install -e ".[dev]"
+   ```
+2. Copy or symlink `helpers/` and `SKILL.md` into your working directory
+   (or run from the repo root).
+3. Authenticate `gh` and install `codex` / `gemini` CLIs as needed.
+4. Run the demo to verify the install:
+   ```
+   python -m helpers.demo_loop --issue 123 --repo demo/repo
+   ```
+
+## Known limitations
+
+- Reviewer subprocess progress (Codex, Gemini) is not streamed to Claude's
+  terminal while the subprocess runs.  Check logs in
+  `/tmp/coding-review-agent-loop/skill-logs/`.
+- If the Claude Code session ends mid-loop, the next session must call
+  `build-resume` to reconstruct the round state from GitHub comments.
+- The structured protocol versions must match; update both the library and
+  the skill helpers together when the protocol evolves.
+- Future Antigravity CLI migration (#215) may require updates to
+  `run_external.py` when the `gemini` CLI name or interface changes.
+
+## Related
+
+- `SKILL.md` — step-by-step skill orchestration instructions for Claude.
+- Issue #216 — original exploration proposal.
+- Issue #215 — Antigravity CLI migration for Gemini CLI consumer users.
