@@ -14,6 +14,33 @@ GitHub operations go through `gh`.
 - `gemini` CLI installed (for Gemini reviewer turns).
 - The `coding-review-agent-loop` package importable from `src/` (run from repo root).
 
+## How to invoke this skill
+
+Open a Claude Code session **in the `coding-review-agent-loop` repo root** (or
+any directory where `helpers/` is on the Python path).  Then tell Claude what
+you want in natural language, for example:
+
+```
+Run the agent-loop skill for issue #123 in myorg/myrepo with gemini as reviewer.
+```
+
+```
+Start agent-loop plan-first for issue #42 in myorg/myrepo, reviewers: codex and gemini.
+```
+
+```
+Run agent-loop on PR #99 in myorg/myrepo.
+```
+
+```
+Resume the agent-loop skill for issue #123 in myorg/myrepo.
+```
+
+Claude will read this file and follow the orchestration steps below.  You do
+not need to type any slash command; natural-language requests are enough.
+
+---
+
 ## How to start a plan loop for an issue
 
 Provide the following information:
@@ -133,11 +160,22 @@ The `context.json` must contain:
 }
 ```
 
-Attach AGENT_LOOP_META to the reviewer comment (subject must match the coder comment):
+Render the structured JSON to human-readable markdown before posting:
+
+```bash
+python -m helpers.render_response \
+  --file /tmp/agent-loop-skill/{session-id}/codex-review.md \
+  --kind plan_review \
+  --reviewer Codex \
+  --context-file /tmp/agent-loop-skill/{session-id}/context.json \
+  --output /tmp/agent-loop-skill/{session-id}/codex-review-rendered.md
+```
+
+Attach AGENT_LOOP_META to the rendered reviewer comment:
 
 ```bash
 python -m helpers.state_manager attach-metadata \
-  --body-file /tmp/agent-loop-skill/{session-id}/codex-review.md \
+  --body-file /tmp/agent-loop-skill/{session-id}/codex-review-rendered.md \
   --output /tmp/agent-loop-skill/{session-id}/codex-review-tagged.md \
   --flow plan --role reviewer --agent Codex \
   --round-number {round_number} --state approved \
@@ -146,7 +184,7 @@ python -m helpers.state_manager attach-metadata \
   [--dispositions-file /tmp/agent-loop-skill/{session-id}/codex_dispositions.json]
 ```
 
-Post the reviewer comment (with metadata):
+Post the rendered reviewer comment (with metadata):
 
 ```bash
 python -m helpers.gh_ops post-issue-comment \
@@ -175,6 +213,69 @@ python -m helpers.state_manager write-session \
 Use `--flow pr` with `build-resume` and pass `--pr PR_NUMBER` (or `--head-sha SHA`)
 to operate in PR-review mode. All other steps are the same, using `--kind pr_review`
 for validation.
+
+---
+
+## Reversed roles (Codex as coder, Claude as reviewer)
+
+When `--coder codex` is requested, the following steps differ from the normal flow.
+
+**Critical**: `build-resume` tracks completion by matching the posted review's
+`--agent` value against the `--reviewers` list.  In reversed-roles mode Claude
+is the reviewer, so **pass `--reviewers claude`** in Step 1 (not `codex` or
+`gemini`).  Using the wrong reviewers list causes `build-resume` to ignore
+Claude's completed review on any subsequent resume.
+
+### Step 1 — build-resume (reversed-roles variant)
+
+```bash
+python -m helpers.state_manager build-resume \
+  --issue ISSUE --repo OWNER/REPO \
+  --reviewers claude \
+  --flow plan
+```
+
+### Step 2 (coder turn) — Codex writes the plan
+
+Instead of Claude writing the plan directly, invoke Codex:
+
+```bash
+python -m helpers.run_external \
+  --agent codex \
+  --role coder \
+  --prompt-file /tmp/agent-loop-skill/{session-id}/coder-prompt.md \
+  --output /tmp/agent-loop-skill/{session-id}/plan.md \
+  --workdir /path/to/codex/checkout
+```
+
+The prompt file must contain the issue context and plan-format instructions
+(including the `<!-- AGENT_PLAN_STATE: approved -->` footer requirement).
+
+### Step 3 — Validate the plan (same as normal)
+
+```bash
+python -m helpers.validate_response \
+  --file /tmp/agent-loop-skill/{session-id}/plan.md \
+  --kind plan_state
+```
+
+### Steps 4–5 — Attach metadata and post (same as normal)
+
+Use `--agent Codex` in the `attach-metadata` call instead of `--agent Claude`.
+
+### Step 6 (review turn) — Claude writes the structured review
+
+Claude (the session host) writes the structured JSON review directly to a temp file:
+
+```
+/tmp/agent-loop-skill/{session-id}/claude-review.md
+```
+
+The file must be a valid `plan_review` JSON followed by the `<!-- AGENT_PLAN_STATE: ... -->` footer.
+
+Validate, render, and post as in the normal reviewer flow (Step 6), using
+`--reviewer Claude` and `--agent Claude` in the respective commands.
+This ensures `build-resume --reviewers claude` recognizes the review on resume.
 
 ---
 
