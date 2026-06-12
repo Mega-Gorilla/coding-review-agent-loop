@@ -635,3 +635,219 @@ class TestSkillRunner:
             assert "round_number" in output
             assert "blocking_items" in output
             assert "approved_reviewers" in output
+
+
+# ---------------------------------------------------------------------------
+# helpers/skill_runner.py — retry-validate / repair dir
+# ---------------------------------------------------------------------------
+
+_REPAIR_BASE = Path(tempfile.gettempdir()) / "coding-review-agent-loop" / "repair"
+
+_VALID_PLAN_REVIEW_DRY = json.dumps(
+    {
+        "schema_version": 1,
+        "kind": "plan_review",
+        "state": "approved",
+        "summary": "LGTM.",
+        "blocking_plan_issues": [],
+        "same_plan_followups": [],
+        "future_followups": [],
+        "prior_plan_item_dispositions": [],
+    }
+) + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- Codex\n"
+
+_VALID_CONTEXT = json.dumps(
+    {"reviewer": "Codex", "prior_items": [], "current_round_items": []}
+)
+
+
+def _make_repair_dir(
+    tmpdir: Path,
+    *,
+    raw_content: str = _VALID_PLAN_REVIEW_DRY,
+    issue: int = 9998,
+    agent: str = "codex",
+    round_num: int = 1,
+    dry_run: bool = True,
+) -> Path:
+    repair_dir = tmpdir / f"{issue}-r{round_num}-{agent}"
+    repair_dir.mkdir(parents=True, exist_ok=True)
+    (repair_dir / "raw.md").write_text(raw_content, encoding="utf-8")
+    (repair_dir / "context.json").write_text(_VALID_CONTEXT, encoding="utf-8")
+    (repair_dir / "prior_items.json").write_text("[]", encoding="utf-8")
+    manifest = {
+        "agent": agent,
+        "agent_cap": agent.capitalize(),
+        "flow": "plan",
+        "issue": issue,
+        "repo": "OWNER/REPO",
+        "new_round_number": round_num,
+        "round_subject": "abc123",
+        "item_id_offset": 0,
+        "validate_kind": "plan_review",
+        "dry_run": dry_run,
+    }
+    (repair_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return repair_dir
+
+
+class TestRetryValidate:
+    def test_run_plan_round_saves_repair_dir(self) -> None:
+        """run-plan-round --dry-run always saves a repair dir before normalization."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            _write_fake_gh(tmppath)
+            env = _make_fake_gh_env(tmppath)
+            plan_path = tmppath / "plan.md"
+            plan_path.write_text(_VALID_PLAN_FOR_RUNNER, encoding="utf-8")
+
+            result = _run(
+                "helpers.skill_runner", "run-plan-round",
+                "--issue", "9998",
+                "--repo", "test/skill-repo",
+                "--plan-file", str(plan_path),
+                "--reviewers", "codex",
+                "--dry-run",
+                env=env,
+            )
+            assert result.returncode == 0
+            repair_dir = _REPAIR_BASE / "9998-r1-codex"
+            assert (repair_dir / "raw.md").exists(), f"raw.md missing in {repair_dir}"
+            assert (repair_dir / "manifest.json").exists(), f"manifest.json missing in {repair_dir}"
+            manifest = json.loads((repair_dir / "manifest.json").read_text(encoding="utf-8"))
+            assert manifest["agent"] == "codex"
+            assert manifest["validate_kind"] == "plan_review"
+
+    def test_retry_validate_repair_dir_dry_run_exits_zero(self) -> None:
+        """retry-validate --repair-dir with a valid raw response exits 0."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            _write_fake_gh(tmppath)
+            env = _make_fake_gh_env(tmppath)
+            repair_dir = _make_repair_dir(tmppath, dry_run=True)
+
+            result = _run(
+                "helpers.skill_runner", "retry-validate",
+                "--repair-dir", str(repair_dir),
+                "--dry-run",
+                env=env,
+                check=False,
+            )
+            assert result.returncode == 0, (
+                f"Expected exit 0, got {result.returncode}\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+            )
+            stdout = result.stdout
+            json_start = stdout.rfind("\n{")
+            if json_start < 0:
+                json_start = stdout.find("{")
+            assert json_start >= 0, f"No JSON found in stdout:\n{stdout}"
+            output = json.loads(stdout[json_start:].strip())
+            assert output["state"] == "approved"
+
+    def test_retry_validate_invalid_raw_exits_nonzero(self) -> None:
+        """retry-validate with a clearly invalid raw file exits non-zero."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            _write_fake_gh(tmppath)
+            env = _make_fake_gh_env(tmppath)
+            repair_dir = _make_repair_dir(
+                tmppath,
+                raw_content="This is not JSON at all.\n",
+                dry_run=True,
+            )
+
+            result = _run(
+                "helpers.skill_runner", "retry-validate",
+                "--repair-dir", str(repair_dir),
+                "--dry-run",
+                env=env,
+                check=False,
+            )
+            assert result.returncode != 0, (
+                f"Expected non-zero exit, but got 0\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+            )
+
+    def test_retry_validate_blocking_response_returns_blocking_items(self) -> None:
+        """retry-validate with a blocking reviewer response returns state=blocking and items."""
+        blocking_raw = json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": "blocking",
+                "summary": "Has issues.",
+                "blocking_plan_issues": ["Fix the thing."],
+                "same_plan_followups": [],
+                "future_followups": [],
+                "prior_plan_item_dispositions": [],
+            }
+        ) + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Codex\n"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            _write_fake_gh(tmppath)
+            env = _make_fake_gh_env(tmppath)
+            repair_dir = _make_repair_dir(tmppath, raw_content=blocking_raw, dry_run=True)
+
+            result = _run(
+                "helpers.skill_runner", "retry-validate",
+                "--repair-dir", str(repair_dir),
+                "--dry-run",
+                env=env,
+                check=False,
+            )
+            assert result.returncode == 0, (
+                f"Expected exit 0, got {result.returncode}\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+            )
+            stdout = result.stdout
+            json_start = stdout.rfind("\n{")
+            if json_start < 0:
+                json_start = stdout.find("{")
+            output = json.loads(stdout[json_start:].strip())
+            assert output["state"] == "blocking"
+            assert len(output["blocking_items"]) == 1
+            assert output["new_items"][0]["item_id"] == "item-1"
+
+    def test_retry_validate_blocking_via_same_followups_only(self, tmp_path):
+        """blocking state with empty blocking_plan_issues but non-empty same_plan_followups
+        surfaces the followups as blocking_items (exercises reported_blocking = new_unresolved_texts)."""
+        blocking_raw = json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": "blocking",
+                "summary": "Unresolved followups remain.",
+                "blocking_plan_issues": [],
+                "same_plan_followups": ["Address the followup from last round."],
+                "future_followups": [],
+                "prior_plan_item_dispositions": [],
+            }
+        ) + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Codex\n"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            _write_fake_gh(tmppath)
+            env = _make_fake_gh_env(tmppath)
+            repair_dir = _make_repair_dir(tmppath, raw_content=blocking_raw, dry_run=True)
+
+            result = _run(
+                "helpers.skill_runner", "retry-validate",
+                "--repair-dir", str(repair_dir),
+                "--dry-run",
+                env=env,
+                check=False,
+            )
+            assert result.returncode == 0, (
+                f"Expected exit 0, got {result.returncode}\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+            )
+            stdout = result.stdout
+            json_start = stdout.rfind("\n{")
+            if json_start < 0:
+                json_start = stdout.find("{")
+            output = json.loads(stdout[json_start:].strip())
+            assert output["state"] == "blocking"
+            assert len(output["blocking_items"]) == 1
+            assert output["blocking_items"][0]["text"] == "Address the followup from last round."
