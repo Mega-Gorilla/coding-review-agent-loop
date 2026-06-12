@@ -699,9 +699,10 @@ def _run_reviewer(
     except _ValidationError as exc:
         print(str(exc), file=sys.stderr)
         print(f"skill_runner: raw response saved to: {repair_dir}/raw.md", file=sys.stderr)
+        dry_run_flag = " --dry-run" if dry_run else ""
         print(
             f"skill_runner: fix raw.md, then run: "
-            f"python -m helpers.skill_runner retry-validate --repair-dir {repair_dir}",
+            f"python -m helpers.skill_runner retry-validate --repair-dir {repair_dir}{dry_run_flag}",
             file=sys.stderr,
         )
         sys.exit(1)

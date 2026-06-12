@@ -809,3 +809,45 @@ class TestRetryValidate:
             assert output["state"] == "blocking"
             assert len(output["blocking_items"]) == 1
             assert output["new_items"][0]["item_id"] == "item-1"
+
+    def test_retry_validate_blocking_via_same_followups_only(self, tmp_path):
+        """blocking state with empty blocking_plan_issues but non-empty same_plan_followups
+        surfaces the followups as blocking_items (exercises reported_blocking = new_unresolved_texts)."""
+        blocking_raw = json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": "blocking",
+                "summary": "Unresolved followups remain.",
+                "blocking_plan_issues": [],
+                "same_plan_followups": ["Address the followup from last round."],
+                "future_followups": [],
+                "prior_plan_item_dispositions": [],
+            }
+        ) + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Codex\n"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            _write_fake_gh(tmppath)
+            env = _make_fake_gh_env(tmppath)
+            repair_dir = _make_repair_dir(tmppath, raw_content=blocking_raw, dry_run=True)
+
+            result = _run(
+                "helpers.skill_runner", "retry-validate",
+                "--repair-dir", str(repair_dir),
+                "--dry-run",
+                env=env,
+                check=False,
+            )
+            assert result.returncode == 0, (
+                f"Expected exit 0, got {result.returncode}\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+            )
+            stdout = result.stdout
+            json_start = stdout.rfind("\n{")
+            if json_start < 0:
+                json_start = stdout.find("{")
+            output = json.loads(stdout[json_start:].strip())
+            assert output["state"] == "blocking"
+            assert len(output["blocking_items"]) == 1
+            assert output["blocking_items"][0]["text"] == "Address the followup from last round."
