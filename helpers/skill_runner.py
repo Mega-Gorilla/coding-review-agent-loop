@@ -491,7 +491,7 @@ def _complete_reviewer_turn(
 ) -> dict:
     """Normalize, validate, render, parse, mint IDs, attach metadata, and post.
 
-    Normalizes raw_output in-place. Exits 1 on validation failure.
+    Normalizes raw_output in-place. Raises _ValidationError on validation failure.
     Returns {reviewer_name, state, blocking_items, new_items}.
     """
     rendered_output   = work_dir / f"{agent}-review-rendered.md"
