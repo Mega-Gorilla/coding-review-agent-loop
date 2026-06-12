@@ -548,13 +548,13 @@ def _complete_reviewer_turn(
             d["reviewer"] = agent_cap
 
     blocking_key = "blocking_plan_issues" if flow == "plan" else "blocking_items"
-    blocking_texts = list(review_json.get(blocking_key, []))
+    blocking_texts: list[str] = list(review_json.get(blocking_key, []))
     same_key = "same_plan_followups" if flow == "plan" else "same_pr_followups"
-    new_unresolved_texts = list(review_json.get(same_key, []))
+    new_unresolved_texts: list[str] = list(review_json.get(same_key, []))
 
     # When a reviewer blocks via same-round followups only (no explicit blocking issues),
     # surface those followups as blocking_items for the caller so the overall state is correct.
-    reported_blocking = blocking_texts
+    reported_blocking: list[str] = blocking_texts
     if parsed_state == "blocking" and not blocking_texts:
         reported_blocking = new_unresolved_texts
 
