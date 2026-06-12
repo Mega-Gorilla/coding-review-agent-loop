@@ -292,7 +292,7 @@ def _workdir_for_agent(agent: str, args: argparse.Namespace) -> str:
     generic = getattr(args, "workdir", None)
     if generic:
         return generic
-    # Auto-clone to a temp path; run_external handles this via --workdir
+    # Auto-clone to a temp path; run_external validates/re-clones via --repo
     tmp = Path(tempfile.gettempdir()) / "coding-review-agent-loop" / f"skill-runner-{agent}"
     tmp.mkdir(parents=True, exist_ok=True)
     return str(tmp)
@@ -672,6 +672,7 @@ def _run_reviewer(
         "--prompt-file", str(prompt_file),
         "--output", str(raw_output),
         "--workdir", workdir,
+        "--repo", repo,
         "--flow", flow,
         *(["--dry-run"] if dry_run else []),
     )

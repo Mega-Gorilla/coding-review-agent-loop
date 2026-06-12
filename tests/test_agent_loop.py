@@ -12128,6 +12128,65 @@ def test_stale_default_workdir_with_unknown_files_still_fails(tmp_path):
     assert not any(cmd[:3] == ["gh", "repo", "clone"] for cmd, _cwd in runner.commands)
 
 
+def test_stale_default_workdir_empty_is_recreated(tmp_path, capsys):
+    """An empty workdir (no .git, no files) is treated as stale and re-cloned."""
+    runner = FakeRunner(
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+    )
+    codex_dir = tmp_path / "codex"
+    codex_dir.mkdir()  # exists but empty
+
+    config = make_config(
+        tmp_path,
+        codex_dir=codex_dir,
+        reviewer="codex",
+        auto_agent_dirs=("codex",),
+        create_dirs=False,
+        quiet=False,
+    )
+    config.claude_dir.mkdir(parents=True)
+    config.gemini_dir.mkdir(parents=True)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    clone_cmds = [cmd for cmd, _cwd in runner.commands if cmd[:3] == ["gh", "repo", "clone"]]
+    assert any(cmd[4] == str(codex_dir) for cmd in clone_cmds), "Expected fresh clone of empty stale workdir"
+
+    captured = capsys.readouterr()
+    assert "Stale default codex workdir detected" in captured.err
+    assert "recreating" in captured.err
+
+
+def test_stale_default_workdir_git_only_is_recreated(tmp_path, capsys):
+    """A workdir with only a .git dir (no working tree) is treated as stale and re-cloned."""
+    runner = FakeRunner(
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+    )
+    codex_dir = tmp_path / "codex"
+    codex_dir.mkdir()
+    (codex_dir / ".git").mkdir()  # .git present, but no source files
+
+    config = make_config(
+        tmp_path,
+        codex_dir=codex_dir,
+        reviewer="codex",
+        auto_agent_dirs=("codex",),
+        create_dirs=False,
+        quiet=False,
+    )
+    config.claude_dir.mkdir(parents=True)
+    config.gemini_dir.mkdir(parents=True)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    clone_cmds = [cmd for cmd, _cwd in runner.commands if cmd[:3] == ["gh", "repo", "clone"]]
+    assert any(cmd[4] == str(codex_dir) for cmd in clone_cmds), "Expected fresh clone of git-only stale workdir"
+
+    captured = capsys.readouterr()
+    assert "Stale default codex workdir detected" in captured.err
+    assert "recreating" in captured.err
+
+
 def test_explicit_dir_not_git_checkout_is_not_recreated(tmp_path):
     runner = FakeRunner(git_inside=False)
     codex_dir = tmp_path / "codex"
