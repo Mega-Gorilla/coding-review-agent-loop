@@ -100,6 +100,12 @@ def main() -> None:
         help="Review flow: 'plan' (default) or 'pr'. Affects dry-run stub kind.",
     )
     parser.add_argument("--dry-run", action="store_true", help="Write a canned stub and exit.")
+    parser.add_argument(
+        "--repo",
+        default=None,
+        help="GitHub OWNER/REPO to clone if workdir is absent or stale. "
+             "When provided, workdir is validated and re-cloned automatically.",
+    )
     args = parser.parse_args()
 
     output_path = Path(args.output)
@@ -141,7 +147,7 @@ def main() -> None:
     # Import backends lazily to avoid heavy import in dry-run path
     from coding_review_agent_loop.agents.codex import CodexBackend
     from coding_review_agent_loop.agents.gemini import GeminiBackend
-    from coding_review_agent_loop.config import AgentLoopConfig
+    from coding_review_agent_loop.config import AgentLoopConfig, ensure_temp_checkout
 
     agent_name = args.agent
     default_cmds = {"codex": "codex", "gemini": "gemini"}
@@ -153,7 +159,7 @@ def main() -> None:
     log_dir.mkdir(parents=True, exist_ok=True)
 
     config = AgentLoopConfig(
-        repo="skill/run",
+        repo=args.repo or "skill/run",
         claude_dir=workdir,
         codex_dir=workdir,
         gemini_dir=workdir,
@@ -189,6 +195,8 @@ def main() -> None:
     )
 
     runner = Runner(dry_run=False)
+    if args.repo:
+        ensure_temp_checkout(workdir, agent=agent_name, config=config, runner=runner)  # type: ignore[arg-type]
     backend = CodexBackend() if agent_name == "codex" else GeminiBackend()
     try:
         result = backend.run(runner, config, prompt)

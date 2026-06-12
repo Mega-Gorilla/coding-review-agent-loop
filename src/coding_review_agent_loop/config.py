@@ -142,11 +142,18 @@ _TOOL_ARTIFACT_NAMES = frozenset({
 
 
 def _is_stale_default_workdir(path: Path) -> bool:
-    """Return True if path has no git checkout and contains only tool-owned log artifacts."""
+    """Return True if path has no real checkout and contains only tool-owned artifacts.
+
+    Covers two cases:
+    - No .git at all, only log/artifact dirs (original case).
+    - .git present but working tree is empty — happens when a prior cleanup removed
+      source files but left the .git dir (e.g. response storage at .git/agent-loop/).
+    """
     if not path.is_dir():
         return False
     if (path / ".git").exists():
-        return False
+        non_git = {item.name for item in path.iterdir() if item.name != ".git"}
+        return not non_git or non_git.issubset(_TOOL_ARTIFACT_NAMES)
     contents = {item.name for item in path.iterdir()}
     return bool(contents) and contents.issubset(_TOOL_ARTIFACT_NAMES)
 
