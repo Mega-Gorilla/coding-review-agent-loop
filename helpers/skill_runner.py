@@ -37,6 +37,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -257,7 +258,6 @@ def _save_raw_to_repair_dir(
     prior_items_file: Path,
 ) -> Path:
     """Copy raw response + context to a stable repair dir before normalization/validation."""
-    import shutil
     repair_dir = _REPAIR_BASE / f"{issue}-r{new_round_number}-{agent}"
     repair_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(raw_output, repair_dir / "raw.md")
@@ -1069,7 +1069,7 @@ def cmd_retry_validate(args: argparse.Namespace) -> None:
     new_round_number = manifest["new_round_number"]
     round_subject    = manifest["round_subject"]
     item_id_offset   = manifest["item_id_offset"]
-    dry_run          = manifest.get("dry_run", False) or args.dry_run
+    dry_run          = args.dry_run
 
     raw_output      = repair_dir / "raw.md"
     context_file    = repair_dir / "context.json"

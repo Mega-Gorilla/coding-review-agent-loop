@@ -768,3 +768,44 @@ class TestRetryValidate:
                 f"Expected non-zero exit, but got 0\n"
                 f"stdout: {result.stdout}\nstderr: {result.stderr}"
             )
+
+    def test_retry_validate_blocking_response_returns_blocking_items(self) -> None:
+        """retry-validate with a blocking reviewer response returns state=blocking and items."""
+        blocking_raw = json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": "blocking",
+                "summary": "Has issues.",
+                "blocking_plan_issues": ["Fix the thing."],
+                "same_plan_followups": [],
+                "future_followups": [],
+                "prior_plan_item_dispositions": [],
+            }
+        ) + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Codex\n"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            _write_fake_gh(tmppath)
+            env = _make_fake_gh_env(tmppath)
+            repair_dir = _make_repair_dir(tmppath, raw_content=blocking_raw, dry_run=True)
+
+            result = _run(
+                "helpers.skill_runner", "retry-validate",
+                "--repair-dir", str(repair_dir),
+                "--dry-run",
+                env=env,
+                check=False,
+            )
+            assert result.returncode == 0, (
+                f"Expected exit 0, got {result.returncode}\n"
+                f"stdout: {result.stdout}\nstderr: {result.stderr}"
+            )
+            stdout = result.stdout
+            json_start = stdout.rfind("\n{")
+            if json_start < 0:
+                json_start = stdout.find("{")
+            output = json.loads(stdout[json_start:].strip())
+            assert output["state"] == "blocking"
+            assert len(output["blocking_items"]) == 1
+            assert output["new_items"][0]["item_id"] == "item-1"
