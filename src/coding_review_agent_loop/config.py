@@ -155,7 +155,7 @@ def _is_stale_default_workdir(path: Path) -> bool:
         non_git = {item.name for item in path.iterdir() if item.name != ".git"}
         return not non_git or non_git.issubset(_TOOL_ARTIFACT_NAMES)
     contents = {item.name for item in path.iterdir()}
-    return bool(contents) and contents.issubset(_TOOL_ARTIFACT_NAMES)
+    return contents.issubset(_TOOL_ARTIFACT_NAMES)  # empty dir is also stale
 
 
 def _looks_like_repo_remote(remote_url: str, repo: str) -> bool:

@@ -147,9 +147,9 @@ def main() -> None:
     # Import backends lazily to avoid heavy import in dry-run path
     from coding_review_agent_loop.agents.codex import CodexBackend
     from coding_review_agent_loop.agents.gemini import GeminiBackend
-    from coding_review_agent_loop.config import AgentLoopConfig, ensure_temp_checkout
+    from coding_review_agent_loop.config import AgentLoopConfig, AgentName, ensure_temp_checkout
 
-    agent_name = args.agent
+    agent_name: AgentName = args.agent
     default_cmds = {"codex": "codex", "gemini": "gemini"}
     cmd = args.cmd or default_cmds[agent_name]
 
@@ -164,7 +164,7 @@ def main() -> None:
         codex_dir=workdir,
         gemini_dir=workdir,
         coder="claude",
-        reviewer=(agent_name,),  # type: ignore[arg-type]
+        reviewer=(agent_name,),
         base="main",
         max_rounds=1,
         auto_merge=False,
@@ -191,12 +191,12 @@ def main() -> None:
         refresh_agent_memory=False,
         agent_memory_dir=log_dir,
         refresh_test_profile=False,
-        auto_agent_dirs=(agent_name,),  # type: ignore[arg-type]
+        auto_agent_dirs=(agent_name,),
     )
 
     runner = Runner(dry_run=False)
     if args.repo:
-        ensure_temp_checkout(workdir, agent=agent_name, config=config, runner=runner)  # type: ignore[arg-type]
+        ensure_temp_checkout(workdir, agent=agent_name, config=config, runner=runner)
     backend = CodexBackend() if agent_name == "codex" else GeminiBackend()
     try:
         result = backend.run(runner, config, prompt)
