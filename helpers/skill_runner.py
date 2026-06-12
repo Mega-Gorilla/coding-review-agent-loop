@@ -113,13 +113,11 @@ def _normalize_disposition_values(text: str) -> str:
     Agents occasionally write natural-language variants like 'still blocking'
     instead of the canonical 'blocking'. This normalizes them before validation.
     """
-    json_end = text.find("<!-- AGENT")
-    if json_end < 0:
-        json_end = len(text)
-    json_part = text[:json_end].strip()
-    footer = text[json_end:]
     try:
-        data = json.loads(json_part)
+        stripped = text.lstrip()
+        decoder = json.JSONDecoder()
+        data, end_idx = decoder.raw_decode(stripped)
+        footer = stripped[end_idx:]
     except json.JSONDecodeError:
         return text
     changed = False
@@ -135,25 +133,68 @@ def _normalize_disposition_values(text: str) -> str:
     return json.dumps(data, indent=2) + "\n" + footer.lstrip()
 
 
+_HR_RESOLVED_LINE_RE = re.compile(r"^\s*<!--\s*HUMAN_REQUIREMENTS_RESOLVED\s*-->\s*$")
+
+
 def _normalize_raw_response(text: str) -> str:
-    """Strip prose the protocol validator would reject.
+    """Strip content the protocol validator would reject.
 
     1. Leading prose before the JSON object (Gemini sometimes writes a summary line first).
-    2. Any content after the first agent signature line (e.g. a duplicate state marker).
+    2. Between the closing } and <!-- AGENT_STATE -->: keep only the one recognized optional
+       marker (<!-- HUMAN_REQUIREMENTS_RESOLVED -->); strip everything else (e.g. Codex's
+       stray <!-- HUMAN_REQUIREMENTS_RESOLVED --> mixed with other unrecognized lines, or
+       prose that predates the structured format).
+    3. Any content after the first agent signature line (e.g. a duplicate state marker).
+
+    This function is only called for reviewer responses (pr_review / plan_review).
+    Plan-revision responses (plan_state) are never passed here; their
+    <!-- HUMAN_REQUIREMENTS_ADDRESSED --> + ### Human requirements sections are not at risk.
     """
     # Strip leading prose before the JSON block
     brace_idx = text.find("{")
     if brace_idx > 0:
         text = text[brace_idx:]
 
-    # Strip trailing content after the first signature line
-    m = _STATE_MARKER_RE.search(text)
+    # Use raw_decode to find exact end of the JSON object
+    try:
+        _, json_end_idx = json.JSONDecoder().raw_decode(text)
+        json_text = text[:json_end_idx]
+        remainder = text[json_end_idx:]
+    except json.JSONDecodeError:
+        json_text = text
+        remainder = ""
+
+    # Find state marker and signature. Either order may appear (Gemini sometimes
+    # places the signature before the state marker).
+    m = _STATE_MARKER_RE.search(remainder)
     if m is None:
         return text
-    sig_m = _SIGNATURE_RE.search(text, m.end())
-    if sig_m is None:
-        return text
-    return text[: sig_m.end()].rstrip() + "\n"
+
+    sig_m = _SIGNATURE_RE.search(remainder, m.end())
+    if sig_m is not None:
+        # Standard order: STATE_MARKER … SIGNATURE
+        # Keep HR_RESOLVED from between-section; drop everything else.
+        between = remainder[: m.start()]
+        state_and_sig = remainder[m.start() : sig_m.end()]
+    else:
+        # Non-standard order: SIGNATURE … STATE_MARKER (Gemini legacy)
+        sig_m = _SIGNATURE_RE.search(remainder)
+        if sig_m is None or sig_m.start() >= m.start():
+            return text  # Cannot normalize — return as-is
+        # Reorder to standard form.
+        between = remainder[: sig_m.start()]
+        state_text = remainder[m.start() : m.end()].strip()
+        sig_text = remainder[sig_m.start() : sig_m.end()].strip()
+        state_and_sig = state_text + "\n" + sig_text
+
+    # Reconstruct: JSON + (HR_RESOLVED if present) + state-marker + signature.
+    # All other between-section content (prose, unrecognized HTML comments) is dropped.
+    hr_resolved = next(
+        (line.strip() for line in between.splitlines() if _HR_RESOLVED_LINE_RE.match(line)),
+        None,
+    )
+    prefix = (hr_resolved + "\n") if hr_resolved else ""
+    return json_text.rstrip() + "\n" + prefix + state_and_sig.rstrip() + "\n"
 
 
 def _max_item_number(item_lists: list[list[dict]]) -> int:
@@ -429,8 +470,8 @@ def _run_reviewer(
     # --- Parse review JSON for metadata ---
     raw_text = raw_output.read_text(encoding="utf-8")
     try:
-        json_part = raw_text.split("<!-- AGENT")[0].strip()
-        review_json = json.loads(json_part)
+        decoder = json.JSONDecoder()
+        review_json, _ = decoder.raw_decode(raw_text.lstrip())
     except (json.JSONDecodeError, ValueError) as exc:
         print(f"skill_runner: cannot parse {agent} review JSON: {exc}", file=sys.stderr)
         sys.exit(1)
