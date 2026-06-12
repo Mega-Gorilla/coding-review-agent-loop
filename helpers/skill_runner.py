@@ -17,6 +17,15 @@ Subcommands:
     [--workdir PATH] [--workdir-codex PATH] [--workdir-gemini PATH]
     [--dry-run]
 
+  retry-validate
+    --repair-dir PATH
+    [--dry-run]
+
+    Re-validate an already-written reviewer response without re-running the agent.
+    On validation failure, skill_runner saves the raw response plus context to a
+    stable repair dir and prints the retry command. Edit {repair_dir}/raw.md, then
+    run this subcommand to complete the round.
+
 Prints a JSON result to stdout and exits 0:
   {"state": "approved"|"blocking", "round_number": N,
    "blocking_items": [...], "approved_reviewers": [...]}
@@ -54,6 +63,7 @@ from coding_review_agent_loop.unresolved_items import apply_item_dispositions
 # ---------------------------------------------------------------------------
 
 _HELPERS = Path(__file__).parent
+_REPAIR_BASE = Path(tempfile.gettempdir()) / "coding-review-agent-loop" / "repair"
 
 
 def _run_helper(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -128,6 +138,35 @@ def _normalize_disposition_values(text: str) -> str:
             if canonical:
                 disp["disposition"] = canonical
                 changed = True
+    # Flatten list fields whose items are dicts instead of plain strings.
+    # Agents occasionally write {"title": "...", "detail": "..."} objects.
+    for key in (
+        "blocking_plan_issues", "same_plan_followups",
+        "blocking_items", "same_pr_followups", "future_followups",
+    ):
+        if key not in data:
+            continue
+        flattened = []
+        any_dict = False
+        for item in data[key]:
+            if isinstance(item, dict):
+                any_dict = True
+                title = str(
+                    item.get("title") or item.get("text")
+                    or item.get("issue") or item.get("summary") or ""
+                )
+                detail = str(item.get("detail") or item.get("description") or "")
+                flattened.append(f"{title}: {detail}".strip(": ") if detail else title)
+            else:
+                flattened.append(item)
+        if any_dict:
+            data[key] = flattened
+            changed = True
+    # Blocking plan/PR reviews may not include future_followups per protocol.
+    # Strip them rather than failing validation on an otherwise-valid review.
+    if data.get("state") == "blocking" and data.get("future_followups"):
+        data["future_followups"] = []
+        changed = True
     if not changed:
         return text
     return json.dumps(data, indent=2) + "\n" + footer.lstrip()
@@ -195,6 +234,40 @@ def _normalize_raw_response(text: str) -> str:
     )
     prefix = (hr_resolved + "\n") if hr_resolved else ""
     return json_text.rstrip() + "\n" + prefix + state_and_sig.rstrip() + "\n"
+
+
+def _save_raw_to_repair_dir(
+    *,
+    agent: str,
+    agent_cap: str,
+    flow: str,
+    issue: int,
+    repo: str,
+    new_round_number: int,
+    round_subject: str,
+    item_id_offset: int,
+    validate_kind: str,
+    dry_run: bool,
+    raw_output: Path,
+    context_file: Path,
+    prior_items_file: Path,
+) -> Path:
+    """Copy raw response + context to a stable repair dir before normalization/validation."""
+    import shutil
+    repair_dir = _REPAIR_BASE / f"{issue}-r{new_round_number}-{agent}"
+    repair_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(raw_output, repair_dir / "raw.md")
+    shutil.copy2(context_file, repair_dir / "context.json")
+    shutil.copy2(prior_items_file, repair_dir / "prior_items.json")
+    manifest = {
+        "agent": agent, "agent_cap": agent_cap, "flow": flow,
+        "issue": issue, "repo": repo,
+        "new_round_number": new_round_number, "round_subject": round_subject,
+        "item_id_offset": item_id_offset, "validate_kind": validate_kind,
+        "dry_run": dry_run,
+    }
+    (repair_dir / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return repair_dir
 
 
 def _max_item_number(item_lists: list[list[dict]]) -> int:
@@ -392,61 +465,46 @@ def _compute_next_prior_items(
 
 
 # ---------------------------------------------------------------------------
-# Per-reviewer run
+# Per-reviewer turn completion (shared by _run_reviewer and cmd_retry_validate)
 # ---------------------------------------------------------------------------
 
-def _run_reviewer(
+def _complete_reviewer_turn(
     *,
     agent: str,
-    prompt_text: str,
-    context: dict,
-    round_subject: str,
-    next_prior_items_raw: list[dict],
-    new_round_number: int,
+    agent_cap: str,
+    flow: str,
+    validate_kind: str,
     issue: int,
     repo: str,
-    flow: str,
-    role: str,
-    state_key: str,
-    workdir: str,
+    new_round_number: int,
+    round_subject: str,
+    next_prior_items_raw: list[dict],
+    item_id_offset: int,
     dry_run: bool,
-    tmpdir: Path,
-    item_id_offset: int = 0,
+    raw_output: Path,
+    context_file: Path,
+    work_dir: Path,
 ) -> dict:
-    """Run one reviewer turn; return {reviewer_name, state, blocking_items, new_items}."""
-    agent_cap = agent.capitalize() if agent in ("codex", "gemini") else agent
-    prompt_file = tmpdir / f"{agent}-prompt.md"
-    raw_output = tmpdir / f"{agent}-review-raw.md"
-    rendered_output = tmpdir / f"{agent}-review-rendered.md"
-    tagged_output = tmpdir / f"{agent}-review-tagged.md"
-    context_file = tmpdir / f"{agent}-context.json"
-    prior_items_file = tmpdir / f"{agent}-prior-items.json"
-    dispositions_file = tmpdir / f"{agent}-dispositions.json"
-    new_items_file = tmpdir / f"{agent}-new-items.json"
+    """Normalize, validate, render, parse, mint IDs, attach metadata, and post.
 
-    _write_text(prompt_file, prompt_text)
-    _write_json(context_file, context)
+    Normalizes raw_output in-place. Exits 1 on validation failure.
+    Returns {reviewer_name, state, blocking_items, new_items}.
+    """
+    rendered_output   = work_dir / f"{agent}-review-rendered.md"
+    tagged_output     = work_dir / f"{agent}-review-tagged.md"
+    prior_items_file  = work_dir / f"{agent}-prior-items.json"
+    dispositions_file = work_dir / f"{agent}-dispositions.json"
+    new_items_file    = work_dir / f"{agent}-new-items.json"
+
     _write_json(prior_items_file, next_prior_items_raw)
 
-    # --- Run agent ---
-    _run_helper(
-        "helpers.run_external",
-        "--agent", agent,
-        "--prompt-file", str(prompt_file),
-        "--output", str(raw_output),
-        "--workdir", workdir,
-        "--flow", flow,
-        *(["--dry-run"] if dry_run else []),
-    )
-
-    # Normalize: fix prose prefix / duplicate state markers / bad disposition values
+    # --- Normalize ---
     raw_text = raw_output.read_text(encoding="utf-8")
     raw_text = _normalize_raw_response(raw_text)
     raw_text = _normalize_disposition_values(raw_text)
     raw_output.write_text(raw_text, encoding="utf-8")
 
     # --- Validate ---
-    validate_kind = "pr_review" if flow == "pr" else "plan_review"
     result = _run_helper_capture(
         "helpers.validate_response",
         "--file", str(raw_output),
@@ -455,6 +513,7 @@ def _run_reviewer(
     )
     if result.returncode != 0:
         print(f"skill_runner: {agent} review validation failed: {result.stderr.strip()}", file=sys.stderr)
+        print(f"skill_runner: raw response at: {raw_output}", file=sys.stderr)
         sys.exit(1)
 
     # --- Render ---
@@ -479,7 +538,6 @@ def _run_reviewer(
     parsed_state = str(review_json.get("state", "approved"))
     disp_key = "prior_plan_item_dispositions" if flow == "plan" else "prior_item_dispositions"
     raw_dispositions = review_json.get(disp_key, [])
-    # Add reviewer field required by _deserialize_disposition
     for d in raw_dispositions:
         if "reviewer" not in d:
             d["reviewer"] = agent_cap
@@ -495,11 +553,9 @@ def _run_reviewer(
     if parsed_state == "blocking" and not blocking_texts:
         reported_blocking = new_unresolved_texts
 
-    # Serialize dispositions (with reviewer) for attach-metadata
     _write_json(dispositions_file, raw_dispositions)
 
-    # Mint IDs that are globally unique across rounds by starting from item_id_offset.
-    # item_id_offset = max numeric suffix seen across prior_items + already-minted round items.
+    # --- Mint IDs globally unique across rounds ---
     new_items_serialized: list[dict] = []
     item_counter = item_id_offset + 1
     for text in blocking_texts:
@@ -528,7 +584,7 @@ def _run_reviewer(
     _write_json(new_items_file, new_items_serialized)
 
     # --- Attach metadata ---
-    attach_args = [
+    _run_helper(
         "helpers.state_manager", "attach-metadata",
         "--body-file", str(rendered_output),
         "--output", str(tagged_output),
@@ -540,22 +596,20 @@ def _run_reviewer(
         "--prior-items-file", str(prior_items_file),
         "--dispositions-file", str(dispositions_file),
         "--new-items-file", str(new_items_file),
-    ]
-    attach_args += ["--subject", round_subject]
-    _run_helper(*attach_args)
+        "--subject", round_subject,
+    )
 
-    # --- Post (skip when dry_run) ---
+    # --- Post ---
     if not dry_run:
         _run_helper(
             "helpers.state_manager", "write-pending-comment",
             "--issue", str(issue), "--repo", repo,
             "--body", str(tagged_output),
         )
-        post_cmd = (
+        _run_helper(
             "helpers.gh_ops", "post-issue-comment",
             "--issue", str(issue), "--file", str(tagged_output), "--repo", repo,
         )
-        _run_helper(*post_cmd)
         _run_helper(
             "helpers.state_manager", "clear-pending-comment",
             "--issue", str(issue), "--repo", repo,
@@ -569,6 +623,82 @@ def _run_reviewer(
         "blocking_items": [{"text": t} for t in reported_blocking],
         "new_items": new_items_serialized,
     }
+
+
+# ---------------------------------------------------------------------------
+# Per-reviewer run
+# ---------------------------------------------------------------------------
+
+def _run_reviewer(
+    *,
+    agent: str,
+    prompt_text: str,
+    context: dict,
+    round_subject: str,
+    next_prior_items_raw: list[dict],
+    new_round_number: int,
+    issue: int,
+    repo: str,
+    flow: str,
+    role: str,
+    state_key: str,
+    workdir: str,
+    dry_run: bool,
+    tmpdir: Path,
+    item_id_offset: int = 0,
+) -> dict:
+    """Run one reviewer turn; return {reviewer_name, state, blocking_items, new_items}."""
+    agent_cap = agent.capitalize() if agent in ("codex", "gemini") else agent
+    validate_kind = "pr_review" if flow == "pr" else "plan_review"
+
+    prompt_file      = tmpdir / f"{agent}-prompt.md"
+    raw_output       = tmpdir / f"{agent}-review-raw.md"
+    context_file     = tmpdir / f"{agent}-context.json"
+    prior_items_file = tmpdir / f"{agent}-prior-items.json"
+
+    _write_text(prompt_file, prompt_text)
+    _write_json(context_file, context)
+    _write_json(prior_items_file, next_prior_items_raw)
+
+    # --- Run agent ---
+    _run_helper(
+        "helpers.run_external",
+        "--agent", agent,
+        "--prompt-file", str(prompt_file),
+        "--output", str(raw_output),
+        "--workdir", workdir,
+        "--flow", flow,
+        *(["--dry-run"] if dry_run else []),
+    )
+
+    # Save raw response to stable repair dir BEFORE normalization
+    repair_dir = _save_raw_to_repair_dir(
+        agent=agent, agent_cap=agent_cap, flow=flow,
+        issue=issue, repo=repo, new_round_number=new_round_number,
+        round_subject=round_subject, item_id_offset=item_id_offset,
+        validate_kind=validate_kind, dry_run=dry_run,
+        raw_output=raw_output, context_file=context_file,
+        prior_items_file=prior_items_file,
+    )
+
+    try:
+        return _complete_reviewer_turn(
+            agent=agent, agent_cap=agent_cap, flow=flow,
+            validate_kind=validate_kind, issue=issue, repo=repo,
+            new_round_number=new_round_number, round_subject=round_subject,
+            next_prior_items_raw=next_prior_items_raw,
+            item_id_offset=item_id_offset, dry_run=dry_run,
+            raw_output=raw_output, context_file=context_file,
+            work_dir=tmpdir,
+        )
+    except SystemExit:
+        print(f"skill_runner: raw response saved to: {repair_dir}/raw.md", file=sys.stderr)
+        print(
+            f"skill_runner: fix raw.md, then run: "
+            f"python -m helpers.skill_runner retry-validate --repair-dir {repair_dir}",
+            file=sys.stderr,
+        )
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -913,6 +1043,49 @@ def cmd_run_pr_round(args: argparse.Namespace) -> None:
 
 
 # ---------------------------------------------------------------------------
+# retry-validate
+# ---------------------------------------------------------------------------
+
+def cmd_retry_validate(args: argparse.Namespace) -> None:
+    """Re-validate an already-written reviewer response from a repair dir."""
+    repair_dir = Path(args.repair_dir)
+    if not repair_dir.exists():
+        print(f"skill_runner: repair dir not found: {repair_dir}", file=sys.stderr)
+        sys.exit(1)
+
+    manifest = json.loads((repair_dir / "manifest.json").read_text(encoding="utf-8"))
+    agent            = manifest["agent"]
+    agent_cap        = manifest["agent_cap"]
+    flow             = manifest["flow"]
+    validate_kind    = manifest["validate_kind"]
+    issue            = manifest["issue"]
+    repo             = manifest["repo"]
+    new_round_number = manifest["new_round_number"]
+    round_subject    = manifest["round_subject"]
+    item_id_offset   = manifest["item_id_offset"]
+    dry_run          = manifest.get("dry_run", False) or args.dry_run
+
+    raw_output      = repair_dir / "raw.md"
+    context_file    = repair_dir / "context.json"
+    prior_items_raw = json.loads((repair_dir / "prior_items.json").read_text(encoding="utf-8"))
+
+    result = _complete_reviewer_turn(
+        agent=agent, agent_cap=agent_cap, flow=flow,
+        validate_kind=validate_kind, issue=issue, repo=repo,
+        new_round_number=new_round_number, round_subject=round_subject,
+        next_prior_items_raw=prior_items_raw,
+        item_id_offset=item_id_offset, dry_run=dry_run,
+        raw_output=raw_output, context_file=context_file,
+        work_dir=repair_dir,
+    )
+    print(json.dumps(result, indent=2))
+    if result["state"] in ("approved", "approved-with-notes"):
+        print("hint: reviewer approved — re-run the parent round command to continue.", file=sys.stderr)
+    else:
+        print(f"hint: reviewer state={result['state']} — fix issues in raw.md and retry.", file=sys.stderr)
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -944,10 +1117,22 @@ def main() -> None:
     p_pr.add_argument("--workdir-gemini", default=None)
     p_pr.add_argument("--dry-run", action="store_true")
 
+    # retry-validate
+    p_retry = subparsers.add_parser(
+        "retry-validate",
+        help="Re-validate an already-written reviewer response without re-running the agent.",
+    )
+    p_retry.add_argument(
+        "--repair-dir", required=True,
+        help="Path to repair dir written by skill_runner on validation failure.",
+    )
+    p_retry.add_argument("--dry-run", action="store_true")
+
     args = parser.parse_args()
     dispatch = {
         "run-plan-round": cmd_run_plan_round,
         "run-pr-round": cmd_run_pr_round,
+        "retry-validate": cmd_retry_validate,
     }
     dispatch[args.subcommand](args)
 
