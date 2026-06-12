@@ -66,6 +66,10 @@ _HELPERS = Path(__file__).parent
 _REPAIR_BASE = Path(tempfile.gettempdir()) / "coding-review-agent-loop" / "repair"
 
 
+class _ValidationError(Exception):
+    """Raised by _complete_reviewer_turn when the reviewer response fails validation."""
+
+
 def _run_helper(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     result = subprocess.run(
         [sys.executable, "-m", *args],
@@ -512,9 +516,10 @@ def _complete_reviewer_turn(
         "--context-file", str(context_file),
     )
     if result.returncode != 0:
-        print(f"skill_runner: {agent} review validation failed: {result.stderr.strip()}", file=sys.stderr)
-        print(f"skill_runner: raw response at: {raw_output}", file=sys.stderr)
-        sys.exit(1)
+        raise _ValidationError(
+            f"skill_runner: {agent} review validation failed: {result.stderr.strip()}\n"
+            f"skill_runner: raw response at: {raw_output}"
+        )
 
     # --- Render ---
     _run_helper(
@@ -691,14 +696,15 @@ def _run_reviewer(
             raw_output=raw_output, context_file=context_file,
             work_dir=tmpdir,
         )
-    except SystemExit:
+    except _ValidationError as exc:
+        print(str(exc), file=sys.stderr)
         print(f"skill_runner: raw response saved to: {repair_dir}/raw.md", file=sys.stderr)
         print(
             f"skill_runner: fix raw.md, then run: "
             f"python -m helpers.skill_runner retry-validate --repair-dir {repair_dir}",
             file=sys.stderr,
         )
-        raise
+        sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -1069,15 +1075,19 @@ def cmd_retry_validate(args: argparse.Namespace) -> None:
     context_file    = repair_dir / "context.json"
     prior_items_raw = json.loads((repair_dir / "prior_items.json").read_text(encoding="utf-8"))
 
-    result = _complete_reviewer_turn(
-        agent=agent, agent_cap=agent_cap, flow=flow,
-        validate_kind=validate_kind, issue=issue, repo=repo,
-        new_round_number=new_round_number, round_subject=round_subject,
-        next_prior_items_raw=prior_items_raw,
-        item_id_offset=item_id_offset, dry_run=dry_run,
-        raw_output=raw_output, context_file=context_file,
-        work_dir=repair_dir,
-    )
+    try:
+        result = _complete_reviewer_turn(
+            agent=agent, agent_cap=agent_cap, flow=flow,
+            validate_kind=validate_kind, issue=issue, repo=repo,
+            new_round_number=new_round_number, round_subject=round_subject,
+            next_prior_items_raw=prior_items_raw,
+            item_id_offset=item_id_offset, dry_run=dry_run,
+            raw_output=raw_output, context_file=context_file,
+            work_dir=repair_dir,
+        )
+    except _ValidationError as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)
     print(json.dumps(result, indent=2))
     if result["state"] in ("approved", "approved-with-notes"):
         print("hint: reviewer approved — re-run the parent round command to continue.", file=sys.stderr)
