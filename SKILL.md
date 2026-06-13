@@ -133,11 +133,31 @@ python -m helpers.skill_runner run-pr-round \
   --reviewers codex gemini \
   [--head-sha SHA] \
   [--workdir-codex /path/to/checkout] \
-  [--workdir-gemini /path/to/checkout]
+  [--workdir-gemini /path/to/checkout] \
+  [--test-command "pytest -q"] \
+  [--test-workdir .]
 ```
 
 The JSON result shape is the same as for plan rounds.  There is no "write plan"
 step — the PR diff is fetched automatically.
+
+### Optional test gate
+
+Pass `--test-command` to run the project's tests after the reviewer turns. The
+command runs in `--test-workdir` (default: the current directory, where you as
+the host coder have the PR branch checked out) and its outcome is added to the
+JSON result under `tests`:
+
+```json
+"tests": { "command": "pytest -q", "passed": true, "exit_code": 0, "output_tail": "..." }
+```
+
+A setup failure (empty command, bad quoting, missing executable, or a missing
+`--test-workdir`) is reported as `{"passed": false, "exit_code": null, "error": ...}`
+rather than crashing the round. The gate never blocks and never merges:
+`state` stays reviewer-driven, and **"ready to merge" = `state == "approved"`
+AND `tests.passed`**. Treat a failing or errored `tests` result as a hard stop
+before merging, even when reviewers approved.
 
 When the result is `"state": "blocking"`, address the items, push the fixes, and
 post a change-summary comment on the PR before running the next round:

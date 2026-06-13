@@ -37,6 +37,7 @@ import argparse
 import hashlib
 import json
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -47,6 +48,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from coding_review_agent_loop.agents.base import AgentName
 from coding_review_agent_loop.errors import AgentLoopError
+from coding_review_agent_loop.runner import tail_text
 from coding_review_agent_loop.protocol import ReviewItemDisposition, UnresolvedReviewItem
 from coding_review_agent_loop.round_state import (
     PostedRoundMetadata,
@@ -296,6 +298,59 @@ def _workdir_for_agent(agent: str, args: argparse.Namespace) -> str:
     tmp = Path(tempfile.gettempdir()) / "coding-review-agent-loop" / f"skill-runner-{agent}"
     tmp.mkdir(parents=True, exist_ok=True)
     return str(tmp)
+
+
+def _run_test_gate(command: str, workdir: str, *, dry_run: bool) -> dict:
+    """Run an optional test command and report the outcome. Never raises.
+
+    Distinguishes "ran and failed" (``exit_code`` int, ``output_tail``) from
+    "could not run" (``exit_code`` null, ``error``). Setup failures (bad quoting,
+    empty command, missing executable, bad workdir) are reported, not propagated,
+    so the review round is never crashed by the gate.
+    """
+    if dry_run:
+        return {"command": command, "skipped": True, "reason": "dry-run"}
+    base = {"command": command, "passed": False, "exit_code": None}
+    try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        return {**base, "error": f"could not parse --test-command: {exc}"}
+    if not argv:
+        return {**base, "error": "--test-command is empty"}
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=workdir,
+            text=True,
+            errors="replace",  # test output may contain bytes invalid for the locale;
+                               # decode lossily so the gate never raises UnicodeDecodeError
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    except OSError as exc:  # FileNotFoundError, NotADirectoryError, ...
+        return {**base, "error": f"could not run --test-command: {exc}"}
+    return {
+        "command": command,
+        "passed": proc.returncode == 0,
+        "exit_code": proc.returncode,
+        "output_tail": tail_text(proc.stdout or "", max_lines=50),
+    }
+
+
+def _maybe_test_gate(
+    test_command: str | None, test_workdir: str, *, dry_run: bool
+) -> dict | None:
+    """Return the test-gate result, or None when no --test-command was provided.
+
+    Distinguishes "not requested" (``None`` -> no gate, no ``tests`` field) from a
+    provided-but-empty command (``--test-command ""``), which flows through to
+    _run_test_gate and is reported as a setup error rather than silently
+    disabling the gate.
+    """
+    if test_command is None:
+        return None
+    return _run_test_gate(test_command, test_workdir, dry_run=dry_run)
 
 
 def _fetch_issue_json(repo: str, issue: int, gh_cmd: str = "gh") -> dict:
@@ -1049,6 +1104,15 @@ def cmd_run_pr_round(args: argparse.Namespace) -> None:
         "blocking_items": round_blocking_items,
         "approved_reviewers": round_approved_reviewers,
     }
+    # Optional test gate: reports pass/fail; never blocks or merges. An explicit
+    # empty --test-command "" is reported as a setup error, not silently skipped.
+    gate = _maybe_test_gate(
+        getattr(args, "test_command", None),
+        getattr(args, "test_workdir", "."),
+        dry_run=dry_run,
+    )
+    if gate is not None:
+        result_json["tests"] = gate
     print(json.dumps(result_json, indent=2))
 
 
@@ -1129,6 +1193,19 @@ def main() -> None:
     p_pr.add_argument("--workdir", default=None)
     p_pr.add_argument("--workdir-codex", default=None)
     p_pr.add_argument("--workdir-gemini", default=None)
+    p_pr.add_argument(
+        "--test-command",
+        default=None,
+        help="Optional command to run as a test gate after the reviewer turns. "
+             "Result (pass/fail) is reported in the JSON 'tests' field; it never "
+             "blocks or merges. 'Ready to merge' = state approved AND tests.passed.",
+    )
+    p_pr.add_argument(
+        "--test-workdir",
+        default=".",
+        help="Directory to run --test-command in (default: current directory, "
+             "where the host coder has the PR branch checked out).",
+    )
     p_pr.add_argument("--dry-run", action="store_true")
 
     # retry-validate
