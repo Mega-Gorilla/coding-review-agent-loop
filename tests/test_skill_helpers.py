@@ -1188,3 +1188,118 @@ class TestApprovedFollowups:
         monkeypatch.setattr(sr, "_publish_approved_followups", fake_publish)
         sr._publish_pr_followups("o/r", 1, "sha", "summarize", [self._future_item()], [], dry_run=False)
         assert seen["exists"] is True
+
+
+# ---------------------------------------------------------------------------
+# helpers/skill_runner.py  run-task-round (#302, increment 4)
+# ---------------------------------------------------------------------------
+
+import argparse as _argparse
+import io as _io
+
+
+class TestRunTaskRound:
+    def test_resolve_task_text_inline(self) -> None:
+        from helpers.skill_runner import _resolve_task_text
+        args = _argparse.Namespace(task="do the thing", task_file=None)
+        assert _resolve_task_text(args) == "do the thing"
+
+    def test_resolve_task_text_from_file(self) -> None:
+        from helpers.skill_runner import _resolve_task_text
+        p = _write_tmp("task from file", suffix=".txt")
+        args = _argparse.Namespace(task=None, task_file=p)
+        assert _resolve_task_text(args).strip() == "task from file"
+
+    def test_resolve_task_text_stdin(self, monkeypatch) -> None:
+        from helpers.skill_runner import _resolve_task_text
+        monkeypatch.setattr(sys, "stdin", _io.StringIO("piped task"))
+        args = _argparse.Namespace(task=None, task_file="-")
+        assert _resolve_task_text(args) == "piped task"
+
+    def test_resolve_task_text_empty_errors(self) -> None:
+        from helpers.skill_runner import _resolve_task_text
+        with pytest.raises(SystemExit):
+            _resolve_task_text(_argparse.Namespace(task="   ", task_file=None))
+
+    def test_resolve_task_text_neither_errors(self) -> None:
+        from helpers.skill_runner import _resolve_task_text
+        with pytest.raises(SystemExit):
+            _resolve_task_text(_argparse.Namespace(task=None, task_file=None))
+
+    def test_title_from_task(self) -> None:
+        from helpers.skill_runner import _title_from_task
+        assert _title_from_task("# My Heading\nbody") == "My Heading"
+        assert _title_from_task("\n\n  first real line\nmore") == "first real line"
+        assert _title_from_task("   \n  ") == "Agent task"
+        assert _title_from_task("x" * 200) == "x" * 80
+
+    def test_task_index_round_trip(self, monkeypatch, tmp_path) -> None:
+        import helpers.skill_runner as sr
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+        sr._record_task_issue("o/r", "key123", 55)
+        monkeypatch.setattr(sr, "_issue_is_open", lambda repo, n: True)
+        assert sr._lookup_task_issue("o/r", "key123") == 55
+
+    def test_task_index_missing_returns_none(self, monkeypatch, tmp_path) -> None:
+        import helpers.skill_runner as sr
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+        assert sr._lookup_task_issue("o/r", "absent") is None
+
+    def test_task_index_closed_issue_returns_none(self, monkeypatch, tmp_path) -> None:
+        import helpers.skill_runner as sr
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+        sr._record_task_issue("o/r", "key123", 55)
+        monkeypatch.setattr(sr, "_issue_is_open", lambda repo, n: False)  # closed/deleted
+        assert sr._lookup_task_issue("o/r", "key123") is None
+
+    def _task_args(self, **over):
+        base = dict(task="do X", task_file=None, repo="o/r", plan_file="/tmp/p.md",
+                    reviewers=["codex"], workdir=None, workdir_codex=None,
+                    workdir_gemini=None, dry_run=False)
+        base.update(over)
+        return _argparse.Namespace(**base)
+
+    def test_task_round_reuses_existing_issue(self, monkeypatch) -> None:
+        import helpers.skill_runner as sr
+        monkeypatch.setattr(sr, "_lookup_task_issue", lambda repo, key: 77)
+        created = {"n": 0}
+        monkeypatch.setattr(sr, "_create_task_issue", lambda *a, **k: created.__setitem__("n", created["n"] + 1) or 999)
+        seen = {}
+        monkeypatch.setattr(sr, "cmd_run_plan_round", lambda args: seen.__setitem__("issue", args.issue))
+        sr.cmd_run_task_round(self._task_args())
+        assert created["n"] == 0          # did not create a duplicate
+        assert seen["issue"] == 77        # delegated with the reused issue
+
+    def test_task_round_creates_when_absent(self, monkeypatch) -> None:
+        import helpers.skill_runner as sr
+        monkeypatch.setattr(sr, "_lookup_task_issue", lambda repo, key: None)
+        monkeypatch.setattr(sr, "_create_task_issue", lambda repo, text, key: 123)
+        seen = {}
+        monkeypatch.setattr(sr, "cmd_run_plan_round", lambda args: seen.__setitem__("issue", args.issue))
+        sr.cmd_run_task_round(self._task_args())
+        assert seen["issue"] == 123
+
+    def test_task_round_dry_run_creates_nothing(self, monkeypatch, capsys) -> None:
+        import helpers.skill_runner as sr
+        monkeypatch.setattr(sr, "_lookup_task_issue", lambda repo, key: None)
+        created = {"n": 0}
+        monkeypatch.setattr(sr, "_create_task_issue", lambda *a, **k: created.__setitem__("n", created["n"] + 1) or 1)
+        delegated = {"n": 0}
+        monkeypatch.setattr(sr, "cmd_run_plan_round", lambda args: delegated.__setitem__("n", delegated["n"] + 1))
+        sr.cmd_run_task_round(self._task_args(dry_run=True))
+        assert created["n"] == 0 and delegated["n"] == 0
+        assert "would_create_issue" in capsys.readouterr().out
+
+    def test_task_round_dry_run_existing_issue_does_not_delegate(self, monkeypatch, capsys) -> None:
+        # Regression (#302/#303): dry-run is a pure preview even when the task
+        # already maps to an open issue — it must not delegate to the plan round.
+        import helpers.skill_runner as sr
+        monkeypatch.setattr(sr, "_lookup_task_issue", lambda repo, key: 88)
+        created = {"n": 0}
+        monkeypatch.setattr(sr, "_create_task_issue", lambda *a, **k: created.__setitem__("n", created["n"] + 1) or 1)
+        delegated = {"n": 0}
+        monkeypatch.setattr(sr, "cmd_run_plan_round", lambda args: delegated.__setitem__("n", delegated["n"] + 1))
+        sr.cmd_run_task_round(self._task_args(dry_run=True))
+        assert created["n"] == 0 and delegated["n"] == 0
+        out = capsys.readouterr().out
+        assert "would_reuse_issue" in out and "88" in out
