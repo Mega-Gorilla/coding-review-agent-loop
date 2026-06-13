@@ -1053,3 +1053,15 @@ class TestRunTestGate:
         r = self._gate(f'{self._PY} -c "import os; print(os.getcwd())"', workdir=d)
         assert r["passed"] is True
         assert os.path.basename(d) in r["output_tail"]
+
+    def test_maybe_gate_none_when_not_provided(self) -> None:
+        from helpers.skill_runner import _maybe_test_gate
+        assert _maybe_test_gate(None, ".", dry_run=False) is None
+
+    def test_maybe_gate_reports_explicit_empty_command(self) -> None:
+        # --test-command "" must be reported as a setup error, not silently skipped
+        from helpers.skill_runner import _maybe_test_gate
+        r = _maybe_test_gate("", ".", dry_run=False)
+        assert r is not None
+        assert r["passed"] is False
+        assert "error" in r

@@ -336,6 +336,21 @@ def _run_test_gate(command: str, workdir: str, *, dry_run: bool) -> dict:
     }
 
 
+def _maybe_test_gate(
+    test_command: str | None, test_workdir: str, *, dry_run: bool
+) -> dict | None:
+    """Return the test-gate result, or None when no --test-command was provided.
+
+    Distinguishes "not requested" (``None`` -> no gate, no ``tests`` field) from a
+    provided-but-empty command (``--test-command ""``), which flows through to
+    _run_test_gate and is reported as a setup error rather than silently
+    disabling the gate.
+    """
+    if test_command is None:
+        return None
+    return _run_test_gate(test_command, test_workdir, dry_run=dry_run)
+
+
 def _fetch_issue_json(repo: str, issue: int, gh_cmd: str = "gh") -> dict:
     result = subprocess.run(
         [gh_cmd, "issue", "view", str(issue), "--repo", repo,
@@ -1087,12 +1102,15 @@ def cmd_run_pr_round(args: argparse.Namespace) -> None:
         "blocking_items": round_blocking_items,
         "approved_reviewers": round_approved_reviewers,
     }
-    # Optional test gate: reports pass/fail; never blocks or merges.
-    test_command = getattr(args, "test_command", None)
-    if test_command:
-        result_json["tests"] = _run_test_gate(
-            test_command, getattr(args, "test_workdir", "."), dry_run=dry_run
-        )
+    # Optional test gate: reports pass/fail; never blocks or merges. An explicit
+    # empty --test-command "" is reported as a setup error, not silently skipped.
+    gate = _maybe_test_gate(
+        getattr(args, "test_command", None),
+        getattr(args, "test_workdir", "."),
+        dry_run=dry_run,
+    )
+    if gate is not None:
+        result_json["tests"] = gate
     print(json.dumps(result_json, indent=2))
 
 
