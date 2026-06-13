@@ -992,3 +992,64 @@ class TestPromptCheckoutPath:
         )
         assert wd in prompt
         assert self._no_bare_skill_runner(prompt) == 0
+
+
+# ---------------------------------------------------------------------------
+# helpers/skill_runner.py  _run_test_gate (#296, increment 2)
+# ---------------------------------------------------------------------------
+
+class TestRunTestGate:
+    import shlex as _shlex
+    _PY = _shlex.quote(sys.executable)
+
+    def _gate(self, command, workdir=".", *, dry_run=False):
+        from helpers.skill_runner import _run_test_gate
+        return _run_test_gate(command, workdir, dry_run=dry_run)
+
+    def test_passing_command(self) -> None:
+        r = self._gate(f'{self._PY} -c "import sys; sys.exit(0)"')
+        assert r["passed"] is True
+        assert r["exit_code"] == 0
+        assert "output_tail" in r
+        assert "error" not in r
+
+    def test_failing_command_merges_stderr(self) -> None:
+        r = self._gate(f'{self._PY} -c "import sys; sys.stderr.write(chr(98)+chr(111)+chr(111)+chr(109)); sys.exit(3)"')
+        assert r["passed"] is False
+        assert r["exit_code"] == 3
+        assert "boom" in r["output_tail"]  # stderr merged into stdout
+
+    def test_missing_executable_reports_error(self) -> None:
+        r = self._gate("definitely-not-a-real-binary-xyz --flag")
+        assert r["passed"] is False
+        assert r["exit_code"] is None
+        assert "error" in r
+
+    def test_malformed_quoting_reports_error(self) -> None:
+        r = self._gate('echo "unbalanced')
+        assert r["passed"] is False
+        assert r["exit_code"] is None
+        assert "error" in r
+
+    def test_empty_command_reports_error(self) -> None:
+        r = self._gate("   ")
+        assert r["passed"] is False
+        assert "error" in r
+
+    def test_bad_workdir_reports_error(self) -> None:
+        r = self._gate(f'{self._PY} -c "pass"', workdir="/nonexistent/path/xyz-12345")
+        assert r["passed"] is False
+        assert r["exit_code"] is None
+        assert "error" in r
+
+    def test_dry_run_does_not_execute(self) -> None:
+        # command would error if run; dry-run must skip it
+        r = self._gate("definitely-not-a-real-binary-xyz", dry_run=True)
+        assert r["skipped"] is True
+        assert "error" not in r
+
+    def test_test_workdir_is_honored(self) -> None:
+        d = tempfile.mkdtemp()
+        r = self._gate(f'{self._PY} -c "import os; print(os.getcwd())"', workdir=d)
+        assert r["passed"] is True
+        assert os.path.basename(d) in r["output_tail"]
