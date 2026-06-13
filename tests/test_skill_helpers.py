@@ -1074,3 +1074,117 @@ class TestRunTestGate:
         assert r["passed"] is False
         assert r["exit_code"] == 1
         assert "output_tail" in r  # decoded with replacement rather than raising
+
+
+# ---------------------------------------------------------------------------
+# helpers/skill_runner.py  approved-followups publishing (#300, increment 3)
+# ---------------------------------------------------------------------------
+
+class TestApprovedFollowups:
+    def test_mint_includes_future_items(self) -> None:
+        from helpers.skill_runner import _mint_new_items
+        items = _mint_new_items(
+            blocking_texts=[], same_texts=[], future_texts=["do X later", "do Y later"],
+            flow="pr", agent_cap="Codex", new_round_number=2, item_id_offset=0,
+        )
+        future = [i for i in items if i["status"] == "future"]
+        assert len(future) == 2
+        assert {i["text"] for i in future} == {"do X later", "do Y later"}
+        assert all(i["reviewer"] == "Codex" and i["source_status"] == "future" for i in future)
+        assert [i["item_id"] for i in items] == ["item-1", "item-2"]
+
+    def test_mint_blocking_round_has_no_future(self) -> None:
+        # Normalize clears future_followups for blocking reviews -> empty future_texts.
+        from helpers.skill_runner import _mint_new_items
+        items = _mint_new_items(
+            blocking_texts=["must fix"], same_texts=[], future_texts=[],
+            flow="pr", agent_cap="Gemini", new_round_number=1, item_id_offset=0,
+        )
+        assert [i["status"] for i in items] == ["blocking"]
+
+    def test_resume_safe_collection_filter(self) -> None:
+        # Mirrors cmd_run_pr_round: future items recovered via completed_reviewer_data
+        # (build-resume) are picked up by the same filter as fresh-round items.
+        current_round_items = [
+            {"status": "blocking", "text": "b"},
+            {"status": "future", "text": "f1", "reviewer": "Codex"},
+            {"status": "same-pr", "text": "s"},
+            {"status": "future", "text": "f2", "reviewer": "Gemini"},
+        ]
+        future = [i for i in current_round_items if i.get("status") == "future"]
+        assert [i["text"] for i in future] == ["f1", "f2"]
+
+    def _future_item(self, text="later", reviewer="Codex"):
+        return {
+            "item_id": "item-1", "reviewer": reviewer, "source_round": 1,
+            "text": text, "status": "future", "source_status": "future", "notes": [],
+        }
+
+    def test_publish_ignore_mode_noop(self) -> None:
+        from helpers.skill_runner import _publish_pr_followups
+        r = _publish_pr_followups("o/r", 1, "sha", "ignore", [self._future_item()], [], dry_run=False)
+        assert r == {"mode": "ignore", "published": False, "count": 0}
+
+    def test_publish_dry_run_does_not_post(self, monkeypatch) -> None:
+        import helpers.skill_runner as sr
+        called = {"n": 0}
+        monkeypatch.setattr(sr, "_publish_approved_followups", lambda *a, **k: called.__setitem__("n", called["n"] + 1) or True)
+        r = sr._publish_pr_followups("o/r", 1, "sha", "summarize", [self._future_item()], [], dry_run=True)
+        assert r == {"mode": "summarize", "dry_run": True, "count": 1}
+        assert called["n"] == 0  # never posted in dry-run
+
+    def test_publish_summarize_threads_mode_and_followups(self, monkeypatch) -> None:
+        import helpers.skill_runner as sr
+        captured = {}
+
+        def fake_publish(runner, *, config, pr_number, head_sha, pr_comments, followups):
+            captured["mode"] = config.approved_followups
+            captured["pr_number"] = pr_number
+            captured["head_sha"] = head_sha
+            captured["followup_texts"] = [f.text for f in followups]
+            captured["reviewers"] = [f.reviewer for f in followups]
+            return True
+
+        monkeypatch.setattr(sr, "_publish_approved_followups", fake_publish)
+        r = sr._publish_pr_followups(
+            "o/r", 42, "deadbeef", "summarize",
+            [self._future_item("ship docs", "Gemini")], [], dry_run=False,
+        )
+        assert r == {"mode": "summarize", "published": True, "count": 1}
+        assert captured["mode"] == "summarize"
+        assert captured["pr_number"] == 42 and captured["head_sha"] == "deadbeef"
+        assert captured["followup_texts"] == ["ship docs"]
+        assert captured["reviewers"] == ["Gemini"]
+
+    def test_publish_idempotent_with_existing_marker(self) -> None:
+        # Exercises the real _publish_approved_followups: a pre-existing marker for
+        # this pr/head/mode short-circuits before any network post.
+        import types as _t
+        from helpers.skill_runner import _publish_pr_followups
+        marker = "<!-- AGENT_APPROVED_FOLLOWUPS: pr=7 head=abc123 mode=summarize -->"
+        pr_comments = [_t.SimpleNamespace(body=f"prior summary\n{marker}")]
+        r = _publish_pr_followups("o/r", 7, "abc123", "summarize", [self._future_item()], pr_comments, dry_run=False)
+        assert r == {"mode": "summarize", "published": False, "count": 1}
+
+    def test_pr_prompt_mode_changes_instruction(self) -> None:
+        from helpers.prompt_builders import build_review_prompt_for_skill
+        issue = {"number": 7, "repo": "o/r", "title": "t", "body": "b", "url": "u"}
+        common = dict(repo="o/r", pr_number=7, all_reviewers=["codex", "gemini"])
+        ignore_prompt = build_review_prompt_for_skill(issue, "d", [], 1, "codex", approved_followups="ignore", **common)
+        summ_prompt = build_review_prompt_for_skill(issue, "d", [], 1, "codex", approved_followups="summarize", **common)
+        assert ignore_prompt != summ_prompt
+
+    def test_publish_ensures_active_workdir_exists(self, monkeypatch) -> None:
+        # Regression (#300/#301): the library runs gh with cwd=active_workdir(config);
+        # the Codex+Gemini flow has no Claude checkout, so the helper must create it.
+        import helpers.skill_runner as sr
+        from coding_review_agent_loop.workdirs import active_workdir
+        seen = {}
+
+        def fake_publish(runner, *, config, **kwargs):
+            seen["exists"] = Path(active_workdir(config)).is_dir()
+            return True
+
+        monkeypatch.setattr(sr, "_publish_approved_followups", fake_publish)
+        sr._publish_pr_followups("o/r", 1, "sha", "summarize", [self._future_item()], [], dry_run=False)
+        assert seen["exists"] is True
