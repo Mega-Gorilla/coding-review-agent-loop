@@ -135,7 +135,8 @@ python -m helpers.skill_runner run-pr-round \
   [--workdir-codex /path/to/checkout] \
   [--workdir-gemini /path/to/checkout] \
   [--test-command "pytest -q"] \
-  [--test-workdir .]
+  [--test-workdir .] \
+  [--approved-followups summarize|issue]
 ```
 
 The JSON result shape is the same as for plan rounds.  There is no "write plan"
@@ -158,6 +159,23 @@ rather than crashing the round. The gate never blocks and never merges:
 `state` stays reviewer-driven, and **"ready to merge" = `state == "approved"`
 AND `tests.passed`**. Treat a failing or errored `tests` result as a hard stop
 before merging, even when reviewers approved.
+
+### Optional approved-followups publishing
+
+Pass `--approved-followups summarize|issue` to publish reviewers' future
+follow-ups when (and only when) a round is **approved**. `summarize` posts one
+PR comment listing the reconciled follow-ups; `issue` files up to three
+follow-up issues; `ignore` (default) discards them. The mode is also threaded
+into the reviewer prompt, so reviewers only surface future follow-ups when a
+non-`ignore` mode is set. Publishing is idempotent — one publish per PR head SHA
++ mode (re-running or resuming a round will not double-post). The outcome is
+reported in the JSON result under `approved_followups`:
+
+```json
+"approved_followups": { "mode": "summarize", "published": true, "count": 2 }
+```
+
+This never blocks and never merges; merge stays a human decision.
 
 When the result is `"state": "blocking"`, address the items, push the fixes, and
 post a change-summary comment on the PR before running the next round:

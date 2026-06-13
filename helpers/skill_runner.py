@@ -34,6 +34,7 @@ Prints a JSON result to stdout and exits 0:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import re
@@ -42,13 +43,18 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from coding_review_agent_loop.agents.base import AgentName
 from coding_review_agent_loop.errors import AgentLoopError
-from coding_review_agent_loop.runner import tail_text
+from coding_review_agent_loop.followups import (
+    _approved_followup_from_unresolved_item,
+    _publish_approved_followups,
+)
+from coding_review_agent_loop.runner import Runner, tail_text
 from coding_review_agent_loop.protocol import ReviewItemDisposition, UnresolvedReviewItem
 from coding_review_agent_loop.round_state import (
     PostedRoundMetadata,
@@ -353,6 +359,86 @@ def _maybe_test_gate(
     return _run_test_gate(test_command, test_workdir, dry_run=dry_run)
 
 
+def _mint_new_items(
+    *,
+    blocking_texts: list[str],
+    same_texts: list[str],
+    future_texts: list[str],
+    flow: str,
+    agent_cap: str,
+    new_round_number: int,
+    item_id_offset: int,
+) -> list[dict]:
+    """Serialize a reviewer's items with globally-unique IDs.
+
+    Future follow-ups are minted with status="future" so they flow through
+    AGENT_LOOP_META -> build-resume -> the resume path (resume-safe) and can be
+    published on an approved round (#300). Normalize clears future_followups for
+    blocking reviews, so blocking rounds pass an empty future_texts.
+    """
+    same_s = "same-plan" if flow == "plan" else "same-pr"
+    groups = [
+        ("blocking", "blocking", blocking_texts),
+        (same_s, same_s, same_texts),
+        ("future", "future", future_texts),
+    ]
+    items: list[dict] = []
+    counter = item_id_offset + 1
+    for status, source_status, texts in groups:
+        for text in texts:
+            items.append({
+                "item_id": f"item-{counter}",
+                "reviewer": agent_cap,
+                "source_round": new_round_number,
+                "text": str(text),
+                "status": status,
+                "source_status": source_status,
+                "notes": [],
+            })
+            counter += 1
+    return items
+
+
+def _publish_pr_followups(
+    repo: str,
+    pr: int,
+    head_sha: str | None,
+    mode: str,
+    future_items: list[dict],
+    pr_comments: list,
+    *,
+    dry_run: bool,
+) -> dict:
+    """Publish approved future follow-ups for a PR via the library logic (#300).
+
+    Reuses ``followups._publish_approved_followups`` (reconcile, dedupe,
+    idempotency marker, post-comment / file-issues). Returns a small dict for the
+    round result. Never publishes for mode 'ignore' or when there are no items.
+    """
+    if mode == "ignore" or not future_items:
+        return {"mode": mode, "published": False, "count": 0}
+    approved = [
+        _approved_followup_from_unresolved_item(_deserialize_unresolved_item(item))
+        for item in future_items
+    ]
+    if dry_run:
+        return {"mode": mode, "dry_run": True, "count": len(approved)}
+    from helpers.prompt_builders import make_minimal_config
+    config = dataclasses.replace(
+        make_minimal_config(repo, "claude", ("codex", "gemini")),
+        approved_followups=mode,
+    )
+    published = _publish_approved_followups(
+        Runner(dry_run=False),
+        config=config,
+        pr_number=pr,
+        head_sha=head_sha,
+        pr_comments=pr_comments,
+        followups=approved,
+    )
+    return {"mode": mode, "published": bool(published), "count": len(approved)}
+
+
 def _fetch_issue_json(repo: str, issue: int, gh_cmd: str = "gh") -> dict:
     result = subprocess.run(
         [gh_cmd, "issue", "view", str(issue), "--repo", repo,
@@ -393,6 +479,22 @@ def _fetch_issue_comments_raw(repo: str, issue: int, gh_cmd: str = "gh") -> list
     # without the multiline-splitting bug that `--jq .[].body` produces.
     result = subprocess.run(
         [gh_cmd, "issue", "view", str(issue), "--repo", repo, "--json", "comments"],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        return []
+    try:
+        data = json.loads(result.stdout)
+        return [c["body"] for c in data.get("comments", []) if isinstance(c, dict) and "body" in c]
+    except (json.JSONDecodeError, KeyError):
+        return []
+
+
+def _fetch_pr_comments_raw(repo: str, pr: int, gh_cmd: str = "gh") -> list[str]:
+    # PR conversation comments live behind `gh pr view` (not `gh issue view`,
+    # which rejects PR numbers). Used for the approved-followups idempotency marker.
+    result = subprocess.run(
+        [gh_cmd, "pr", "view", str(pr), "--repo", repo, "--json", "comments"],
         capture_output=True, text=True, check=False,
     )
     if result.returncode != 0:
@@ -616,31 +718,15 @@ def _complete_reviewer_turn(
     _write_json(dispositions_file, raw_dispositions)
 
     # --- Mint IDs globally unique across rounds ---
-    new_items_serialized: list[dict] = []
-    item_counter = item_id_offset + 1
-    for text in blocking_texts:
-        new_items_serialized.append({
-            "item_id": f"item-{item_counter}",
-            "reviewer": agent_cap,
-            "source_round": new_round_number,
-            "text": str(text),
-            "status": "blocking",
-            "source_status": "blocking",
-            "notes": [],
-        })
-        item_counter += 1
-    for text in new_unresolved_texts:
-        same_s = "same-plan" if flow == "plan" else "same-pr"
-        new_items_serialized.append({
-            "item_id": f"item-{item_counter}",
-            "reviewer": agent_cap,
-            "source_round": new_round_number,
-            "text": str(text),
-            "status": same_s,
-            "source_status": same_s,
-            "notes": [],
-        })
-        item_counter += 1
+    new_items_serialized = _mint_new_items(
+        blocking_texts=blocking_texts,
+        same_texts=new_unresolved_texts,
+        future_texts=[str(t) for t in review_json.get("future_followups", [])],
+        flow=flow,
+        agent_cap=agent_cap,
+        new_round_number=new_round_number,
+        item_id_offset=item_id_offset,
+    )
     _write_json(new_items_file, new_items_serialized)
 
     # --- Attach metadata ---
@@ -1046,6 +1132,7 @@ def cmd_run_pr_round(args: argparse.Namespace) -> None:
                     pr_number=pr,
                     all_reviewers=[r for r in reviewers],  # type: ignore[misc]
                     workdir=workdir,
+                    approved_followups=getattr(args, "approved_followups", "ignore"),
                 )
             except Exception as exc:  # noqa: BLE001
                 prompt_text = (
@@ -1113,6 +1200,23 @@ def cmd_run_pr_round(args: argparse.Namespace) -> None:
     )
     if gate is not None:
         result_json["tests"] = gate
+
+    # Optional approved-followups publishing (#300): only on an approved round and
+    # when a non-ignore mode is set. PR comments are fetched lazily here (for the
+    # idempotency marker) so blocking/ignore rounds make no extra network call.
+    followups_mode = getattr(args, "approved_followups", "ignore")
+    if overall_state == "approved" and followups_mode != "ignore":
+        round_future_items = [
+            item for item in current_round_items if item.get("status") == "future"
+        ]
+        pr_comments = [
+            types.SimpleNamespace(body=body)
+            for body in _fetch_pr_comments_raw(repo, pr)
+        ]
+        result_json["approved_followups"] = _publish_pr_followups(
+            repo, pr, head_sha, followups_mode, round_future_items, pr_comments,
+            dry_run=dry_run,
+        )
     print(json.dumps(result_json, indent=2))
 
 
@@ -1205,6 +1309,14 @@ def main() -> None:
         default=".",
         help="Directory to run --test-command in (default: current directory, "
              "where the host coder has the PR branch checked out).",
+    )
+    p_pr.add_argument(
+        "--approved-followups",
+        choices=("ignore", "summarize", "issue"),
+        default="ignore",
+        help="On an approved round, publish reviewers' future follow-ups: "
+             "'summarize' posts one PR comment; 'issue' files follow-up issues; "
+             "'ignore' (default) discards them. Never blocks or merges.",
     )
     p_pr.add_argument("--dry-run", action="store_true")
 

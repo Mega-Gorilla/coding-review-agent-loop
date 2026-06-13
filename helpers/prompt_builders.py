@@ -21,13 +21,14 @@ from coding_review_agent_loop.prompts import build_plan_review_prompt, build_rev
 from coding_review_agent_loop.round_state import _deserialize_unresolved_item
 
 
-def _make_minimal_config(
+def make_minimal_config(
     repo: str,
     coder: AgentName,
     reviewer_names: Sequence[AgentName],
     *,
     reviewer: AgentName | None = None,
     workdir: str | None = None,
+    approved_followups: str = "ignore",
 ) -> AgentLoopConfig:
     base = Path(tempfile.gettempdir()) / "coding-review-agent-loop"
     legacy = base / "skill-runner"
@@ -76,6 +77,7 @@ def _make_minimal_config(
         agent_memory_dir=legacy,
         refresh_test_profile=False,
         auto_agent_dirs=tuple(reviewer_names),
+        approved_followups=approved_followups,
     )
 
 
@@ -117,7 +119,7 @@ def build_plan_review_prompt_for_skill(
             the agent inspects a directory that exists (#297).
     """
     reviewers_list: Sequence[AgentName] = all_reviewers or [reviewer]
-    config = _make_minimal_config(repo, coder, reviewers_list, reviewer=reviewer, workdir=workdir)
+    config = make_minimal_config(repo, coder, reviewers_list, reviewer=reviewer, workdir=workdir)
     issue_context = _make_issue_context(issue_dict)
     unresolved = [_deserialize_unresolved_item(item) for item in prior_items_raw]
     return build_plan_review_prompt(
@@ -143,6 +145,7 @@ def build_review_prompt_for_skill(
     coder: AgentName = "claude",
     all_reviewers: Sequence[AgentName] | None = None,
     workdir: str | None = None,
+    approved_followups: str = "ignore",
 ) -> str:
     """Build a PR reviewer prompt from plain dicts.
 
@@ -158,11 +161,17 @@ def build_review_prompt_for_skill(
         all_reviewers: All configured reviewer names (defaults to [reviewer]).
         workdir: The reviewer's actual checkout path, embedded in the prompt so
             the agent inspects a directory that exists (#297).
+        approved_followups: Approved-followups mode; when not "ignore" the prompt
+            instructs the reviewer to surface future follow-ups so they can be
+            published on approval (#300).
     """
     from coding_review_agent_loop.github import PullRequestMetadata
 
     reviewers_list: Sequence[AgentName] = all_reviewers or [reviewer]
-    config = _make_minimal_config(repo, coder, reviewers_list, reviewer=reviewer, workdir=workdir)
+    config = make_minimal_config(
+        repo, coder, reviewers_list, reviewer=reviewer, workdir=workdir,
+        approved_followups=approved_followups,
+    )
     issue_context = _make_issue_context(issue_dict)
     unresolved = [_deserialize_unresolved_item(item) for item in prior_items_raw]
     pr_metadata = PullRequestMetadata(
