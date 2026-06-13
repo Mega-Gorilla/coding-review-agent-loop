@@ -1173,3 +1173,18 @@ class TestApprovedFollowups:
         ignore_prompt = build_review_prompt_for_skill(issue, "d", [], 1, "codex", approved_followups="ignore", **common)
         summ_prompt = build_review_prompt_for_skill(issue, "d", [], 1, "codex", approved_followups="summarize", **common)
         assert ignore_prompt != summ_prompt
+
+    def test_publish_ensures_active_workdir_exists(self, monkeypatch) -> None:
+        # Regression (#300/#301): the library runs gh with cwd=active_workdir(config);
+        # the Codex+Gemini flow has no Claude checkout, so the helper must create it.
+        import helpers.skill_runner as sr
+        from coding_review_agent_loop.workdirs import active_workdir
+        seen = {}
+
+        def fake_publish(runner, *, config, **kwargs):
+            seen["exists"] = Path(active_workdir(config)).is_dir()
+            return True
+
+        monkeypatch.setattr(sr, "_publish_approved_followups", fake_publish)
+        sr._publish_pr_followups("o/r", 1, "sha", "summarize", [self._future_item()], [], dry_run=False)
+        assert seen["exists"] is True

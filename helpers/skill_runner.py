@@ -424,10 +424,15 @@ def _publish_pr_followups(
     if dry_run:
         return {"mode": mode, "dry_run": True, "count": len(approved)}
     from helpers.prompt_builders import make_minimal_config
+    from coding_review_agent_loop.workdirs import active_workdir
     config = dataclasses.replace(
         make_minimal_config(repo, "claude", ("codex", "gemini")),
         approved_followups=mode,
     )
+    # The library posts via `gh --repo`, but runs gh with cwd=active_workdir(config)
+    # (the coder dir). The Codex+Gemini skill flow never creates a Claude checkout,
+    # so ensure that directory exists or gh raises FileNotFoundError (#300).
+    Path(active_workdir(config)).mkdir(parents=True, exist_ok=True)
     published = _publish_approved_followups(
         Runner(dry_run=False),
         config=config,
