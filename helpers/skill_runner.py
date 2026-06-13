@@ -959,14 +959,17 @@ def cmd_run_task_round(args: argparse.Namespace) -> None:
     key = _task_key(task_text)
     issue = _lookup_task_issue(repo, key)
 
-    if dry_run and issue is None:
-        # Never create an issue in dry-run; delegating with a fake number would
-        # break cmd_run_plan_round (it fetches the issue unconditionally).
-        print(json.dumps({
-            "would_create_issue": True,
-            "task_key": key,
-            "title": _title_from_task(task_text),
-        }, indent=2))
+    if dry_run:
+        # Dry-run is a pure preview of the task issue: never create, never delegate
+        # to the plan round (which would fetch issue state and touch session state).
+        if issue is None:
+            print(json.dumps({
+                "would_create_issue": True,
+                "task_key": key,
+                "title": _title_from_task(task_text),
+            }, indent=2))
+        else:
+            print(json.dumps({"would_reuse_issue": issue, "task_key": key}, indent=2))
         return
 
     if issue is None:

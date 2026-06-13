@@ -1289,3 +1289,17 @@ class TestRunTaskRound:
         sr.cmd_run_task_round(self._task_args(dry_run=True))
         assert created["n"] == 0 and delegated["n"] == 0
         assert "would_create_issue" in capsys.readouterr().out
+
+    def test_task_round_dry_run_existing_issue_does_not_delegate(self, monkeypatch, capsys) -> None:
+        # Regression (#302/#303): dry-run is a pure preview even when the task
+        # already maps to an open issue — it must not delegate to the plan round.
+        import helpers.skill_runner as sr
+        monkeypatch.setattr(sr, "_lookup_task_issue", lambda repo, key: 88)
+        created = {"n": 0}
+        monkeypatch.setattr(sr, "_create_task_issue", lambda *a, **k: created.__setitem__("n", created["n"] + 1) or 1)
+        delegated = {"n": 0}
+        monkeypatch.setattr(sr, "cmd_run_plan_round", lambda args: delegated.__setitem__("n", delegated["n"] + 1))
+        sr.cmd_run_task_round(self._task_args(dry_run=True))
+        assert created["n"] == 0 and delegated["n"] == 0
+        out = capsys.readouterr().out
+        assert "would_reuse_issue" in out and "88" in out
