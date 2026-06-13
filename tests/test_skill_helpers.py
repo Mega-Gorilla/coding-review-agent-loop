@@ -1065,3 +1065,12 @@ class TestRunTestGate:
         assert r is not None
         assert r["passed"] is False
         assert "error" in r
+
+    def test_invalid_utf8_output_does_not_raise(self) -> None:
+        # A process emitting bytes invalid for the locale must not crash the gate.
+        r = self._gate(
+            f'{self._PY} -c "import sys; sys.stdout.buffer.write(bytes([255])); sys.exit(1)"'
+        )
+        assert r["passed"] is False
+        assert r["exit_code"] == 1
+        assert "output_tail" in r  # decoded with replacement rather than raising

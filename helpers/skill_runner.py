@@ -322,6 +322,8 @@ def _run_test_gate(command: str, workdir: str, *, dry_run: bool) -> dict:
             argv,
             cwd=workdir,
             text=True,
+            errors="replace",  # test output may contain bytes invalid for the locale;
+                               # decode lossily so the gate never raises UnicodeDecodeError
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             check=False,
