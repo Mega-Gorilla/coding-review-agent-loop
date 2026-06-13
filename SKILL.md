@@ -194,6 +194,36 @@ EOF
 
 ---
 
+## Task mode (free-form task, no pre-existing issue)
+
+For a free-form task that has no GitHub issue yet, use `run-task-round`. It
+creates a scratch issue from the task text (idempotently — re-running the same
+task reuses its issue, tracked in a local task index), then runs the normal plan
+round on it:
+
+```bash
+python -m helpers.skill_runner run-task-round \
+  --task "Add a --verbose flag to the CLI" \
+  --repo OWNER/REPO \
+  --plan-file /tmp/agent-loop-skill/{session-id}/plan-r{N}.md \
+  --reviewers codex gemini
+```
+
+Use `--task-file PATH` (or `--task-file -` for stdin) instead of `--task` for
+longer descriptions. `--dry-run` reports the issue it *would* create without
+creating it. After the first round the flow is identical to a plan loop (Step 3
+onward): address blocking items, revise the plan, and re-run on the same issue.
+
+Because the host **is** the coder, two manual paths are equivalent and need no
+new subcommand:
+
+- **Plan-first:** `gh issue create …` then `run-plan-round` (this is what
+  `run-task-round` automates).
+- **Implement-then-review:** implement the task, open a PR, then `run-pr-round`
+  (with the optional `--test-command` and `--approved-followups` gates).
+
+---
+
 ## Reversed roles (Codex as coder, Claude as reviewer)
 
 Reversed-roles mode (Codex writes the plan, Claude reviews) is tracked in

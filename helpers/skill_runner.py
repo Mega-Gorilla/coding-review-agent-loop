@@ -37,6 +37,7 @@ import argparse
 import dataclasses
 import hashlib
 import json
+import os
 import re
 import shlex
 import shutil
@@ -856,6 +857,129 @@ def _run_reviewer(
 
 
 # ---------------------------------------------------------------------------
+# run-task-round  (free-form task -> scratch issue -> plan round)
+# ---------------------------------------------------------------------------
+
+def _resolve_task_text(args: argparse.Namespace) -> str:
+    task = getattr(args, "task", None)
+    task_file = getattr(args, "task_file", None)
+    if task is not None and task_file is not None:
+        print("skill_runner: pass either --task or --task-file, not both", file=sys.stderr)
+        sys.exit(1)
+    if task_file is not None:
+        text = sys.stdin.read() if task_file == "-" else Path(task_file).read_text(encoding="utf-8")
+    elif task is not None:
+        text = task
+    else:
+        print("skill_runner: provide --task or --task-file", file=sys.stderr)
+        sys.exit(1)
+    if not text.strip():
+        print("skill_runner: task description is empty", file=sys.stderr)
+        sys.exit(1)
+    return text
+
+
+def _task_key(task_text: str) -> str:
+    return hashlib.sha256(task_text.strip().encode("utf-8")).hexdigest()
+
+
+def _task_index_path(repo: str) -> Path:
+    slug = repo.replace("/", "-").replace(":", "-")
+    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    return state_home / "coding-review-agent-loop" / "skill-sessions" / slug / "task-index.json"
+
+
+def _load_task_index(repo: str) -> dict:
+    path = _task_index_path(repo)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def _issue_is_open(repo: str, issue: int, gh_cmd: str = "gh") -> bool:
+    result = subprocess.run(
+        [gh_cmd, "issue", "view", str(issue), "--repo", repo, "--json", "state"],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        return False
+    try:
+        return json.loads(result.stdout).get("state", "").upper() == "OPEN"
+    except json.JSONDecodeError:
+        return False
+
+
+def _lookup_task_issue(repo: str, task_key: str) -> int | None:
+    number = _load_task_index(repo).get(task_key)
+    if isinstance(number, int) and _issue_is_open(repo, number):
+        return number
+    return None
+
+
+def _record_task_issue(repo: str, task_key: str, number: int) -> None:
+    path = _task_index_path(repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    index = _load_task_index(repo)
+    index[task_key] = number
+    path.write_text(json.dumps(index, indent=2), encoding="utf-8")
+
+
+def _title_from_task(task_text: str) -> str:
+    for line in task_text.splitlines():
+        stripped = line.lstrip("#").strip()
+        if stripped:
+            return stripped[:80]
+    return "Agent task"
+
+
+def _create_task_issue(repo: str, task_text: str, task_key: str, gh_cmd: str = "gh") -> int:
+    body = f"{task_text.rstrip()}\n\n<!-- AGENT_TASK_KEY: {task_key} -->\n"
+    result = subprocess.run(
+        [gh_cmd, "issue", "create", "--repo", repo,
+         "--title", _title_from_task(task_text), "--body", body],
+        capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        print(f"skill_runner: gh issue create failed: {result.stderr.strip()}", file=sys.stderr)
+        sys.exit(1)
+    match = re.search(r"/issues/(\d+)", result.stdout)
+    if not match:
+        print(f"skill_runner: could not parse issue number from: {result.stdout.strip()}", file=sys.stderr)
+        sys.exit(1)
+    number = int(match.group(1))
+    _record_task_issue(repo, task_key, number)
+    return number
+
+
+def cmd_run_task_round(args: argparse.Namespace) -> None:
+    repo: str = args.repo
+    dry_run: bool = args.dry_run
+    task_text = _resolve_task_text(args)
+    key = _task_key(task_text)
+    issue = _lookup_task_issue(repo, key)
+
+    if dry_run and issue is None:
+        # Never create an issue in dry-run; delegating with a fake number would
+        # break cmd_run_plan_round (it fetches the issue unconditionally).
+        print(json.dumps({
+            "would_create_issue": True,
+            "task_key": key,
+            "title": _title_from_task(task_text),
+        }, indent=2))
+        return
+
+    if issue is None:
+        issue = _create_task_issue(repo, task_text, key)
+        print(f"created scratch issue #{issue} for task {key[:12]}")
+    else:
+        print(f"reusing issue #{issue} for task {key[:12]}")
+
+    args.issue = issue
+    cmd_run_plan_round(args)
+
+
+# ---------------------------------------------------------------------------
 # run-plan-round
 # ---------------------------------------------------------------------------
 
@@ -1336,11 +1460,31 @@ def main() -> None:
     )
     p_retry.add_argument("--dry-run", action="store_true")
 
+    # run-task-round
+    p_task = subparsers.add_parser(
+        "run-task-round",
+        help="Create (or reuse) a scratch issue from free-form task text, then run a plan round.",
+    )
+    task_src = p_task.add_mutually_exclusive_group(required=True)
+    task_src.add_argument("--task", default=None, help="Free-form task description.")
+    task_src.add_argument(
+        "--task-file", default=None,
+        help="Read task description from this file ('-' for stdin).",
+    )
+    p_task.add_argument("--repo", required=True)
+    p_task.add_argument("--plan-file", required=True)
+    p_task.add_argument("--reviewers", nargs="+", required=True)
+    p_task.add_argument("--workdir-codex", default=None)
+    p_task.add_argument("--workdir-gemini", default=None)
+    p_task.add_argument("--workdir", default=None)
+    p_task.add_argument("--dry-run", action="store_true")
+
     args = parser.parse_args()
     dispatch = {
         "run-plan-round": cmd_run_plan_round,
         "run-pr-round": cmd_run_pr_round,
         "retry-validate": cmd_retry_validate,
+        "run-task-round": cmd_run_task_round,
     }
     dispatch[args.subcommand](args)
 
