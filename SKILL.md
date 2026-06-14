@@ -25,7 +25,7 @@ Run the agent-loop skill for issue #123 in myorg/myrepo with gemini as reviewer.
 ```
 
 ```
-Start agent-loop plan-first for issue #42 in myorg/myrepo, reviewers: codex and gemini.
+Plan and implement issue #42 in myorg/myrepo, reviewers: codex and gemini.
 ```
 
 ```
@@ -36,77 +36,63 @@ Run agent-loop on PR #99 in myorg/myrepo.
 Resume the agent-loop skill for issue #123 in myorg/myrepo.
 ```
 
-Claude will read this file and follow the orchestration steps below.  You do
+Claude will read this file, pick a mode, and follow the procedure below.  You do
 not need to type any slash command; natural-language requests are enough.
 
 ---
 
-## How to start a plan loop for an issue
+## Choosing a mode
 
-Provide the following information:
+This is one skill with three modes; pick the procedure from what you're given:
 
-1. **Repository**: `OWNER/REPO`
-2. **Issue number**: e.g. `123`
-3. **Reviewers**: e.g. `codex`, `gemini`, or both
+- A **PR number** to review → **PR mode** (run the PR-loop).
+- An **issue number**, or you want a plan first → **issue mode** (plan-loop, then
+  *optionally* implement + PR-loop). Confirm whether to stop at an approved plan
+  or continue into implementation.
+- A **free-form task** with no issue yet → **task mode** (create a scratch issue,
+  then proceed as issue mode).
 
-Then follow the steps below.
+All modes share the sub-procedures below, the same primitives, the same session/
+resume model, and the same posture: **merge is always a human decision.** For any
+mode, you need `OWNER/REPO` and the reviewer set (`codex`, `gemini`, or both).
 
 ---
 
-## Orchestration steps
+## Sub-procedures
 
-### Step 1 — Write the plan (Claude host turn)
+These are the building blocks; the modes sequence them.
 
-Write the implementation plan to a temp file, e.g.:
+### Plan-loop (for issue N)
 
-```
-/tmp/agent-loop-skill/{session-id}/plan-r{N}.md
-```
+1. Write the implementation plan to
+   `/tmp/agent-loop-skill/{session-id}/plan-r{N}.md`, ending with:
+   ```
+   <!-- AGENT_PLAN_STATE: approved -->
+   -- Anthropic Claude
+   ```
+2. Run one round. `skill_runner` handles resume, plan validation, attaching
+   `AGENT_LOOP_META`, posting to GitHub, running each reviewer, rendering/
+   validating responses, and writing session state:
+   ```bash
+   python -m helpers.skill_runner run-plan-round \
+     --issue ISSUE --repo OWNER/REPO \
+     --plan-file /tmp/agent-loop-skill/{session-id}/plan-r{N}.md \
+     --reviewers codex gemini \
+     [--workdir-codex /path/to/checkout] [--workdir-gemini /path/to/checkout]
+   ```
+   It prints a JSON result:
+   ```json
+   { "state": "approved" | "blocking", "round_number": N,
+     "blocking_items": [...], "approved_reviewers": [...] }
+   ```
+3. Decide:
+   - `"blocking"` → address `blocking_items`, post a change-summary comment
+     (template below), write a revised plan, and re-run. The round number
+     increments automatically.
+   - `"approved"` with empty `blocking_items` → **planning is complete.**
+   - Clarification needed → post an `<!-- AGENT_CLARIFY -->` comment and stop.
 
-The file must end with:
-
-```
-<!-- AGENT_PLAN_STATE: approved -->
--- Anthropic Claude
-```
-
-### Step 2 — Run one review round
-
-`skill_runner` handles everything else: session resume, plan validation, attaching
-`AGENT_LOOP_META`, posting to GitHub, running each reviewer, validating/rendering
-their responses, and writing session state.
-
-```bash
-python -m helpers.skill_runner run-plan-round \
-  --issue ISSUE \
-  --repo OWNER/REPO \
-  --plan-file /tmp/agent-loop-skill/{session-id}/plan-r{N}.md \
-  --reviewers codex gemini \
-  [--workdir-codex /path/to/codex/checkout] \
-  [--workdir-gemini /path/to/gemini/checkout]
-```
-
-It prints a JSON result to stdout:
-
-```json
-{
-  "state": "approved" | "blocking",
-  "round_number": N,
-  "blocking_items": [...],
-  "approved_reviewers": [...]
-}
-```
-
-### Step 3 — Decision
-
-- `"state": "approved"` and `blocking_items` is empty → implementation is complete.
-- `"state": "blocking"` → address the `blocking_items`, post a change-summary
-  comment on the issue (see template below), write a revised plan, and loop back
-  to Step 1 (the round number increments automatically).
-- If clarification is needed: post an `<!-- AGENT_CLARIFY -->` comment and stop.
-
-Change-summary template for plan rounds (`EOF` must be flush-left when run in a shell):
-
+Change-summary template (`EOF` must be flush-left when run in a shell):
 ```bash
 gh issue comment ISSUE --repo OWNER/REPO --body "$(cat <<'EOF'
 Addressed round-N feedback:
@@ -119,67 +105,36 @@ EOF
 )"
 ```
 
----
+### Implement step (after an approved plan)
 
-## PR review mode
+Run this only when the user asked to implement (see **issue mode**):
 
-Use `run-pr-round` instead of `run-plan-round`.  Pass `--pr PR_NUMBER` and
-optionally `--head-sha SHA` (auto-fetched if omitted):
+1. If a PR for this issue already exists (e.g. you were interrupted), resume it —
+   do **not** open a second one.
+2. Implement the approved plan in your working tree on a feature branch and commit.
+3. Open a PR that references the issue, and note the PR number. Hand off to the
+   PR-loop.
 
-```bash
-python -m helpers.skill_runner run-pr-round \
-  --pr PR_NUMBER \
-  --repo OWNER/REPO \
-  --reviewers codex gemini \
-  [--head-sha SHA] \
-  [--workdir-codex /path/to/checkout] \
-  [--workdir-gemini /path/to/checkout] \
-  [--test-command "pytest -q"] \
-  [--test-workdir .] \
-  [--approved-followups summarize|issue]
-```
+### PR-loop (for PR N)
 
-The JSON result shape is the same as for plan rounds.  There is no "write plan"
-step — the PR diff is fetched automatically.
+1. Run one round. The PR diff is fetched automatically — there is no plan-file
+   step:
+   ```bash
+   python -m helpers.skill_runner run-pr-round \
+     --pr PR_NUMBER --repo OWNER/REPO --reviewers codex gemini \
+     [--head-sha SHA] [--workdir-codex /path/to/checkout] [--workdir-gemini /path/to/checkout] \
+     [--test-command "pytest -q"] [--test-workdir .] \
+     [--approved-followups summarize|issue]
+   ```
+   The result shape matches plan rounds, plus the optional `tests` and
+   `approved_followups` fields (see **Gates & guardrails**).
+2. Decide:
+   - `"blocking"` → fix the code, push, post a change-summary comment (template
+     below), and re-run. A new head SHA starts a new round automatically.
+   - `"approved"` → check the test gate, then **stop at "ready to merge — human
+     decision."** The skill never merges.
 
-### Optional test gate
-
-Pass `--test-command` to run the project's tests after the reviewer turns. The
-command runs in `--test-workdir` (default: the current directory, where you as
-the host coder have the PR branch checked out) and its outcome is added to the
-JSON result under `tests`:
-
-```json
-"tests": { "command": "pytest -q", "passed": true, "exit_code": 0, "output_tail": "..." }
-```
-
-A setup failure (empty command, bad quoting, missing executable, or a missing
-`--test-workdir`) is reported as `{"passed": false, "exit_code": null, "error": ...}`
-rather than crashing the round. The gate never blocks and never merges:
-`state` stays reviewer-driven, and **"ready to merge" = `state == "approved"`
-AND `tests.passed`**. Treat a failing or errored `tests` result as a hard stop
-before merging, even when reviewers approved.
-
-### Optional approved-followups publishing
-
-Pass `--approved-followups summarize|issue` to publish reviewers' future
-follow-ups when (and only when) a round is **approved**. `summarize` posts one
-PR comment listing the reconciled follow-ups; `issue` files up to three
-follow-up issues; `ignore` (default) discards them. The mode is also threaded
-into the reviewer prompt, so reviewers only surface future follow-ups when a
-non-`ignore` mode is set. Publishing is idempotent — one publish per PR head SHA
-+ mode (re-running or resuming a round will not double-post). The outcome is
-reported in the JSON result under `approved_followups`:
-
-```json
-"approved_followups": { "mode": "summarize", "published": true, "count": 2 }
-```
-
-This never blocks and never merges; merge stays a human decision.
-
-When the result is `"state": "blocking"`, address the items, push the fixes, and
-post a change-summary comment on the PR before running the next round:
-
+Change-summary template:
 ```bash
 gh pr comment PR --repo OWNER/REPO --body "$(cat <<'EOF'
 Addressed round-N feedback:
@@ -194,13 +149,27 @@ EOF
 
 ---
 
-## Task mode (free-form task, no pre-existing issue)
+## Modes
 
-For a free-form task that has no GitHub issue yet, use `run-task-round`. It
-creates a scratch issue from the task text (idempotently — re-running the same
-task reuses its issue, tracked in a local task index), then runs the normal plan
-round on it:
+### PR mode
 
+Run the **PR-loop** on the given PR. Done when it approves (ready to merge —
+human decision).
+
+### Issue mode
+
+1. **Plan-loop** on the issue until approved.
+2. Then, based on the user's intent:
+   - **"plan and implement"** → **Implement step** → **PR-loop** → ready to merge.
+   - **"just plan"** (the default) → report the approved plan and stop.
+
+This is the skill's equivalent of the CLI's `issue --plan-first
+[--implement-after-approval]`. Because the host **is** the coder, "implement after
+approval" is your stated intent, not a code flag.
+
+### Task mode
+
+For a free-form task with no issue yet:
 ```bash
 python -m helpers.skill_runner run-task-round \
   --task "Add a --verbose flag to the CLI" \
@@ -208,19 +177,52 @@ python -m helpers.skill_runner run-task-round \
   --plan-file /tmp/agent-loop-skill/{session-id}/plan-r{N}.md \
   --reviewers codex gemini
 ```
+This creates (or idempotently reuses) a scratch issue from the task text, then
+runs the first plan round on it. Use `--task-file PATH` (or `--task-file -` for
+stdin) for longer descriptions; `--dry-run` previews the issue it would create
+without creating it. From there, continue **exactly as issue mode** from the
+Plan-loop onward (including the optional Implement step + PR-loop).
 
-Use `--task-file PATH` (or `--task-file -` for stdin) instead of `--task` for
-longer descriptions. `--dry-run` reports the issue it *would* create without
-creating it. After the first round the flow is identical to a plan loop (Step 3
-onward): address blocking items, revise the plan, and re-run on the same issue.
+---
 
-Because the host **is** the coder, two manual paths are equivalent and need no
-new subcommand:
+## Gates & guardrails
 
-- **Plan-first:** `gh issue create …` then `run-plan-round` (this is what
-  `run-task-round` automates).
-- **Implement-then-review:** implement the task, open a PR, then `run-pr-round`
-  (with the optional `--test-command` and `--approved-followups` gates).
+- **Test gate** (PR-loop): `--test-command` runs after the reviewer turns in
+  `--test-workdir` (default: the current directory, where you as the host coder
+  have the PR branch checked out). The outcome is reported under `tests`:
+  ```json
+  "tests": { "command": "pytest -q", "passed": true, "exit_code": 0, "output_tail": "..." }
+  ```
+  A setup failure (empty/bad command, missing executable, or missing
+  `--test-workdir`) is reported as
+  `{"passed": false, "exit_code": null, "error": ...}` rather than crashing the
+  round. **"Ready to merge" = `state == "approved"` AND `tests.passed`.** Treat a
+  failing or errored gate as a hard stop, even when reviewers approved.
+- **Approved-followups** (PR-loop): `--approved-followups summarize|issue`
+  publishes reviewers' future follow-ups when (and only when) a round is
+  **approved**. `summarize` posts one PR comment of the reconciled follow-ups;
+  `issue` files up to three follow-up issues; `ignore` (default) discards them.
+  The mode is also threaded into the reviewer prompt, so reviewers only surface
+  future follow-ups when a non-`ignore` mode is set. Publishing is idempotent
+  (one publish per PR head SHA + mode) and reported under `approved_followups`:
+  ```json
+  "approved_followups": { "mode": "summarize", "published": true, "count": 2 }
+  ```
+- **Merge is always a human decision.** The skill never runs CI-wait or
+  auto-merge; every mode stops at "ready to merge."
+
+---
+
+## Resuming
+
+Every phase is re-runnable; if a session ends mid-arc, just re-invoke:
+
+- **Plan-loop / PR-loop**: re-run the same round command. `build-resume` reads the
+  GitHub comment history and skips reviewer turns already completed this round.
+- **Task mode**: re-running with the same task text reuses the same scratch issue
+  (tracked in a local task index), then resumes its plan-loop.
+- **Implement step**: before implementing, check whether a PR already exists for
+  the issue and resume it instead of opening a duplicate.
 
 ---
 
