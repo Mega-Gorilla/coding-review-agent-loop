@@ -2306,3 +2306,248 @@ class TestRunDecompose:
         assert output["reused"] is True
         assert output["phase_count"] == 1
         assert output["phases"][0]["issue_number"] == 123
+
+
+# ---------------------------------------------------------------------------
+# helpers/skill_runner.py — implement by phase: run-implement-by-phase (#319)
+# ---------------------------------------------------------------------------
+
+class TestRunImplementByPhase:
+    def _last_json(self, stdout: str) -> dict:
+        start = stdout.rfind("\n{")
+        if start < 0:
+            start = stdout.find("{")
+        return json.loads(stdout[start:].strip())
+
+    def _phase(self, *, automation: str = "agent-pr"):
+        import coding_review_agent_loop.decomposition as decomp
+
+        return decomp.PlanPhase(
+            title="Schema helpers",
+            scope="Add parser dataclasses and tests.",
+            non_goals="No live orchestrator switch.",
+            dependency_notes="First phase; no dependencies.",
+            rollout_risk="low - internal only.",
+            validation="Run python -m pytest tests/test_agent_loop.py.",
+            parent_context="Approved plan slice: add schema helpers.",
+            automation=automation,
+            depends_on=(),
+        )
+
+    def _args(self, tmp_path, *, dry_run: bool = False):
+        plan = tmp_path / "plan.md"
+        plan.write_text("Approved parent plan", encoding="utf-8")
+        return types.SimpleNamespace(
+            issue=77,
+            repo="test/skill-repo",
+            coder="codex",
+            plan_file=str(plan),
+            workdir=str(tmp_path),
+            workdir_codex=None,
+            workdir_gemini=None,
+            base="main",
+            dry_run=dry_run,
+        )
+
+    def test_live_posts_handoff_before_child_implementation(self, monkeypatch, tmp_path, capsys) -> None:
+        import helpers.skill_runner as sr
+        import coding_review_agent_loop.decomposition as decomp
+        import coding_review_agent_loop.github as gh
+        from coding_review_agent_loop.github import IssueContext
+
+        events: list[str] = []
+        phase = self._phase()
+        created = (
+            decomp.CreatedPhaseIssue(
+                phase=phase,
+                issue_url="https://github.com/test/skill-repo/issues/123",
+                issue_number=123,
+            ),
+        )
+        parent_ctx = IssueContext(
+            number=77, repo="test/skill-repo", title="Parent", body="Body", url="u",
+            comments=(), human_requirements=(),
+        )
+
+        def fake_decompose(**_kwargs):
+            return (
+                {"reused": False},
+                created,
+                parent_ctx,
+                types.SimpleNamespace(repo="test/skill-repo"),
+                object(),
+                "abc123",
+                "Approved parent plan",
+                str(tmp_path),
+            )
+
+        def fake_post(*_args, **kwargs):
+            events.append(f"handoff:{kwargs['created'].issue_number}")
+
+        def fake_get_issue_context(_runner, *, config, issue_number):
+            assert issue_number == 123
+            return IssueContext(
+                number=123, repo=config.repo, title="Child", body="Child body", url="child",
+                comments=(), human_requirements=(),
+            )
+
+        def fake_impl(**kwargs):
+            events.append(f"implement:{kwargs['issue']}")
+            assert kwargs["approved_plan"] == "Approved plan slice: add schema helpers."
+            assert kwargs["post_one_shot_handoff"] is False
+            return {"pr": 456, "head_sha": "sha", "issue": 123}
+
+        monkeypatch.setattr(sr, "_run_decomposition_for_skill", fake_decompose)
+        monkeypatch.setattr(decomp, "post_phase_implementation_handoff_comment", fake_post)
+        monkeypatch.setattr(gh, "get_issue_context", fake_get_issue_context)
+        monkeypatch.setattr(sr, "_run_child_or_one_shot_implementation", fake_impl)
+
+        sr.cmd_run_implement_by_phase(self._args(tmp_path))
+
+        assert events == ["handoff:123", "implement:123"]
+        output = self._last_json(capsys.readouterr().out)
+        assert output["state"] == "implemented"
+        assert output["child_implementation"]["pr"] == 456
+
+    def test_existing_phase_handoff_stops_without_implementation(self, monkeypatch, tmp_path, capsys) -> None:
+        import helpers.skill_runner as sr
+        import coding_review_agent_loop.decomposition as decomp
+        from coding_review_agent_loop.github import IssueComment, IssueContext
+
+        phase = self._phase()
+        created = decomp.CreatedPhaseIssue(
+            phase=phase,
+            issue_url="https://github.com/test/skill-repo/issues/123",
+            issue_number=123,
+        )
+        marker = decomp.format_phase_implementation_handoff_comment(
+            parent_issue=77,
+            mode="implement-by-phase",
+            plan_hash="abc123",
+            phase_index=1,
+            created=created,
+        )
+        parent_ctx = IssueContext(
+            number=77, repo="test/skill-repo", title="Parent", body="Body", url="u",
+            comments=(IssueComment(author="bot", created_at=None, body=marker),),
+            human_requirements=(),
+        )
+
+        def fake_decompose(**_kwargs):
+            return (
+                {"reused": True},
+                (created,),
+                parent_ctx,
+                types.SimpleNamespace(repo="test/skill-repo"),
+                object(),
+                "abc123",
+                "Approved parent plan",
+                str(tmp_path),
+            )
+
+        def fail_impl(**_kwargs):
+            raise AssertionError("implementation should not run when handoff exists")
+
+        monkeypatch.setattr(sr, "_run_decomposition_for_skill", fake_decompose)
+        monkeypatch.setattr(sr, "_run_child_or_one_shot_implementation", fail_impl)
+
+        sr.cmd_run_implement_by_phase(self._args(tmp_path))
+
+        output = self._last_json(capsys.readouterr().out)
+        assert output["state"] == "handoff-exists"
+        assert output["child_issue"] == 123
+
+    def test_human_first_phase_stops_without_handoff(self, monkeypatch, tmp_path, capsys) -> None:
+        import helpers.skill_runner as sr
+        import coding_review_agent_loop.decomposition as decomp
+        from coding_review_agent_loop.github import IssueContext
+
+        phase = self._phase(automation="human-action")
+        created = (
+            decomp.CreatedPhaseIssue(
+                phase=phase,
+                issue_url="https://github.com/test/skill-repo/issues/123",
+                issue_number=123,
+            ),
+        )
+        parent_ctx = IssueContext(
+            number=77, repo="test/skill-repo", title="Parent", body="Body", url="u",
+            comments=(), human_requirements=(),
+        )
+
+        def fake_decompose(**_kwargs):
+            return (
+                {"reused": False},
+                created,
+                parent_ctx,
+                types.SimpleNamespace(repo="test/skill-repo"),
+                object(),
+                "abc123",
+                "Approved parent plan",
+                str(tmp_path),
+            )
+
+        monkeypatch.setattr(sr, "_run_decomposition_for_skill", fake_decompose)
+        sr.cmd_run_implement_by_phase(self._args(tmp_path))
+
+        output = self._last_json(capsys.readouterr().out)
+        assert output["state"] == "stopped"
+        assert output["automation"] == "human-action"
+
+    def test_missing_child_issue_number_fails_before_handoff(self, monkeypatch, tmp_path) -> None:
+        import helpers.skill_runner as sr
+        import coding_review_agent_loop.decomposition as decomp
+        from coding_review_agent_loop.errors import AgentLoopError
+        from coding_review_agent_loop.github import IssueContext
+
+        phase = self._phase()
+        created = (
+            decomp.CreatedPhaseIssue(
+                phase=phase,
+                issue_url=None,
+                issue_number=None,
+            ),
+        )
+        parent_ctx = IssueContext(
+            number=77, repo="test/skill-repo", title="Parent", body="Body", url="u",
+            comments=(), human_requirements=(),
+        )
+
+        def fake_decompose(**_kwargs):
+            return (
+                {"reused": False},
+                created,
+                parent_ctx,
+                types.SimpleNamespace(repo="test/skill-repo"),
+                object(),
+                "abc123",
+                "Approved parent plan",
+                str(tmp_path),
+            )
+
+        monkeypatch.setattr(sr, "_run_decomposition_for_skill", fake_decompose)
+        with pytest.raises(AgentLoopError):
+            sr.cmd_run_implement_by_phase(self._args(tmp_path))
+
+    def test_dry_run_runs_decomposition_and_implementation_preview(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmppath = Path(tmpdir)
+            _write_fake_gh(tmppath)
+            env = _make_fake_gh_env(tmppath)
+            plan = tmppath / "plan.md"
+            plan.write_text(_VALID_PLAN_STATE, encoding="utf-8")
+            result = _run(
+                "helpers.skill_runner", "run-implement-by-phase",
+                "--issue", "9992", "--repo", "test/skill-repo",
+                "--coder", "codex", "--plan-file", str(plan),
+                "--workdir", str(tmppath), "--base", "release-x",
+                "--dry-run",
+                env=env,
+            )
+            assert result.returncode == 0, result.stderr
+            output = self._last_json(result.stdout)
+            assert output["mode"] == "implement-by-phase"
+            assert output["state"] == "would-implement"
+            assert output["phase"]["automation"] == "agent-pr"
+            assert output["would_post_phase_handoff"] is True
+            assert output["child_implementation_preview"]["pr"] == 0
