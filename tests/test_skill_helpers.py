@@ -1482,3 +1482,51 @@ class TestUsageTracking:
         ])
         rex.main()
         assert not usage_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# reversed-roles helpers, behavior-neutral pieces (#307, sub-PR 1)
+# ---------------------------------------------------------------------------
+
+class TestReverseRolesHelpers:
+    _ISSUE = {"number": 5, "repo": "o/r", "title": "t", "body": "b", "url": "u"}
+
+    def test_build_plan_prompt_for_skill_embeds_coder_workdir(self) -> None:
+        from helpers.prompt_builders import build_plan_prompt_for_skill
+        p = build_plan_prompt_for_skill(
+            self._ISSUE, repo="o/r", coder="codex",
+            reviewers=["codex", "claude"], workdir="/tmp/skill-runner-codex",
+        )
+        assert "/tmp/skill-runner-codex" in p
+        assert "5" in p  # issue number referenced
+
+    def test_build_plan_revision_prompt_for_skill_includes_feedback(self) -> None:
+        from helpers.prompt_builders import build_plan_revision_prompt_for_skill
+        p = build_plan_revision_prompt_for_skill(
+            self._ISSUE, repo="o/r", coder="codex",
+            reviewers=["codex", "claude"], workdir="/tmp/skill-runner-codex",
+            round_number=2, previous_plan="OLD PLAN TEXT",
+            reviewer_feedback="REVIEWER FEEDBACK XYZ", prior_items_raw=[],
+        )
+        assert "REVIEWER FEEDBACK XYZ" in p
+        assert "OLD PLAN TEXT" in p
+
+    def test_attach_metadata_persists_raw_structured_coder_response(self) -> None:
+        import re as _re
+        from coding_review_agent_loop.round_state import _decode_round_metadata
+        body = _write_tmp("## Revised plan\nrendered markdown body")
+        raw = _write_tmp('{"kind": "plan_revision", "x": 1}', suffix=".json")
+        out = _write_tmp("", suffix=".md")
+        _run(
+            "helpers.state_manager", "attach-metadata",
+            "--body-file", body, "--output", out,
+            "--flow", "plan", "--role", "coder", "--agent", "Codex",
+            "--round-number", "2", "--state", "approved", "--subject", "abc123",
+            "--raw-structured-coder-response-file", raw,
+        )
+        text = Path(out).read_text(encoding="utf-8")
+        m = _re.search(r"AGENT_LOOP_META:\s*([A-Za-z0-9+/=_-]+)", text)
+        assert m is not None
+        meta = _decode_round_metadata(m.group(1))
+        assert meta.agent == "Codex"
+        assert meta.raw_structured_coder_response.strip() == '{"kind": "plan_revision", "x": 1}'

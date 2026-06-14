@@ -311,6 +311,16 @@ def cmd_attach_metadata(args: argparse.Namespace) -> None:
         except (OSError, json.JSONDecodeError):
             usage = None  # advisory; never block posting on usage
 
+    raw_structured_coder_response: str | None = None
+    if getattr(args, "raw_structured_coder_response_file", None):
+        try:
+            raw_structured_coder_response = Path(
+                args.raw_structured_coder_response_file
+            ).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"state_manager: cannot read raw coder response file: {exc}", file=sys.stderr)
+            sys.exit(1)
+
     metadata = PostedRoundMetadata(
         flow=args.flow,
         role=args.role,
@@ -323,6 +333,7 @@ def cmd_attach_metadata(args: argparse.Namespace) -> None:
         state=args.state,
         canonical_plan=canonical_plan,
         usage=usage,
+        raw_structured_coder_response=raw_structured_coder_response,
     )
     augmented = _attach_round_metadata(body, metadata)
 
@@ -395,6 +406,9 @@ def main() -> None:
                         help="JSON array of serialized UnresolvedReviewItem (new items from this turn).")
     p_meta.add_argument("--usage-file", default=None,
                         help="JSON file with external-agent usage to persist in AGENT_LOOP_META (#308).")
+    p_meta.add_argument("--raw-structured-coder-response-file", default=None,
+                        help="Raw structured coder response (plan_revision JSON) to persist in "
+                             "AGENT_LOOP_META for reversed-roles revision rounds (#307).")
     p_meta.add_argument("--canonical-plan-file", default=None,
                         help="Plan text file (written as canonical_plan for coder turns).")
 
