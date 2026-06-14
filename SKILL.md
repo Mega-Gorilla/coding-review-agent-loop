@@ -115,6 +115,40 @@ Run this only when the user asked to implement (see **issue mode**):
 3. Open a PR that references the issue, and note the PR number. Hand off to the
    PR-loop.
 
+### External by-phase implementation (after an approved plan)
+
+Use this when the user asks for skill-mode parity with
+`plan_execution_mode="implement-by-phase"` and an external coder should perform
+the first automated phase:
+
+```bash
+python -m helpers.skill_runner run-implement-by-phase \
+  --issue ISSUE --repo OWNER/REPO \
+  --coder codex \
+  --plan-file /tmp/agent-loop-skill/{session-id}/approved-plan.md \
+  --workdir /path/to/push-capable/clone \
+  [--base main]
+```
+
+Live runs require a push-capable `--workdir` (or `--workdir-codex` /
+`--workdir-gemini`). The command decomposes the approved parent plan using an
+`implement-by-phase` decomposition marker, creates or reuses child phase issues,
+and then inspects phase 1:
+
+- If phase 1 is `agent-pr`, it records a phase handoff marker on the parent and
+  runs the external coder against the child issue, using that phase's
+  `parent_context` as the approved implementation plan. It does not write the
+  one-shot implementation marker used by `run-implement`.
+- If phase 1 is `human-action` or `manual-close`, it prints JSON identifying the
+  child issue and stops without posting a phase handoff or running the coder.
+- If a matching phase handoff marker already exists, it prints a resume hint for
+  the child issue and does not invoke the coder again.
+
+`--dry-run` parses the decomposition and runs the implementation dry-run stub,
+but it does not create child issues, post markers, push branches, or open a real
+PR. Dry-run child issue numbers may be absent, so the JSON is a preview of the
+phase that would be implemented.
+
 ### PR-loop (for PR N)
 
 1. Run one round. The PR diff is fetched automatically — there is no plan-file

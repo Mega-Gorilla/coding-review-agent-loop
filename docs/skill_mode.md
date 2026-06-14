@@ -43,6 +43,43 @@ GitHub comment metadata markers (`AGENT_LOOP_META`) written by the skill are
 identical to those written by the headless CLI, so mixed-mode operation (start
 headless, resume in skill, or vice versa) is supported.
 
+## Approved-plan execution helpers
+
+Skill mode also exposes the external-coder execution helpers used after a plan
+has already been approved:
+
+- `run-implement` performs the existing one-shot reverse implementation. It
+  keeps using the durable `AGENT_PLAN_ONE_SHOT_IMPL` marker and is unchanged by
+  by-phase support.
+- `run-decompose` decomposes an approved plan into child phase issues with mode
+  `decompose-only`.
+- `run-implement-by-phase` decomposes with mode `implement-by-phase`, then
+  implements phase 1 only when that phase is `agent-pr`.
+
+Example:
+
+```bash
+python -m helpers.skill_runner run-implement-by-phase \
+  --issue 123 --repo owner/repo \
+  --coder codex \
+  --plan-file /tmp/approved-plan.md \
+  --workdir /path/to/push-capable/clone \
+  --base main
+```
+
+Live by-phase implementation creates or reuses child phase issues, posts the
+parent decomposition summary, posts a phase implementation handoff before
+running the child implementation, and then runs the external coder in the
+push-capable workdir. Reruns with an existing phase handoff stop with a child
+issue resume hint rather than invoking the coder again. If phase 1 is
+`human-action` or `manual-close`, the command stops after decomposition and
+reports the child issue that needs human work.
+
+Dry-run by-phase execution validates the decomposition and implementation stubs
+without creating issues, posting comments, pushing branches, or opening real
+PRs. Because dry-run child issue numbers may be unavailable, its JSON output is
+a preview of what would be handed off and implemented.
+
 ## Session state
 
 Local session state is stored at:

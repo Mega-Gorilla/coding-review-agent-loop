@@ -48,6 +48,17 @@ Subcommands:
     role: coder PR comment so run-pr-round can review it. Idempotent per plan via
     the one-shot handoff marker. Requires a push-capable workdir.
 
+  run-implement-by-phase
+    --issue N --repo OWNER/REPO
+    --coder {codex,gemini}
+    --plan-file PATH
+    [--base BRANCH] [--workdir PATH] [--workdir-codex PATH] [--workdir-gemini PATH]
+    [--dry-run]
+
+    Reversed roles: decompose an approved plan into child phase issues, then
+    implement phase 1 when it is agent-pr. Reruns reuse decomposition and phase
+    handoff markers. Requires a push-capable workdir for live implementation.
+
   run-decompose
     --issue N --repo OWNER/REPO
     --coder {codex,gemini}
@@ -2264,101 +2275,76 @@ def _validate_coder_implementation_response(
     return int(pr_number)
 
 
-def cmd_run_implement(args: argparse.Namespace) -> None:
-    issue: int = args.issue
-    repo: str = args.repo
-    coder: str = args.coder
-    base: str = args.base
-    dry_run: bool = args.dry_run
-
-    plan_file = Path(args.plan_file)
+def _load_required_plan_file(path_text: str, *, action: str) -> str:
+    plan_file = Path(path_text)
     if not plan_file.exists():
         print(f"skill_runner: plan file not found: {plan_file}", file=sys.stderr)
         sys.exit(1)
     approved_plan = plan_file.read_text(encoding="utf-8")
-
-    explicit_workdir = getattr(args, f"workdir_{coder}", None) or getattr(args, "workdir", None)
-    if not dry_run and not explicit_workdir:
-        print(
-            "skill_runner: run-implement requires an explicit push-capable "
-            "--workdir (or --workdir-codex/--workdir-gemini); the external coder "
-            "commits, pushes a branch, and opens a PR there.",
-            file=sys.stderr,
-        )
+    if not approved_plan.strip():
+        print(f"skill_runner: plan file is empty; cannot {action} an empty plan", file=sys.stderr)
         sys.exit(1)
-    workdir = _workdir_for_agent(coder, args)
+    return approved_plan
 
+
+def _implementation_config(
+    *,
+    repo: str,
+    coder: str,
+    workdir: str,
+    base: str,
+    dry_run: bool,
+):
+    from helpers.prompt_builders import make_minimal_config
+
+    # auto_agent_dirs=() so the explicit, user-provided push-capable workdir is
+    # treated as user-owned: sync_coder_base_before_implementation then *rejects* a
+    # dirty checkout instead of `git reset --hard`/`clean -fd`-ing the user's clone (#316).
+    return dataclasses.replace(
+        make_minimal_config(repo, coder, (coder,), reviewer=coder, workdir=str(workdir), base=base),  # type: ignore[arg-type]
+        dry_run=dry_run,
+        auto_agent_dirs=(),
+    )
+
+
+def _run_child_or_one_shot_implementation(
+    *,
+    issue: int,
+    repo: str,
+    coder: str,
+    base: str,
+    dry_run: bool,
+    workdir: str,
+    approved_plan: str,
+    issue_context,
+    config,
+    runner: Runner,
+    post_one_shot_handoff: bool,
+    one_shot_mode: str = "implement-one-shot",
+) -> dict:
     from coding_review_agent_loop.config import sync_coder_base_before_implementation
     from coding_review_agent_loop.decomposition import (
         approved_plan_hash,
-        find_existing_one_shot_impl_handoff,
         format_one_shot_impl_handoff_comment,
     )
     from coding_review_agent_loop.github import (
-        get_issue_context,
         get_pr_review_context,
         validate_open_pr,
         validate_pr_references_issue,
     )
     from coding_review_agent_loop.workdir_guard import validate_assigned_head_advanced
-    from helpers.prompt_builders import (
-        build_implementation_prompt_for_skill,
-        make_minimal_config,
-    )
+    from helpers.prompt_builders import build_implementation_prompt_for_skill
 
-    plan_hash = approved_plan_hash(approved_plan)
-    plan_subject = _plan_subject(approved_plan)
-    mode = "implement-one-shot"
     coder_cap = agent_display_name(coder)  # type: ignore[arg-type]
-
-    # auto_agent_dirs=() so the explicit, user-provided push-capable workdir is
-    # treated as user-owned: sync_coder_base_before_implementation then *rejects* a
-    # dirty checkout instead of `git reset --hard`/`clean -fd`-ing the user's clone (#316).
-    config = dataclasses.replace(
-        make_minimal_config(repo, coder, (coder,), reviewer=coder, workdir=str(workdir), base=base),  # type: ignore[arg-type]
-        dry_run=dry_run,
-        auto_agent_dirs=(),
-    )
-    runner = Runner(dry_run=dry_run)
-
-    # Idempotency — reuse the durable one-shot handoff marker (no duplicate PRs).
-    comments = [types.SimpleNamespace(body=b) for b in _fetch_issue_comments_raw(repo, issue)]
-    existing = find_existing_one_shot_impl_handoff(
-        comments, parent_issue=issue, plan_hash=plan_hash, mode=mode,
-    )
-    if existing is not None:
-        # Only reuse a recorded PR that is still open AND still references this issue
-        # — a stale/injected same-plan-hash marker must not return an unrelated PR.
-        reusable = True
-        try:
-            validate_open_pr(runner, config=config, pr_number=existing.pr_number)
-            validate_pr_references_issue(
-                runner, config=config, pr_number=existing.pr_number, issue_number=issue,
-            )
-        except AgentLoopError:
-            reusable = False
-        if reusable:
-            print(json.dumps({
-                "pr": existing.pr_number,
-                "head_sha": existing.pr_head_sha,
-                "issue": issue,
-                "reused": True,
-            }, indent=2))
-            print(
-                f"hint: PR #{existing.pr_number} already implements this plan — "
-                f"review it with run-pr-round.",
-                file=sys.stderr,
-            )
-            return
-
-    issue_context = get_issue_context(runner, config=config, issue_number=issue)
     prompt_text = build_implementation_prompt_for_skill(
-        issue_context, approved_plan,
-        repo=repo, coder=coder, workdir=str(workdir), base=base,  # type: ignore[arg-type]
+        issue_context,
+        approved_plan,
+        repo=repo,
+        coder=coder,  # type: ignore[arg-type]
+        workdir=str(workdir),
+        base=base,
     )
 
-    # Sync the workdir to the requested base and capture HEAD *after* the sync, so
-    # the head-advanced check reflects the coder's commits (not the sync).
     if dry_run:
         print(f"[dry-run] would sync {workdir} to base '{base}' and run {coder_cap} implementation")
         head_before = None
@@ -2395,12 +2381,10 @@ def cmd_run_implement(args: argparse.Namespace) -> None:
             except (OSError, json.JSONDecodeError):
                 coder_usage = None
 
-        # Validate the coder response (PR marker + human-requirements ack +
-        # tests-within-workdir). Non-retryable: an implementation turn can't be
-        # file-repaired, so save a debug copy and exit before posting anything.
         try:
             pr_number = _validate_coder_implementation_response(
-                coder_output, workdir=str(workdir),
+                coder_output,
+                workdir=str(workdir),
                 human_requirements=issue_context.human_requirements,
             )
         except AgentLoopError as exc:
@@ -2415,7 +2399,6 @@ def cmd_run_implement(args: argparse.Namespace) -> None:
             )
             sys.exit(1)
 
-        # Validate the workdir + PR state.
         if dry_run:
             head_sha = "dry-run-sha"
         else:
@@ -2432,9 +2415,6 @@ def cmd_run_implement(args: argparse.Namespace) -> None:
                 runner, config=config, pr_number=pr_number,
             ).metadata.head_sha or "unknown"
 
-        # Post the role: coder PR comment so run-pr-round's build-resume recognizes
-        # the round anchor. --state is required by attach-metadata; approved matches
-        # the other coder posts and is not load-bearing for PR-review resume.
         tagged = tmpdir / "impl-tagged.md"
         _run_helper(
             "helpers.state_manager", "attach-metadata",
@@ -2452,27 +2432,119 @@ def cmd_run_implement(args: argparse.Namespace) -> None:
                 "helpers.gh_ops", "post-issue-comment",
                 "--issue", str(pr_number), "--file", str(tagged), "--repo", repo,
             )
-            # Record idempotency: the durable one-shot handoff marker on the issue.
-            handoff = tmpdir / "impl-handoff.md"
-            _write_text(handoff, format_one_shot_impl_handoff_comment(
-                parent_issue=issue, mode=mode, plan_hash=plan_hash,
-                plan_subject=plan_subject, pr_number=pr_number, pr_head_sha=head_sha,
-            ))
-            _run_helper(
-                "helpers.gh_ops", "post-issue-comment",
-                "--issue", str(issue), "--file", str(handoff), "--repo", repo,
-            )
+            if post_one_shot_handoff:
+                handoff = tmpdir / "impl-handoff.md"
+                _write_text(handoff, format_one_shot_impl_handoff_comment(
+                    parent_issue=issue,
+                    mode=one_shot_mode,
+                    plan_hash=approved_plan_hash(approved_plan),
+                    plan_subject=_plan_subject(approved_plan),
+                    pr_number=pr_number,
+                    pr_head_sha=head_sha,
+                ))
+                _run_helper(
+                    "helpers.gh_ops", "post-issue-comment",
+                    "--issue", str(issue), "--file", str(handoff), "--repo", repo,
+                )
         else:
-            print(f"[dry-run] would post coder PR comment + handoff for PR #{pr_number}")
+            print(f"[dry-run] would post coder PR comment for PR #{pr_number}")
+            if post_one_shot_handoff:
+                print(f"[dry-run] would post one-shot handoff for PR #{pr_number}")
 
     result_json: dict = {"pr": pr_number, "head_sha": head_sha, "issue": issue}
     usage = _aggregate_reviewer_usage([{"usage": coder_usage}] if coder_usage else [])
     if usage is not None:
         result_json["usage"] = usage
+    return result_json
+
+
+def cmd_run_implement(args: argparse.Namespace) -> None:
+    issue: int = args.issue
+    repo: str = args.repo
+    coder: str = args.coder
+    base: str = args.base
+    dry_run: bool = args.dry_run
+
+    approved_plan = _load_required_plan_file(args.plan_file, action="implement")
+
+    explicit_workdir = getattr(args, f"workdir_{coder}", None) or getattr(args, "workdir", None)
+    if not dry_run and not explicit_workdir:
+        print(
+            "skill_runner: run-implement requires an explicit push-capable "
+            "--workdir (or --workdir-codex/--workdir-gemini); the external coder "
+            "commits, pushes a branch, and opens a PR there.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    workdir = _workdir_for_agent(coder, args)
+
+    from coding_review_agent_loop.decomposition import (
+        approved_plan_hash,
+        find_existing_one_shot_impl_handoff,
+    )
+    from coding_review_agent_loop.github import (
+        get_issue_context,
+        validate_open_pr,
+        validate_pr_references_issue,
+    )
+
+    plan_hash = approved_plan_hash(approved_plan)
+    mode = "implement-one-shot"
+
+    config = _implementation_config(
+        repo=repo, coder=coder, workdir=str(workdir), base=base, dry_run=dry_run,
+    )
+    runner = Runner(dry_run=dry_run)
+
+    # Idempotency — reuse the durable one-shot handoff marker (no duplicate PRs).
+    comments = [types.SimpleNamespace(body=b) for b in _fetch_issue_comments_raw(repo, issue)]
+    existing = find_existing_one_shot_impl_handoff(
+        comments, parent_issue=issue, plan_hash=plan_hash, mode=mode,
+    )
+    if existing is not None:
+        # Only reuse a recorded PR that is still open AND still references this issue
+        # — a stale/injected same-plan-hash marker must not return an unrelated PR.
+        reusable = True
+        try:
+            validate_open_pr(runner, config=config, pr_number=existing.pr_number)
+            validate_pr_references_issue(
+                runner, config=config, pr_number=existing.pr_number, issue_number=issue,
+            )
+        except AgentLoopError:
+            reusable = False
+        if reusable:
+            print(json.dumps({
+                "pr": existing.pr_number,
+                "head_sha": existing.pr_head_sha,
+                "issue": issue,
+                "reused": True,
+            }, indent=2))
+            print(
+                f"hint: PR #{existing.pr_number} already implements this plan — "
+                f"review it with run-pr-round.",
+                file=sys.stderr,
+            )
+            return
+
+    issue_context = get_issue_context(runner, config=config, issue_number=issue)
+    result_json = _run_child_or_one_shot_implementation(
+        issue=issue,
+        repo=repo,
+        coder=coder,
+        base=base,
+        dry_run=dry_run,
+        workdir=str(workdir),
+        approved_plan=approved_plan,
+        issue_context=issue_context,
+        config=config,
+        runner=runner,
+        post_one_shot_handoff=True,
+        one_shot_mode=mode,
+    )
     print(json.dumps(result_json, indent=2))
     print(
-        f"hint: PR #{pr_number} opened — review it with: python -m helpers.skill_runner "
-        f"run-pr-round --pr {pr_number} --repo {repo} --reviewers claude gemini",
+        f"hint: PR #{result_json['pr']} opened — review it with: python -m helpers.skill_runner "
+        f"run-pr-round --pr {result_json['pr']} --repo {repo} --reviewers claude gemini",
         file=sys.stderr,
     )
 
@@ -2544,27 +2616,38 @@ def _existing_decomposition_json(existing) -> list[dict]:
     return phases
 
 
-def cmd_run_decompose(args: argparse.Namespace) -> None:
-    issue: int = args.issue
-    repo: str = args.repo
-    coder: str = args.coder
-    dry_run: bool = args.dry_run
-    mode = "decompose-only"
+def _created_phase_issues_from_existing(existing):
+    from coding_review_agent_loop.decomposition import CreatedPhaseIssue, RecordedPhase
 
-    plan_file = Path(args.plan_file)
-    if not plan_file.exists():
-        print(f"skill_runner: plan file not found: {plan_file}", file=sys.stderr)
-        sys.exit(1)
-    approved_plan = plan_file.read_text(encoding="utf-8")
-    if not approved_plan.strip():
-        print("skill_runner: plan file is empty; cannot decompose an empty plan", file=sys.stderr)
-        sys.exit(1)
+    return tuple(
+        CreatedPhaseIssue(
+            phase=RecordedPhase(title=title, automation=automation),
+            issue_url=url,
+            issue_number=number,
+        )
+        for (title, url, number), automation in zip(existing.children, existing.automation, strict=False)
+    )
 
+
+def _run_decomposition_for_skill(
+    *,
+    issue: int,
+    repo: str,
+    coder: str,
+    plan_file: str,
+    args: argparse.Namespace,
+    dry_run: bool,
+    mode: str,
+    approved_plan: str | None = None,
+) -> tuple[dict, tuple, object, object, Runner, str, str, str]:
+    if approved_plan is None:
+        approved_plan = _load_required_plan_file(plan_file, action="decompose")
     workdir = _workdir_for_agent(coder, args)
     Path(workdir).mkdir(parents=True, exist_ok=True)
 
     from coding_review_agent_loop.decomposition import (
         approved_plan_hash,
+        CreatedPhaseIssue,
         create_decomposition_child_issues,
         find_existing_decomposition,
         parse_plan_decomposition,
@@ -2595,7 +2678,8 @@ def cmd_run_decompose(args: argparse.Namespace) -> None:
         mode=mode,
     )
     if existing is not None:
-        print(json.dumps({
+        created = _created_phase_issues_from_existing(existing)
+        result = {
             "issue": issue,
             "plan_hash": plan_hash,
             "mode": mode,
@@ -2603,12 +2687,12 @@ def cmd_run_decompose(args: argparse.Namespace) -> None:
             "reused": True,
             "phase_count": existing.phase_count,
             "phases": _existing_decomposition_json(existing),
-        }, indent=2))
+        }
         print(
             f"hint: issue #{issue} already has a {mode} decomposition for this plan.",
             file=sys.stderr,
         )
-        return
+        return result, created, issue_context, config, runner, plan_hash, approved_plan, str(workdir)
 
     prompt_text = build_plan_decomposition_prompt_for_skill(
         issue_context, approved_plan, repo=repo, coder=coder, workdir=str(workdir),  # type: ignore[arg-type]
@@ -2665,9 +2749,13 @@ def cmd_run_decompose(args: argparse.Namespace) -> None:
         }
         if dry_run:
             result_json["would_post_parent_summary"] = True
+            created = tuple(
+                CreatedPhaseIssue(phase=phase, issue_url=None, issue_number=None)
+                for phase in decomposition.phases
+            )
             result_json["phases"] = [
-                _decomposition_phase_json(index, phase)
-                for index, phase in enumerate(decomposition.phases, start=1)
+                _decomposition_phase_json(index, item.phase)
+                for index, item in enumerate(created, start=1)
             ]
             print("[dry-run] would create child phase issues and post parent decomposition marker")
         else:
@@ -2698,7 +2786,217 @@ def cmd_run_decompose(args: argparse.Namespace) -> None:
         usage = _aggregate_reviewer_usage([{"usage": coder_usage}] if coder_usage else [])
         if usage is not None:
             result_json["usage"] = usage
+        return result_json, created, issue_context, config, runner, plan_hash, approved_plan, str(workdir)
+
+
+def cmd_run_decompose(args: argparse.Namespace) -> None:
+    result_json, *_ = _run_decomposition_for_skill(
+        issue=args.issue,
+        repo=args.repo,
+        coder=args.coder,
+        plan_file=args.plan_file,
+        args=args,
+        dry_run=args.dry_run,
+        mode="decompose-only",
+    )
+    print(json.dumps(result_json, indent=2))
+
+
+# ---------------------------------------------------------------------------
+# run-implement-by-phase  (decompose, then implement phase 1 when agent-pr) (#319)
+# ---------------------------------------------------------------------------
+
+def cmd_run_implement_by_phase(args: argparse.Namespace) -> None:
+    issue: int = args.issue
+    repo: str = args.repo
+    coder: str = args.coder
+    base: str = args.base
+    dry_run: bool = args.dry_run
+    mode = "implement-by-phase"
+
+    approved_plan = _load_required_plan_file(args.plan_file, action="decompose")
+    explicit_workdir = getattr(args, f"workdir_{coder}", None) or getattr(args, "workdir", None)
+    if not dry_run and not explicit_workdir:
+        print(
+            "skill_runner: run-implement-by-phase requires an explicit push-capable "
+            "--workdir (or --workdir-codex/--workdir-gemini); the external coder "
+            "commits, pushes a branch, and opens a PR for the first agent phase there.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    (
+        decomposition_result,
+        created,
+        parent_issue_context,
+        decompose_config,
+        decompose_runner,
+        plan_hash,
+        approved_plan,
+        workdir,
+    ) = _run_decomposition_for_skill(
+        issue=issue,
+        repo=repo,
+        coder=coder,
+        plan_file=args.plan_file,
+        args=args,
+        dry_run=dry_run,
+        mode=mode,
+        approved_plan=approved_plan,
+    )
+
+    if not created:
+        raise AgentLoopError("Plan decomposition produced no phases.")
+
+    first_phase = created[0]
+    result_json: dict = {
+        "issue": issue,
+        "plan_hash": plan_hash,
+        "mode": mode,
+        "dry_run": dry_run,
+        "decomposition_reused": bool(decomposition_result.get("reused")),
+        "phase": _decomposition_phase_json(
+            1,
+            first_phase.phase,
+            issue_url=first_phase.issue_url,
+            issue_number=first_phase.issue_number,
+        ),
+    }
+
+    if first_phase.phase.automation != "agent-pr":
+        result_json.update({
+            "state": "stopped",
+            "reason": "first phase requires human work",
+            "automation": first_phase.phase.automation,
+        })
         print(json.dumps(result_json, indent=2))
+        print(
+            f"hint: issue #{issue} decomposed; phase 1 requires human work "
+            f"({first_phase.phase.automation}), so implementation is stopping.",
+            file=sys.stderr,
+        )
+        return
+
+    phase_parent_context = getattr(first_phase.phase, "parent_context", None) or approved_plan
+
+    if dry_run:
+        from coding_review_agent_loop.github import IssueContext
+
+        preview_issue_number = first_phase.issue_number or 0
+        preview_context = IssueContext(
+            number=preview_issue_number,
+            repo=repo,
+            title=first_phase.phase.title,
+            body=phase_parent_context,
+            url=first_phase.issue_url,
+            comments=(),
+            human_requirements=getattr(parent_issue_context, "human_requirements", ()),
+        )
+        impl_config = _implementation_config(
+            repo=repo, coder=coder, workdir=workdir, base=base, dry_run=True,
+        )
+        impl_runner = Runner(dry_run=True)
+        impl_result = _run_child_or_one_shot_implementation(
+            issue=preview_issue_number,
+            repo=repo,
+            coder=coder,
+            base=base,
+            dry_run=True,
+            workdir=workdir,
+            approved_plan=phase_parent_context,
+            issue_context=preview_context,
+            config=impl_config,
+            runner=impl_runner,
+            post_one_shot_handoff=False,
+        )
+        result_json.update({
+            "state": "would-implement",
+            "would_post_phase_handoff": True,
+            "child_implementation_preview": impl_result,
+        })
+        print(json.dumps(result_json, indent=2))
+        return
+
+    if first_phase.issue_number is None:
+        raise AgentLoopError(
+            "Cannot implement first decomposed phase because its child issue number "
+            "was not available from GitHub CLI output."
+        )
+
+    from coding_review_agent_loop.decomposition import (
+        find_existing_phase_implementation_handoff,
+        post_phase_implementation_handoff_comment,
+    )
+    from coding_review_agent_loop.github import get_issue_context
+
+    handoff = find_existing_phase_implementation_handoff(
+        parent_issue_context.comments,
+        parent_issue=issue,
+        plan_hash=plan_hash,
+        mode=mode,
+        phase_index=1,
+        child_issue_number=first_phase.issue_number,
+    )
+    if handoff is not None:
+        result_json.update({
+            "state": "handoff-exists",
+            "handoff_reused": True,
+            "child_issue": handoff.child_issue_number,
+            "child_issue_url": handoff.child_issue_url,
+        })
+        print(json.dumps(result_json, indent=2))
+        print(
+            f"hint: issue #{issue} already handed off phase 1 to child issue "
+            f"#{handoff.child_issue_number}; resume directly with "
+            f"`agent-loop issue {handoff.child_issue_number}`.",
+            file=sys.stderr,
+        )
+        return
+
+    post_phase_implementation_handoff_comment(
+        decompose_runner,
+        config=decompose_config,
+        parent_issue=issue,
+        mode=mode,
+        plan_hash=plan_hash,
+        phase_index=1,
+        created=first_phase,
+    )
+
+    impl_config = _implementation_config(
+        repo=repo, coder=coder, workdir=workdir, base=base, dry_run=False,
+    )
+    impl_runner = Runner(dry_run=False)
+    child_issue_context = get_issue_context(
+        impl_runner,
+        config=impl_config,
+        issue_number=first_phase.issue_number,
+    )
+    impl_result = _run_child_or_one_shot_implementation(
+        issue=first_phase.issue_number,
+        repo=repo,
+        coder=coder,
+        base=base,
+        dry_run=False,
+        workdir=workdir,
+        approved_plan=phase_parent_context,
+        issue_context=child_issue_context,
+        config=impl_config,
+        runner=impl_runner,
+        post_one_shot_handoff=False,
+    )
+    result_json.update({
+        "state": "implemented",
+        "handoff_posted": True,
+        "child_issue": first_phase.issue_number,
+        "child_implementation": impl_result,
+    })
+    print(json.dumps(result_json, indent=2))
+    print(
+        f"hint: phase 1 PR #{impl_result['pr']} opened from child issue "
+        f"#{first_phase.issue_number}; review it with run-pr-round.",
+        file=sys.stderr,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2826,6 +3124,31 @@ def main() -> None:
     p_impl.add_argument("--workdir-gemini", default=None)
     p_impl.add_argument("--dry-run", action="store_true")
 
+    # run-implement-by-phase
+    p_impl_phase = subparsers.add_parser(
+        "run-implement-by-phase",
+        help="Reversed roles: decompose an approved plan, then implement phase 1 "
+             "when it is agent-pr (#319).",
+    )
+    p_impl_phase.add_argument("--issue", type=int, required=True)
+    p_impl_phase.add_argument("--repo", required=True)
+    p_impl_phase.add_argument(
+        "--coder", choices=["codex", "gemini"], required=True,
+        help="External coder that decomposes and implements the first agent phase.",
+    )
+    p_impl_phase.add_argument("--plan-file", required=True, help="Approved plan to decompose and implement.")
+    p_impl_phase.add_argument(
+        "--base", default="main", help="Branch to base the child PR on (default: main).",
+    )
+    p_impl_phase.add_argument(
+        "--workdir", default=None,
+        help="Push-capable clone where the coder commits/pushes/opens the child PR "
+             "(required for a real run).",
+    )
+    p_impl_phase.add_argument("--workdir-codex", default=None)
+    p_impl_phase.add_argument("--workdir-gemini", default=None)
+    p_impl_phase.add_argument("--dry-run", action="store_true")
+
     # run-decompose
     p_decompose = subparsers.add_parser(
         "run-decompose",
@@ -2881,6 +3204,7 @@ def main() -> None:
         "retry-validate": cmd_retry_validate,
         "complete-host-review": cmd_complete_host_review,
         "run-implement": cmd_run_implement,
+        "run-implement-by-phase": cmd_run_implement_by_phase,
         "run-decompose": cmd_run_decompose,
         "run-task-round": cmd_run_task_round,
     }
