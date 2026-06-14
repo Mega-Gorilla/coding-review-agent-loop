@@ -18,7 +18,12 @@ from coding_review_agent_loop.agents.base import AgentName
 from coding_review_agent_loop.config import AgentLoopConfig
 from coding_review_agent_loop.github import IssueContext, IssueComment
 from coding_review_agent_loop.memory import AgentMemoryContext
-from coding_review_agent_loop.prompts import build_plan_review_prompt, build_review_prompt
+from coding_review_agent_loop.prompts import (
+    build_issue_plan_prompt,
+    build_plan_review_prompt,
+    build_plan_revision_prompt,
+    build_review_prompt,
+)
 from coding_review_agent_loop.round_state import _deserialize_unresolved_item
 
 
@@ -205,3 +210,59 @@ def build_review_prompt_for_skill(
     if pr_diff:
         prompt += f"\n\n## PR diff\n\n```diff\n{pr_diff}\n```\n"
     return prompt
+
+
+def build_plan_prompt_for_skill(
+    issue_dict: dict,
+    *,
+    repo: str,
+    coder: AgentName,
+    reviewers: Sequence[AgentName],
+    workdir: str,
+    memory: AgentMemoryContext | None = None,
+) -> str:
+    """Build the round-1 coder (plan) prompt for an external coder (#307).
+
+    Sets the coder's checkout dir to ``workdir`` so the embedded checkout guidance
+    points at the real run directory.
+    """
+    config = make_minimal_config(
+        repo, coder, tuple(reviewers), reviewer=coder, workdir=workdir,
+    )
+    issue_context = _make_issue_context(issue_dict)
+    return build_issue_plan_prompt(issue_context.number, config, memory, issue_context)
+
+
+def build_plan_revision_prompt_for_skill(
+    issue_dict: dict,
+    *,
+    repo: str,
+    coder: AgentName,
+    reviewers: Sequence[AgentName],
+    workdir: str,
+    round_number: int,
+    previous_plan: str,
+    reviewer_feedback: str,
+    prior_items_raw: list[dict],
+    memory: AgentMemoryContext | None = None,
+) -> str:
+    """Build the round-N+1 coder (plan revision) prompt for an external coder (#307).
+
+    ``reviewer_feedback`` is the aggregated prose feedback (each reviewer's summary
+    + item texts) the caller assembles from the resume's completed reviewers.
+    """
+    config = make_minimal_config(
+        repo, coder, tuple(reviewers), reviewer=coder, workdir=workdir,
+    )
+    issue_context = _make_issue_context(issue_dict)
+    unresolved = [_deserialize_unresolved_item(item) for item in prior_items_raw]
+    return build_plan_revision_prompt(
+        issue_context.number,
+        round_number,
+        previous_plan,
+        reviewer_feedback,
+        config,
+        memory,
+        issue_context,
+        unresolved_items=unresolved,
+    )
