@@ -923,6 +923,52 @@ def _complete_reviewer_turn(
 # Per-reviewer run
 # ---------------------------------------------------------------------------
 
+# Signatures of an external agent/CLI *failure* — a turn that produced no usable
+# review (e.g. Gemini reaching for a missing tool and returning an empty/malformed
+# stream, #322) — as opposed to a malformed-but-content-bearing review the user can
+# repair. Kept narrow and CLI-specific so a genuine review (even a plain-text one
+# with findings) is never misclassified; matched only after validation has failed.
+_AGENT_UNAVAILABLE_SIGNATURES = (
+    "invalid stream",
+    "empty response or malformed tool call",
+    "error executing tool",
+    "not found. did you mean one of",
+)
+
+
+def _is_agent_unavailable_output(text: str) -> str | None:
+    """Return a short reason if ``text`` is an agent/CLI failure (no usable review),
+    else ``None``. Conservative: only truly-empty output or a known tooling-failure
+    signature qualifies — a content-bearing response stays on the repair path."""
+    stripped = text.strip()
+    if not stripped:
+        return "empty response"
+    lowered = stripped.lower()
+    for signature in _AGENT_UNAVAILABLE_SIGNATURES:
+        if signature in lowered:
+            return signature
+    return None
+
+
+def _round_overall_state(
+    *,
+    pending_reviewers: list[str],
+    any_reviewer_blocked: bool,
+    unavailable_reviewers: list[str],
+) -> str:
+    """Top-level round state by precedence (#314, #322): pending (a host review is
+    outstanding) > blocking > incomplete (a configured reviewer was unavailable) >
+    approved. Never reports approved/blocking while a host review is pending, and
+    never approved while a reviewer was unavailable."""
+    if pending_reviewers:
+        return "pending"
+    if any_reviewer_blocked:
+        return "blocking"
+    if unavailable_reviewers:
+        return "incomplete"
+    return "approved"
+
+
 def _run_reviewer(
     *,
     agent: str,
@@ -989,6 +1035,32 @@ def _run_reviewer(
             work_dir=tmpdir,
         )
     except _ValidationError as exc:
+        # Distinguish an agent/CLI failure (no usable review -> skip this reviewer
+        # for the round, re-attempt on rerun) from a fixable malformed review (keep
+        # the retry-validate handoff) (#322).
+        raw_text = raw_output.read_text(encoding="utf-8") if raw_output.exists() else ""
+        reason = _is_agent_unavailable_output(raw_text)
+        if reason is not None:
+            print(
+                f"skill_runner: {agent_cap} unavailable: agent/CLI failure ({reason}) — "
+                f"not a fixable review; it will be re-attempted on rerun. "
+                f"Raw response saved to: {repair_dir}/raw.md",
+                file=sys.stderr,
+            )
+            reviewer_usage = None
+            if usage_file.exists():
+                try:
+                    reviewer_usage = json.loads(usage_file.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    reviewer_usage = None
+            return {
+                "reviewer_name": agent_cap,
+                "state": "unavailable",
+                "reason": reason,
+                "blocking_items": [],
+                "new_items": [],
+                "usage": reviewer_usage,
+            }
         print(str(exc), file=sys.stderr)
         print(f"skill_runner: raw response saved to: {repair_dir}/raw.md", file=sys.stderr)
         dry_run_flag = " --dry-run" if dry_run else ""
@@ -1694,6 +1766,7 @@ def cmd_run_plan_round(args: argparse.Namespace) -> None:
     round_reviewer_records: list[dict] = []
     round_blocking_items: list[dict] = []
     round_approved_reviewers: list[str] = []
+    unavailable_reviewers: list[str] = []
     any_reviewer_blocked = False
     if not is_new_round:
         for record in resume.get("completed_reviewer_data", []):
@@ -1772,6 +1845,12 @@ def cmd_run_plan_round(args: argparse.Namespace) -> None:
                 tmpdir=tmpdir,
                 item_id_offset=item_id_offset,
             )
+            if record["state"] == "unavailable":
+                # Agent/CLI failure: skip this reviewer for the round (re-attempted
+                # on rerun); still fold its usage into the aggregate (#322).
+                unavailable_reviewers.append(record["reviewer_name"])
+                round_reviewer_records.append(record)
+                continue
             current_round_items.extend(record["new_items"])
             round_reviewer_records.append(record)
             if record["state"] == "blocking":
@@ -1819,10 +1898,15 @@ def cmd_run_plan_round(args: argparse.Namespace) -> None:
     # report approved/blocking while a reviewer is still outstanding (#307).
     # Otherwise use any_reviewer_blocked to catch reviewers that blocked via
     # same-plan followups only.
-    if pending_reviewers:
-        overall_state = "pending"
-    else:
-        overall_state = "blocking" if any_reviewer_blocked else "approved"
+    # Precedence: pending (host review outstanding) > blocking > incomplete
+    # (a configured reviewer was unavailable) > approved. Both reviewer lists are
+    # always surfaced when non-empty so neither the host handoff nor a failed
+    # reviewer is ever hidden, and a round is never falsely reported approved (#322).
+    overall_state = _round_overall_state(
+        pending_reviewers=pending_reviewers,
+        any_reviewer_blocked=any_reviewer_blocked,
+        unavailable_reviewers=unavailable_reviewers,
+    )
     result_json = {
         "state": overall_state,
         "round_number": new_round_number,
@@ -1831,6 +1915,8 @@ def cmd_run_plan_round(args: argparse.Namespace) -> None:
     }
     if pending_reviewers:
         result_json["pending_reviewers"] = pending_reviewers
+    if unavailable_reviewers:
+        result_json["unavailable_reviewers"] = unavailable_reviewers
     # Include the external coder's usage (if any) alongside the reviewers'.
     usage_records = list(round_reviewer_records)
     if coder_usage is not None:
@@ -1888,6 +1974,7 @@ def cmd_run_pr_round(args: argparse.Namespace) -> None:
     round_reviewer_records: list[dict] = []
     round_blocking_items: list[dict] = []
     round_approved_reviewers: list[str] = []
+    unavailable_reviewers: list[str] = []
     any_reviewer_blocked = False
     if not is_new_round:
         for record in resume.get("completed_reviewer_data", []):
@@ -1975,6 +2062,12 @@ def cmd_run_pr_round(args: argparse.Namespace) -> None:
                 tmpdir=tmpdir,
                 item_id_offset=item_id_offset,
             )
+            if record["state"] == "unavailable":
+                # Agent/CLI failure: skip this reviewer for the round (re-attempted
+                # on rerun); still fold its usage into the aggregate (#322).
+                unavailable_reviewers.append(record["reviewer_name"])
+                round_reviewer_records.append(record)
+                continue
             current_round_items.extend(record["new_items"])
             round_reviewer_records.append(record)
             if record["state"] == "blocking":
@@ -2022,10 +2115,15 @@ def cmd_run_pr_round(args: argparse.Namespace) -> None:
     # A configured-but-incomplete host reviewer makes the round "pending": never
     # report approved/blocking (or publish followups / run the test gate, which
     # belong to a settled round) while a reviewer is still outstanding (#314).
-    if pending_reviewers:
-        overall_state = "pending"
-    else:
-        overall_state = "blocking" if any_reviewer_blocked else "approved"
+    # Precedence: pending (host review outstanding) > blocking > incomplete
+    # (a configured reviewer was unavailable) > approved. Both reviewer lists are
+    # always surfaced when non-empty so neither the host handoff nor a failed
+    # reviewer is ever hidden, and a round is never falsely reported approved (#322).
+    overall_state = _round_overall_state(
+        pending_reviewers=pending_reviewers,
+        any_reviewer_blocked=any_reviewer_blocked,
+        unavailable_reviewers=unavailable_reviewers,
+    )
     result_json = {
         "state": overall_state,
         "round_number": new_round_number,
@@ -2034,10 +2132,13 @@ def cmd_run_pr_round(args: argparse.Namespace) -> None:
     }
     if pending_reviewers:
         result_json["pending_reviewers"] = pending_reviewers
+    if unavailable_reviewers:
+        result_json["unavailable_reviewers"] = unavailable_reviewers
     # Optional test gate: reports pass/fail; never blocks or merges. An explicit
     # empty --test-command "" is reported as a setup error, not silently skipped.
-    # Skipped while the round is pending a host review.
-    gate = None if pending_reviewers else _maybe_test_gate(
+    # Skipped while the round is unsettled (pending a host review, or a reviewer
+    # was unavailable) so it isn't read as a terminal result (#314, #322).
+    gate = None if (pending_reviewers or unavailable_reviewers) else _maybe_test_gate(
         getattr(args, "test_command", None),
         getattr(args, "test_workdir", "."),
         dry_run=dry_run,

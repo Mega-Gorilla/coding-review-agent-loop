@@ -262,6 +262,20 @@ Plan-loop onward (including the optional Implement step + PR-loop).
              "totals": { "call_count": 2, "total_tokens": 250, ... },
              "per_agent": { "codex": {...}, "gemini": {...} } }
   ```
+- **Reviewer resilience** (plan-loop and PR-loop): if an external reviewer's CLI
+  fails to produce a usable review (an agent/tooling failure — e.g. an empty or
+  malformed-tool-call response — *not* a fixable malformed review), the skill does
+  **not** abort the round. It marks that reviewer **unavailable**, continues with
+  the remaining reviewers, and lists it under `unavailable_reviewers`; the reviewer
+  is re-attempted on the next run (or drop it from `--reviewers` to proceed). A
+  round with an unavailable reviewer is never reported `approved`: its `state` is
+  `incomplete` (or `blocking`/`pending` if those apply first). A genuinely
+  malformed-but-content-bearing review still uses the `retry-validate` repair path.
+- **Round states.** `approved` (all configured reviewers signed off) · `blocking`
+  (a reviewer reported must-fix items) · `pending` (a host `claude` review handoff
+  is outstanding — complete it with `complete-host-review`) · `incomplete` (a
+  configured reviewer was unavailable; rerun). Precedence when several apply:
+  `pending` > `blocking` > `incomplete` > `approved`.
 - **Merge is always a human decision.** The skill never runs CI-wait or
   auto-merge; every mode stops at "ready to merge."
 
