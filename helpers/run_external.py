@@ -302,6 +302,13 @@ def main() -> None:
             f"run_external: agent invocation failed ({reason}): {failure_text}",
             file=sys.stderr,
         )
+        # Write the failure text to --output (not just stderr) so a caller can read
+        # and classify it — e.g. the skill's reviewer-unavailable path (#322) — and
+        # decide whether to skip the reviewer rather than only seeing a non-zero exit.
+        try:
+            output_path.write_text(failure_text or "", encoding="utf-8")
+        except OSError:
+            pass
         sys.exit(1)
 
     assert result is not None  # loop either set result or exited

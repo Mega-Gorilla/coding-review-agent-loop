@@ -945,6 +945,21 @@ class TestRunExternalRetries:
         assert calls["n"] == 1  # transient, but retries disabled
         assert sleeps == []
 
+    def test_failure_writes_failure_text_to_output(self, monkeypatch) -> None:
+        # On a non-transient agent failure, run_external exits non-zero AND writes the
+        # failure text to --output so a caller can classify it (#322).
+        from coding_review_agent_loop.agents.base import AgentResult
+        outcomes = [AgentResult(
+            text="",
+            raw_output="[ERROR] Invalid stream: empty response or malformed tool call",
+            returncode=1,
+        )]
+        _calls, _sleeps, output_path, exit_code = self._invoke(
+            monkeypatch, "gemini", outcomes, max_retries=0
+        )
+        assert exit_code == 1
+        assert "Invalid stream" in Path(output_path).read_text(encoding="utf-8")
+
 
 # ---------------------------------------------------------------------------
 # helpers/prompt_builders.py  checkout path embedding (#297)
@@ -2620,10 +2635,17 @@ class TestRunReviewerUnavailable:
     def test_agent_failure_returns_unavailable_sentinel(self, monkeypatch, tmp_path) -> None:
         import helpers.skill_runner as sr
 
-        def fake_run_helper(*args, **_kw):
+        # Simulate run_external exiting NON-ZERO (the empty/invalid-stream path) while
+        # writing its failure text to --output, and honor check= so a check=True call
+        # would abort. The fix passes check=False, so _run_reviewer must reach the
+        # classifier and return the unavailable sentinel rather than SystemExit (#322).
+        def fake_run_helper(*args, check=True, **_kw):
             if "helpers.run_external" in args:
                 out = Path(args[args.index("--output") + 1])
                 out.write_text(_GEMINI_CLI_FAILURE, encoding="utf-8")
+                if check:
+                    raise SystemExit(1)
+                return subprocess.CompletedProcess(args, 1, "", "")
             return subprocess.CompletedProcess(args, 0, "", "")
 
         monkeypatch.setattr(sr, "_run_helper", fake_run_helper)

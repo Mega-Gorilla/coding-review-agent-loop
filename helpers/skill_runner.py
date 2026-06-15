@@ -1001,6 +1001,10 @@ def _run_reviewer(
     _write_json(prior_items_file, next_prior_items_raw)
 
     # --- Run agent ---
+    # check=False: a non-zero run_external exit (agent/CLI failure, which now writes
+    # its failure text to --output, #322) must not abort the whole round here — let
+    # the validation + agent-unavailable classification below decide whether to skip
+    # this reviewer and continue.
     usage_file = tmpdir / f"{agent}-usage.json"
     _run_helper(
         "helpers.run_external",
@@ -1012,7 +1016,12 @@ def _run_reviewer(
         "--flow", flow,
         "--usage-output", str(usage_file),
         *(["--dry-run"] if dry_run else []),
+        check=False,
     )
+    if not raw_output.exists():
+        # run_external failed before writing anything; synthesize an empty body so
+        # the classifier marks the reviewer unavailable instead of crashing.
+        _write_text(raw_output, "")
 
     # Save raw response to stable repair dir BEFORE normalization
     repair_dir = _save_raw_to_repair_dir(
