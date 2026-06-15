@@ -945,6 +945,21 @@ class TestRunExternalRetries:
         assert calls["n"] == 1  # transient, but retries disabled
         assert sleeps == []
 
+    def test_failure_writes_failure_text_to_output(self, monkeypatch) -> None:
+        # On a non-transient agent failure, run_external exits non-zero AND writes the
+        # failure text to --output so a caller can classify it (#322).
+        from coding_review_agent_loop.agents.base import AgentResult
+        outcomes = [AgentResult(
+            text="",
+            raw_output="[ERROR] Invalid stream: empty response or malformed tool call",
+            returncode=1,
+        )]
+        _calls, _sleeps, output_path, exit_code = self._invoke(
+            monkeypatch, "gemini", outcomes, max_retries=0
+        )
+        assert exit_code == 1
+        assert "Invalid stream" in Path(output_path).read_text(encoding="utf-8")
+
 
 # ---------------------------------------------------------------------------
 # helpers/prompt_builders.py  checkout path embedding (#297)
@@ -2551,3 +2566,147 @@ class TestRunImplementByPhase:
             assert output["phase"]["automation"] == "agent-pr"
             assert output["would_post_phase_handoff"] is True
             assert output["child_implementation_preview"]["pr"] == 0
+
+
+# ---------------------------------------------------------------------------
+# helpers/skill_runner.py — resilient reviewer turns (#322)
+# ---------------------------------------------------------------------------
+
+_GEMINI_CLI_FAILURE = (
+    'Error executing tool run_shell_command: Tool "run_shell_command" not found. '
+    "Did you mean one of: grep_search?\n"
+    "[ERROR] Invalid stream: The model returned an empty response or malformed tool call.\n"
+)
+
+
+class TestAgentUnavailableClassifier:
+    def test_tooling_signature_is_unavailable(self) -> None:
+        from helpers.skill_runner import _is_agent_unavailable_output
+        assert _is_agent_unavailable_output(_GEMINI_CLI_FAILURE) is not None
+
+    def test_empty_output_is_unavailable(self) -> None:
+        from helpers.skill_runner import _is_agent_unavailable_output
+        assert _is_agent_unavailable_output("   \n  ") == "empty response"
+
+    def test_schema_invalid_json_is_not_unavailable(self) -> None:
+        from helpers.skill_runner import _is_agent_unavailable_output
+        # JSON but wrong schema -> repairable, not unavailable.
+        assert _is_agent_unavailable_output('{"foo": "bar"}') is None
+
+    def test_content_bearing_prose_is_not_unavailable(self) -> None:
+        from helpers.skill_runner import _is_agent_unavailable_output
+        # A plain-text review with actionable findings must stay on the repair path.
+        prose = "This plan is missing error handling in step 3; that is blocking."
+        assert _is_agent_unavailable_output(prose) is None
+
+
+class TestRoundOverallState:
+    def test_precedence(self) -> None:
+        from helpers.skill_runner import _round_overall_state
+        f = _round_overall_state
+        # pending wins over everything (incl. an unavailable external reviewer).
+        assert f(pending_reviewers=["Claude"], any_reviewer_blocked=True,
+                 unavailable_reviewers=["Gemini"]) == "pending"
+        assert f(pending_reviewers=["Claude"], any_reviewer_blocked=False,
+                 unavailable_reviewers=["Gemini"]) == "pending"
+        # then blocking, then incomplete (unavailable), then approved.
+        assert f(pending_reviewers=[], any_reviewer_blocked=True,
+                 unavailable_reviewers=["Gemini"]) == "blocking"
+        assert f(pending_reviewers=[], any_reviewer_blocked=False,
+                 unavailable_reviewers=["Gemini"]) == "incomplete"
+        assert f(pending_reviewers=[], any_reviewer_blocked=False,
+                 unavailable_reviewers=[]) == "approved"
+
+
+class TestRunReviewerUnavailable:
+    def _ctx(self):
+        return {"reviewer": "Gemini", "prior_items": [], "current_round_items": []}
+
+    def _call(self, tmp_path):
+        import helpers.skill_runner as sr
+        return sr._run_reviewer(
+            agent="gemini", prompt_text="review it", context=self._ctx(),
+            round_subject="subj", next_prior_items_raw=[], new_round_number=1,
+            issue=1, repo="o/r", flow="plan", role="reviewer",
+            state_key="plan_review", workdir=str(tmp_path), dry_run=False,
+            tmpdir=tmp_path, item_id_offset=0,
+        )
+
+    def test_agent_failure_returns_unavailable_sentinel(self, monkeypatch, tmp_path) -> None:
+        import helpers.skill_runner as sr
+
+        # Simulate run_external exiting NON-ZERO (the empty/invalid-stream path) while
+        # writing its failure text to --output, and honor check= so a check=True call
+        # would abort. The fix passes check=False, so _run_reviewer must reach the
+        # classifier and return the unavailable sentinel rather than SystemExit (#322).
+        def fake_run_helper(*args, check=True, **_kw):
+            if "helpers.run_external" in args:
+                out = Path(args[args.index("--output") + 1])
+                out.write_text(_GEMINI_CLI_FAILURE, encoding="utf-8")
+                if check:
+                    raise SystemExit(1)
+                return subprocess.CompletedProcess(args, 1, "", "")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        monkeypatch.setattr(sr, "_run_helper", fake_run_helper)
+        record = self._call(tmp_path)
+        assert record["state"] == "unavailable"
+        assert record["reason"]
+        assert record["reviewer_name"] == "Gemini"
+
+    def test_content_bearing_failure_aborts_to_repair(self, monkeypatch, tmp_path) -> None:
+        import helpers.skill_runner as sr
+
+        def fake_run_helper(*args, **_kw):
+            if "helpers.run_external" in args:
+                out = Path(args[args.index("--output") + 1])
+                # Content-bearing but invalid review -> repair path (SystemExit), not unavailable.
+                out.write_text("I reviewed this and it looks fine, ship it.", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        monkeypatch.setattr(sr, "_run_helper", fake_run_helper)
+        with pytest.raises(SystemExit):
+            self._call(tmp_path)
+
+    def test_round_continues_with_unavailable_external_and_pending_host(
+        self, monkeypatch, tmp_path, capsys
+    ) -> None:
+        """gemini unavailable + claude host-review pending: the round does not abort,
+        reports state=pending, and surfaces BOTH reviewer lists (no false approval,
+        host handoff not hidden)."""
+        import helpers.skill_runner as sr
+
+        plan = tmp_path / "plan.md"
+        plan.write_text(_VALID_PLAN_STATE, encoding="utf-8")
+
+        monkeypatch.setattr(sr, "_build_resume", lambda *a, **k: {})
+        monkeypatch.setattr(
+            sr, "_fetch_issue_json",
+            lambda *a, **k: {"number": 1, "title": "t", "body": "b", "url": "u"},
+        )
+
+        def fake_run_helper(*args, **_kw):
+            # Only the external reviewer (gemini) goes through run_external here; make
+            # it the Gemini-CLI failure so it is classified unavailable.
+            if "helpers.run_external" in args:
+                out = Path(args[args.index("--output") + 1])
+                out.write_text(_GEMINI_CLI_FAILURE, encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+
+        monkeypatch.setattr(sr, "_run_helper", fake_run_helper)
+
+        sr.cmd_run_plan_round(types.SimpleNamespace(
+            issue=1, repo="o/r", reviewers=["gemini", "claude"],
+            coder="claude", plan_file=str(plan), dry_run=True,
+            agent_memory=False, refresh_agent_memory=False,
+            workdir=str(tmp_path), workdir_codex=None, workdir_gemini=None,
+        ))
+
+        out = capsys.readouterr().out
+        start = out.rfind("\n{")
+        if start < 0:
+            start = out.find("{")
+        output = json.loads(out[start:].strip())
+        assert output["state"] == "pending"
+        assert output["pending_reviewers"] == ["Claude"]
+        assert output["unavailable_reviewers"] == ["Gemini"]
