@@ -199,6 +199,7 @@ class FakeRunner(Runner):
         claude_outputs=None,
         codex_outputs=None,
         gemini_outputs=None,
+        antigravity_outputs=None,
         issue_payload=None,
         issue_comments=None,
         pr_payload=None,
@@ -227,6 +228,7 @@ class FakeRunner(Runner):
         self.claude_outputs = list(claude_outputs or [])
         self.codex_outputs = list(codex_outputs or [])
         self.gemini_outputs = list(gemini_outputs or [])
+        self.antigravity_outputs = list(antigravity_outputs or [])
         self.issue_payload = {
             "number": 56,
             "state": "open",
@@ -440,6 +442,7 @@ class FakeRunner(Runner):
         progress_interval_seconds,
         check=True,
         env=None,
+        use_pty=False,
     ):
         cmd, cwd_path = self._record_command(args, cwd)
         log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -491,6 +494,18 @@ class FakeRunner(Runner):
             self._maybe_advance_git_head_for_agent_pr(output)
             log_path.write_text(f"$ {' '.join(cmd)}\n\n{output}", encoding="utf-8")
             return CommandResult(cmd, cwd_path, output, "", returncode)
+
+        if cmd[:1] == ["agy"]:
+            output = self._next_agent_output(self.antigravity_outputs)
+            if isinstance(output, dict):
+                stdout = output.get("stdout", "")
+                returncode = output.get("returncode", 0)
+            else:
+                stdout, returncode = output
+            self._maybe_write_public_response_file(cmd)
+            self._maybe_advance_git_head_for_agent_pr(stdout)
+            log_path.write_text(f"$ {' '.join(cmd)}\n\n{stdout}", encoding="utf-8")
+            return CommandResult(cmd, cwd_path, stdout, "", returncode)
 
         return self.run(args, cwd=cwd, check=check)
 
@@ -11544,7 +11559,8 @@ def test_omitted_agent_dirs_default_to_repo_scoped_temp_checkouts(monkeypatch, t
     assert config.codex_dir == default_agent_workdir("OWNER/REPO", "codex").resolve()
     assert config.claude_dir == default_agent_workdir("OWNER/REPO", "claude").resolve()
     assert config.gemini_dir == default_agent_workdir("OWNER/REPO", "gemini").resolve()
-    assert set(config.auto_agent_dirs) == {"claude", "codex", "gemini"}
+    assert config.antigravity_dir == default_agent_workdir("OWNER/REPO", "antigravity").resolve()
+    assert set(config.auto_agent_dirs) == {"claude", "codex", "gemini", "antigravity"}
     assert config.agent_memory_dir == (
         cache_home / "coding-review-agent-loop" / "repos" / "OWNER-REPO" / "memory"
     ).resolve()
@@ -11709,7 +11725,7 @@ def test_explicit_agent_dirs_are_preserved_when_others_default(tmp_path):
 
     assert config.codex_dir == codex_dir
     assert config.claude_dir == default_agent_workdir("OWNER/REPO", "claude").resolve()
-    assert set(config.auto_agent_dirs) == {"claude", "gemini"}
+    assert set(config.auto_agent_dirs) == {"claude", "gemini", "antigravity"}
 
 
 def test_relative_log_dir_defaults_under_active_coder_workdir(tmp_path):
@@ -17579,3 +17595,222 @@ def test_run_validated_agent_deterministic_strip_skipped_when_ledger_incomplete(
 
     repair_mock.assert_not_called()
     assert "item-1" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Antigravity (agy) backend + Gemini retirement guidance (#215)
+# ---------------------------------------------------------------------------
+
+
+def test_antigravity_backend_command_and_prefers_response_file(tmp_path):
+    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+    agy_dir = tmp_path / "antigravity"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    runner = FakeRunner(
+        antigravity_outputs=[("stdout fallback text", 0)],
+        public_response_outputs=["response file text"],
+    )
+    config = make_config(
+        tmp_path,
+        antigravity_dir=agy_dir,
+        antigravity_cmd="agy",
+        antigravity_model="Gemini 3.1 Pro (High)",
+        antigravity_args=("--dangerously-skip-permissions",),
+    )
+    result = AntigravityBackend().run(runner, config, "Review this PR.", run_id="run-1")
+    cmd = runner.commands[-1][0]
+    assert cmd[0] == "agy"
+    assert cmd[cmd.index("--model") + 1] == "Gemini 3.1 Pro (High)"
+    assert "--dangerously-skip-permissions" in cmd
+    # The prompt is the value of --print and must be the last argument (agy's
+    # --print/--prompt consumes the next token, not a trailing positional).
+    assert cmd[-2] == "--print"
+    assert "Review this PR." in cmd[-1]
+    assert result.text == "response file text"
+    assert result.session_id is None  # agy --print exposes no conversation id
+
+
+def test_antigravity_backend_stdout_fallback(tmp_path):
+    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+    agy_dir = tmp_path / "antigravity"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    runner = FakeRunner(antigravity_outputs=[("plain stdout review", 0)])
+    config = make_config(tmp_path, antigravity_dir=agy_dir)
+    result = AntigravityBackend().run(runner, config, "Review this PR.", run_id="run-1")
+    assert result.text == "plain stdout review"
+    assert result.text_source == "stdout"
+
+
+def test_antigravity_backend_strips_public_response_marker(tmp_path):
+    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+    from coding_review_agent_loop.protocol import PUBLIC_RESPONSE_MARKER
+    agy_dir = tmp_path / "antigravity"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    stdout = (
+        "I will inspect the diff and run the tests.\n"
+        f"{PUBLIC_RESPONSE_MARKER}\n"
+        "STATE: approved\n\nLooks good to me."
+    )
+    runner = FakeRunner(antigravity_outputs=[(stdout, 0)])
+    config = make_config(tmp_path, antigravity_dir=agy_dir)
+    result = AntigravityBackend().run(runner, config, "Review this PR.", run_id="run-1")
+    assert result.text == "STATE: approved\n\nLooks good to me."
+    assert result.text_source == "stdout_marker"
+    assert "I will inspect" not in result.text
+
+
+def test_antigravity_backend_resume_uses_conversation(tmp_path):
+    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+    agy_dir = tmp_path / "antigravity"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    runner = FakeRunner(antigravity_outputs=[("ok", 0)])
+    config = make_config(tmp_path, antigravity_dir=agy_dir)
+    AntigravityBackend().run(runner, config, "x", session_id="conv-7", run_id="r")
+    cmd = runner.commands[-1][0]
+    assert cmd[cmd.index("--conversation") + 1] == "conv-7"
+
+
+def test_runner_pty_reports_tty_and_strips_ansi(tmp_path):
+    """The real PTY path: the child sees a TTY and ANSI codes are stripped."""
+    import sys
+    from coding_review_agent_loop.runner import Runner, strip_ansi
+
+    assert strip_ansi("\x1b[31mred\x1b[0m\r\ndone") == "red\ndone"
+
+    program = (
+        "import sys\n"
+        "sys.stdout.write('istty=%s\\n' % sys.stdout.isatty())\n"
+        "sys.stdout.write('\\x1b[32mGREEN\\x1b[0m\\n')\n"
+    )
+    log_path = tmp_path / "logs" / "pty.log"
+    result = Runner().run_with_log(
+        [sys.executable, "-c", program],
+        cwd=tmp_path,
+        log_path=log_path,
+        label="PtyProbe",
+        progress_interval_seconds=999,
+        check=True,
+        use_pty=True,
+    )
+    assert "istty=True" in result.stdout
+    assert "GREEN" in result.stdout
+    assert "\x1b[" not in result.stdout  # ANSI stripped from captured output
+    assert result.returncode == 0
+
+
+def test_antigravity_registry():
+    from coding_review_agent_loop.agents.registry import (
+        agent_display_name,
+        agent_signature,
+        get_backend,
+    )
+    assert agent_display_name("antigravity") == "Antigravity"
+    assert agent_signature("antigravity") == "Google Antigravity"
+    assert get_backend("antigravity").name == "antigravity"
+
+
+def test_config_from_args_antigravity_defaults(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args([
+        "pr", "123", "--repo", "OWNER/REPO",
+        "--coder", "antigravity", "--reviewer", "codex",
+        "--codex-dir", str(tmp_path / "codex"),
+        "--dangerous-agent-permissions",
+    ])
+    config = config_from_args(args, FakeRunner())
+    assert config.coder == "antigravity"
+    assert config.antigravity_cmd == "agy"
+    assert config.antigravity_model == "Gemini 3.1 Pro (High)"
+    assert config.antigravity_args == ("--dangerously-skip-permissions",)
+    assert config.antigravity_dir == default_agent_workdir("OWNER/REPO", "antigravity").resolve()
+    # antigravity is the coder -> primary/log dir lives under its checkout.
+    assert str(config.log_dir).startswith(str(config.antigravity_dir))
+
+
+def test_distinct_workdir_validation_covers_antigravity(tmp_path):
+    from coding_review_agent_loop.config import ensure_distinct_workdirs
+    shared = tmp_path / "shared"
+    config = make_config(
+        tmp_path,
+        coder="antigravity",
+        reviewer="codex",
+        allow_shared_dir=False,
+        antigravity_dir=shared,
+        codex_dir=shared,
+    )
+    with pytest.raises(AgentLoopError, match="same directory"):
+        ensure_distinct_workdirs(config)
+
+
+def test_gemini_retirement_signal():
+    from coding_review_agent_loop.agents.gemini import _gemini_retirement_signal
+    assert _gemini_retirement_signal("Error: quota exceeded")
+    assert _gemini_retirement_signal("PERMISSION_DENIED for this account")
+    assert _gemini_retirement_signal("request was unauthenticated")
+    assert not _gemini_retirement_signal("SyntaxError: invalid token")
+    assert not _gemini_retirement_signal("connection reset by peer")
+
+
+def test_gemini_date_advisory_fires_only_in_window(tmp_path, capsys, monkeypatch):
+    import coding_review_agent_loop.agents.gemini as gm
+    from datetime import date
+
+    class _NearCutoff(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 6, 18)
+
+    class _BeforeWindow(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 1, 1)
+
+    config = make_config(tmp_path, quiet=False)
+
+    monkeypatch.setattr(gm, "date", _NearCutoff)
+    gm.BACKEND.run(FakeRunner(gemini_outputs=[("ok", 0)]), config, "Review", run_id="r1")
+    assert "2026-06-18" in capsys.readouterr().err  # advisory fires near cutoff
+
+    monkeypatch.setattr(gm, "date", _BeforeWindow)
+    gm.BACKEND.run(FakeRunner(gemini_outputs=[("ok", 0)]), config, "Review", run_id="r2")
+    assert "Antigravity" not in capsys.readouterr().err  # no advisory long before cutoff
+
+
+def test_gemini_failure_appends_migration_guidance(tmp_path, capsys, monkeypatch):
+    import coding_review_agent_loop.agents.gemini as gm
+    from datetime import date
+
+    class _BeforeWindow(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 1, 1)  # advisory off, so this isolates the failure path
+
+    monkeypatch.setattr(gm, "date", _BeforeWindow)
+    config = make_config(tmp_path, quiet=False)
+    runner = FakeRunner(gemini_outputs=[{"stdout": "Error: quota exceeded", "returncode": 1}])
+    result = gm.BACKEND.run(runner, config, "Review", run_id="r")
+    err = capsys.readouterr().err
+    assert "Antigravity" in err and "2026-06-18" in err
+    # The guidance must travel with the *returned* result (raw_output and text),
+    # since run_external classifies/persists failures from those, not stderr (#215).
+    assert "2026-06-18" in result.raw_output
+    assert "antigravity" in result.raw_output
+    assert result.raw_output.startswith("Error: quota exceeded")  # original error preserved
+    assert "2026-06-18" in result.text
+
+
+def test_gemini_success_does_not_append_migration_guidance(tmp_path, monkeypatch):
+    import coding_review_agent_loop.agents.gemini as gm
+    from datetime import date
+
+    class _BeforeWindow(date):
+        @classmethod
+        def today(cls):
+            return date(2026, 1, 1)
+
+    monkeypatch.setattr(gm, "date", _BeforeWindow)
+    config = make_config(tmp_path)
+    runner = FakeRunner(gemini_outputs=[("STATE: approved\n\nLGTM", 0)])
+    result = gm.BACKEND.run(runner, config, "Review", run_id="r")
+    assert "2026-06-18" not in result.raw_output  # no guidance on a clean success
+    assert "2026-06-18" not in result.text
