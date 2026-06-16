@@ -8,7 +8,7 @@ instead of through `claude -p` subprocesses.
 
 | Aspect | Headless CLI mode | Skill mode |
 |--------|-------------------|------------|
-| Claude turns | `claude -p` subprocess (Agent SDK credits) | Active Claude Code session |
+| Claude turns | `claude -p` subprocess | Active Claude Code session |
 | Codex turns | `codex exec` subprocess | Same `codex exec` subprocess |
 | Gemini turns | `gemini` subprocess | Same `gemini` subprocess |
 | GitHub ops | Python `gh` wrapper | Same `gh` wrapper |
