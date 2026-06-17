@@ -116,7 +116,7 @@ def build_parser() -> argparse.ArgumentParser:
         agy_model_group.add_argument(
             "--antigravity-models",
             nargs="+",
-            default=["Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (High)"],
+            default=None,
             help="Ordered chain of Antigravity models to try on quota exhaustion. Mutually exclusive with --antigravity-model.",
         )
         subparser.add_argument(

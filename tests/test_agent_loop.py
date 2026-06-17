@@ -17823,9 +17823,7 @@ def test_cli_rejects_both_antigravity_model_flags():
         ])
 
 
-def test_config_rejects_empty_antigravity_models(tmp_path):
-    with pytest.raises(AgentLoopError, match="cannot be empty or contain blank entries"):
-        make_config(tmp_path, antigravity_models=())
+def test_config_rejects_blank_antigravity_models(tmp_path):
     with pytest.raises(AgentLoopError, match="cannot be empty or contain blank entries"):
         make_config(tmp_path, antigravity_models=("",))
 
@@ -17833,6 +17831,11 @@ def test_config_rejects_empty_antigravity_models(tmp_path):
 def test_config_rejects_both_model_flags(tmp_path):
     with pytest.raises(AgentLoopError, match="Cannot specify both antigravity_model and a custom antigravity_models chain"):
         make_config(tmp_path, antigravity_model="Gemini", antigravity_models=("Gemini", "Claude"))
+
+
+def test_config_rejects_both_model_flags_even_if_default(tmp_path):
+    with pytest.raises(AgentLoopError, match="Cannot specify both antigravity_model and a custom antigravity_models chain"):
+        make_config(tmp_path, antigravity_model="Gemini", antigravity_models=("Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (High)"))
 
 
 def test_distinct_workdir_validation_covers_antigravity(tmp_path):

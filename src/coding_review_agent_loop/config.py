@@ -65,7 +65,7 @@ class AgentLoopConfig:
     antigravity_cmd: str = "agy"
     antigravity_args: tuple[str, ...] = ()
     antigravity_model: str | None = None
-    antigravity_models: tuple[str, ...] = ("Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (High)")
+    antigravity_models: tuple[str, ...] = ()
     antigravity_quota_signatures: tuple[str, ...] = ("quota", "rate limit", "resource exhausted", "RESOURCE_EXHAUSTED", "429")
     # Declared model / reasoning effort for the dynamic signature (#332). Empty
     # means "not declared" (the agent runs its own default and the signature
@@ -78,11 +78,13 @@ class AgentLoopConfig:
     def __post_init__(self) -> None:
         if isinstance(self.reviewer, str):
             object.__setattr__(self, "reviewer", (self.reviewer,))
-        if self.antigravity_model is not None and self.antigravity_models != ("Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (High)"):
+        if self.antigravity_model is not None and self.antigravity_models:
             raise AgentLoopError("Cannot specify both antigravity_model and a custom antigravity_models chain.")
         if self.antigravity_model is not None:
             object.__setattr__(self, "antigravity_models", (self.antigravity_model,))
-        if not self.antigravity_models or any(not m.strip() for m in self.antigravity_models):
+        elif not self.antigravity_models:
+            object.__setattr__(self, "antigravity_models", ("Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (High)"))
+        if any(not m.strip() for m in self.antigravity_models):
             raise AgentLoopError("antigravity_models chain cannot be empty or contain blank entries.")
         ensure_no_model_arg_conflicts(self)
         if self.planning_context_mode not in {"full", "compact"}:
@@ -619,7 +621,7 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
             else default_agent_args("antigravity", dangerous=args.dangerous_agent_permissions)
         ),
         antigravity_model=args.antigravity_model,
-        antigravity_models=tuple(getattr(args, "antigravity_models", ["Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (High)"])),
+        antigravity_models=tuple(args.antigravity_models) if getattr(args, "antigravity_models", None) is not None else (),
         antigravity_quota_signatures=tuple(getattr(args, "antigravity_quota_signatures", ["quota", "rate limit", "resource exhausted", "RESOURCE_EXHAUSTED", "429"])),
         codex_model=getattr(args, "codex_model", ""),
         codex_reasoning_effort=getattr(args, "codex_reasoning_effort", ""),
