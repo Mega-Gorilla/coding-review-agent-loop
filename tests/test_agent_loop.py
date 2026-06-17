@@ -919,6 +919,18 @@ def test_workdir_guard_accepts_assigned_absolute_path(tmp_path):
     )
 
 
+def test_workdir_guard_accepts_javascript_regex_closing_script_tag(tmp_path):
+    assigned = tmp_path / "codex" / "repo"
+    assigned.mkdir(parents=True)
+
+    validate_test_commands_within_workdir(
+        (
+            r"""node -e "const fs=require('fs'); const html=fs.readFileSync('server/static/index.html','utf8'); const scripts=[...html.matchAll(/<script(?![^>]*\\bsrc=)[^>]*>([\\s\\S]*?)<\\/script>/gi)].map(m=>m[1]); scripts.forEach((code,i)=>{ try { new Function(code); } catch(e) { console.error('script '+i+' parse failed'); throw e; } }); console.log(scripts.length+' inline scripts parsed');" (failed: naive regex matched non-code text)""",
+        ),
+        assigned_workdir=assigned,
+    )
+
+
 def test_workdir_guard_accepts_relative_test_commands(tmp_path):
     assigned = tmp_path / "claude" / "repo"
     assigned.mkdir(parents=True)
