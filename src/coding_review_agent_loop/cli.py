@@ -107,10 +107,23 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--codex-cmd", default="codex")
         subparser.add_argument("--gemini-cmd", default="gemini")
         subparser.add_argument("--antigravity-cmd", default="agy")
-        subparser.add_argument(
+        agy_model_group = subparser.add_mutually_exclusive_group()
+        agy_model_group.add_argument(
             "--antigravity-model",
-            default="Gemini 3.1 Pro (High)",
-            help="Antigravity (agy) model, as shown by `agy models` (default: 'Gemini 3.1 Pro (High)').",
+            default=None,
+            help="Legacy Antigravity (agy) model. Mutually exclusive with --antigravity-models.",
+        )
+        agy_model_group.add_argument(
+            "--antigravity-models",
+            nargs="+",
+            default=None,
+            help="Ordered chain of Antigravity models to try on quota exhaustion. Mutually exclusive with --antigravity-model.",
+        )
+        subparser.add_argument(
+            "--antigravity-quota-signatures",
+            nargs="+",
+            default=["quota", "rate limit", "resource exhausted", "RESOURCE_EXHAUSTED", "429"],
+            help="Output substrings that trigger model fallback (default: quota, rate limit, etc).",
         )
         subparser.add_argument(
             "--codex-model",

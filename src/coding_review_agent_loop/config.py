@@ -64,7 +64,9 @@ class AgentLoopConfig:
     antigravity_dir: Path = Path("antigravity")
     antigravity_cmd: str = "agy"
     antigravity_args: tuple[str, ...] = ()
-    antigravity_model: str = "Gemini 3.1 Pro (High)"
+    antigravity_model: str | None = None
+    antigravity_models: tuple[str, ...] = ()
+    antigravity_quota_signatures: tuple[str, ...] = ("quota", "rate limit", "resource exhausted", "RESOURCE_EXHAUSTED", "429")
     # Declared model / reasoning effort for the dynamic signature (#332). Empty
     # means "not declared" (the agent runs its own default and the signature
     # falls back to the generic provider name). antigravity always has a model.
@@ -76,6 +78,14 @@ class AgentLoopConfig:
     def __post_init__(self) -> None:
         if isinstance(self.reviewer, str):
             object.__setattr__(self, "reviewer", (self.reviewer,))
+        if self.antigravity_model is not None and self.antigravity_models:
+            raise AgentLoopError("Cannot specify both antigravity_model and a custom antigravity_models chain.")
+        if self.antigravity_model is not None:
+            object.__setattr__(self, "antigravity_models", (self.antigravity_model,))
+        elif not self.antigravity_models:
+            object.__setattr__(self, "antigravity_models", ("Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (High)"))
+        if any(not m.strip() for m in self.antigravity_models):
+            raise AgentLoopError("antigravity_models chain cannot be empty or contain blank entries.")
         ensure_no_model_arg_conflicts(self)
         if self.planning_context_mode not in {"full", "compact"}:
             raise AgentLoopError("--planning-context-mode must be either 'full' or 'compact'.")
@@ -128,7 +138,7 @@ def ensure_no_model_arg_conflicts(config: AgentLoopConfig) -> None:
     if _args_have_model_flag(config.antigravity_args):
         raise AgentLoopError(
             "--antigravity-arg --model conflicts with the always-declared antigravity "
-            "model; set the model via --antigravity-model only."
+            "model; set the model via --antigravity-models only."
         )
     if config.codex_model and _args_have_model_flag(config.codex_args):
         raise AgentLoopError(
@@ -611,6 +621,8 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
             else default_agent_args("antigravity", dangerous=args.dangerous_agent_permissions)
         ),
         antigravity_model=args.antigravity_model,
+        antigravity_models=tuple(args.antigravity_models) if getattr(args, "antigravity_models", None) is not None else (),
+        antigravity_quota_signatures=tuple(getattr(args, "antigravity_quota_signatures", ["quota", "rate limit", "resource exhausted", "RESOURCE_EXHAUSTED", "429"])),
         codex_model=getattr(args, "codex_model", ""),
         codex_reasoning_effort=getattr(args, "codex_reasoning_effort", ""),
         gemini_model=getattr(args, "gemini_model", ""),

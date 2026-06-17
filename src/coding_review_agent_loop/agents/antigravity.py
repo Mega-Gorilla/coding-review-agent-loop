@@ -85,54 +85,66 @@ class AntigravityBackend:
         session_id: str | None = None,
         run_id: str | None = None,
     ) -> AgentResult:
-        response_path = public_response_path(config, "antigravity")
-        prompt_text = _with_public_response_marker_instruction(
-            with_public_response_file_instruction(prompt, response_path)
-        )
-        args = [config.antigravity_cmd, "--model", config.antigravity_model, *config.antigravity_args]
-        # agy resumes by conversation id (not gemini's --resume). agy --print does
-        # not surface a conversation id in plain output, so in practice session_id
-        # is None and turns are single-shot; honor it if a caller ever supplies one.
-        if session_id:
-            args += ["--conversation", session_id]
-        # The prompt is the value of --print (must be last), not a positional.
-        args += ["--print", prompt_text]
-        log_path = agent_log_path(config, "antigravity", run_id=run_id)
-        log(config, f"Starting Antigravity in {config.antigravity_dir}; log: {log_path}; response: {response_path}")
-        result = runner.run_with_log(
-            args,
-            cwd=config.antigravity_dir,
-            log_path=log_path,
-            label="Antigravity",
-            progress_interval_seconds=config.progress_interval_seconds,
-            check=False,
-            env={"AGENT_LOOP_WORKDIR": str(config.antigravity_dir.resolve())},
-            use_pty=True,
-        )
-        log(config, f"Antigravity finished; log: {log_path}")
-        # Prefer the public response file the prompt asks the agent to write; else
-        # keep only what follows the public-response marker in stdout; else stdout.
-        response_file_text = read_public_response_file(response_path)
-        if response_file_text is not None:
-            message_text, text_source = response_file_text, "response_file"
-        else:
-            message_text, text_source = _strip_public_response_marker(result.stdout)
-        return AgentResult(
-            text=message_text,
-            raw_output=result.stdout,
-            text_source=text_source,
-            response_file_text=response_file_text,
-            message_text=message_text,
-            session_id=None,
-            log_path=log_path,
-            returncode=result.returncode,
-            usage=None,
-            raw_usage=None,
-            # The model we requested is the model that ran (single-shot, no
-            # server-side substitution); the signature stamps it (#332). #333's
-            # fallback chain will override this with the model that answered.
-            model_used=config.antigravity_model or None,
-        )
+        for i, model in enumerate(config.antigravity_models):
+            response_path = public_response_path(config, "antigravity")
+            prompt_text = _with_public_response_marker_instruction(
+                with_public_response_file_instruction(prompt, response_path)
+            )
+            args = [config.antigravity_cmd, "--model", model, *config.antigravity_args]
+            # agy resumes by conversation id (not gemini's --resume). agy --print does
+            # not surface a conversation id in plain output, so in practice session_id
+            # is None and turns are single-shot; honor it if a caller ever supplies one.
+            if session_id:
+                args += ["--conversation", session_id]
+            # The prompt is the value of --print (must be last), not a positional.
+            args += ["--print", prompt_text]
+            log_path = agent_log_path(config, "antigravity", run_id=run_id)
+            log(config, f"Starting Antigravity (model: {model}) in {config.antigravity_dir}; log: {log_path}; response: {response_path}")
+            result = runner.run_with_log(
+                args,
+                cwd=config.antigravity_dir,
+                log_path=log_path,
+                label=f"Antigravity ({model})",
+                progress_interval_seconds=config.progress_interval_seconds,
+                check=False,
+                env={"AGENT_LOOP_WORKDIR": str(config.antigravity_dir.resolve())},
+                use_pty=True,
+            )
+            log(config, f"Antigravity ({model}) finished; log: {log_path}")
+
+            if result.returncode != 0:
+                stdout_lower = result.stdout.lower()
+                if any(sig.lower() in stdout_lower for sig in config.antigravity_quota_signatures):
+                    if i + 1 < len(config.antigravity_models):
+                        log(config, f"Antigravity ({model}) hit quota exhaustion, falling back to next model.")
+                        continue
+
+            # Prefer the public response file the prompt asks the agent to write; else
+            # keep only what follows the public-response marker in stdout; else stdout.
+            response_file_text = read_public_response_file(response_path)
+            if response_file_text is not None:
+                message_text, text_source = response_file_text, "response_file"
+            else:
+                message_text, text_source = _strip_public_response_marker(result.stdout)
+            return AgentResult(
+                text=message_text,
+                raw_output=result.stdout,
+                text_source=text_source,
+                response_file_text=response_file_text,
+                message_text=message_text,
+                session_id=None,
+                log_path=log_path,
+                returncode=result.returncode,
+                usage=None,
+                raw_usage=None,
+                # The model we requested is the model that ran (single-shot, no
+                # server-side substitution); the signature stamps it (#332). #333's
+                # fallback chain will override this with the model that answered.
+                model_used=model,
+            )
+        
+        # This point should not be reached since antigravity_models cannot be empty
+        raise RuntimeError("No antigravity models available to run.")
 
 
 BACKEND = AntigravityBackend()
