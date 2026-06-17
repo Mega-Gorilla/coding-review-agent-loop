@@ -17651,6 +17651,82 @@ def test_antigravity_backend_stdout_fallback(tmp_path):
     assert result.text_source == "stdout"
 
 
+def test_antigravity_backend_fallback_chain_on_quota_signal(tmp_path):
+    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+    agy_dir = tmp_path / "antigravity"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    runner = FakeRunner(
+        antigravity_outputs=[
+            ("quota exceeded please try again", 1),
+            ("quota exceeded again", 1),
+            ("ok fallback answered", 0)
+        ]
+    )
+    config = make_config(
+        tmp_path,
+        antigravity_dir=agy_dir,
+        antigravity_models=("ModelA", "ModelB", "ModelC"),
+        antigravity_quota_signatures=("quota",)
+    )
+    result = AntigravityBackend().run(runner, config, "Review", run_id="r1")
+    
+    assert runner.commands[-3][0][runner.commands[-3][0].index("--model") + 1] == "ModelA"
+    assert runner.commands[-2][0][runner.commands[-2][0].index("--model") + 1] == "ModelB"
+    assert runner.commands[-1][0][runner.commands[-1][0].index("--model") + 1] == "ModelC"
+    
+    assert result.text == "ok fallback answered"
+    assert result.model_used == "ModelC"
+
+
+def test_antigravity_backend_stops_on_other_errors(tmp_path):
+    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+    agy_dir = tmp_path / "antigravity"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    runner = FakeRunner(
+        antigravity_outputs=[
+            ("some regular error", 1),
+            ("ok fallback answered", 0)
+        ]
+    )
+    config = make_config(
+        tmp_path,
+        antigravity_dir=agy_dir,
+        antigravity_models=("ModelA", "ModelB"),
+        antigravity_quota_signatures=("quota",)
+    )
+    result = AntigravityBackend().run(runner, config, "Review", run_id="r1")
+    
+    assert runner.commands[-1][0][runner.commands[-1][0].index("--model") + 1] == "ModelA"
+    assert result.returncode == 1
+    assert result.model_used == "ModelA"
+
+
+def test_antigravity_backend_ignores_partial_response_file_on_fallback(tmp_path):
+    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+    agy_dir = tmp_path / "antigravity"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    runner = FakeRunner(
+        antigravity_outputs=[
+            ("quota error", 1),
+            ("success", 0)
+        ],
+        public_response_outputs=[
+            "partial failed response",
+            "successful response"
+        ]
+    )
+    config = make_config(
+        tmp_path,
+        antigravity_dir=agy_dir,
+        antigravity_models=("ModelA", "ModelB"),
+        antigravity_quota_signatures=("quota",)
+    )
+    result = AntigravityBackend().run(runner, config, "Review", run_id="r1")
+    
+    assert result.text == "successful response"
+    assert result.model_used == "ModelB"
+
+
 def test_antigravity_backend_strips_public_response_marker(tmp_path):
     from coding_review_agent_loop.agents.antigravity import AntigravityBackend
     from coding_review_agent_loop.protocol import PUBLIC_RESPONSE_MARKER
@@ -17730,11 +17806,33 @@ def test_config_from_args_antigravity_defaults(tmp_path):
     config = config_from_args(args, FakeRunner())
     assert config.coder == "antigravity"
     assert config.antigravity_cmd == "agy"
-    assert config.antigravity_model == "Gemini 3.1 Pro (High)"
+    assert config.antigravity_model is None
+    assert config.antigravity_models == ("Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (High)")
+    assert config.antigravity_quota_signatures == ("quota", "rate limit", "resource exhausted", "RESOURCE_EXHAUSTED", "429")
     assert config.antigravity_args == ("--dangerously-skip-permissions",)
     assert config.antigravity_dir == default_agent_workdir("OWNER/REPO", "antigravity").resolve()
     # antigravity is the coder -> primary/log dir lives under its checkout.
     assert str(config.log_dir).startswith(str(config.antigravity_dir))
+
+
+def test_cli_rejects_both_antigravity_model_flags():
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args([
+            "pr", "123", "--repo", "OWNER/REPO", "--antigravity-model", "Gemini", "--antigravity-models", "Gemini", "Claude"
+        ])
+
+
+def test_config_rejects_empty_antigravity_models(tmp_path):
+    with pytest.raises(AgentLoopError, match="cannot be empty or contain blank entries"):
+        make_config(tmp_path, antigravity_models=())
+    with pytest.raises(AgentLoopError, match="cannot be empty or contain blank entries"):
+        make_config(tmp_path, antigravity_models=("",))
+
+
+def test_config_rejects_both_model_flags(tmp_path):
+    with pytest.raises(AgentLoopError, match="Cannot specify both antigravity_model and a custom antigravity_models chain"):
+        make_config(tmp_path, antigravity_model="Gemini", antigravity_models=("Gemini", "Claude"))
 
 
 def test_distinct_workdir_validation_covers_antigravity(tmp_path):

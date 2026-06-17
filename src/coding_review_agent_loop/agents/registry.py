@@ -43,7 +43,7 @@ def _configured_model_label(agent: AgentName, config: AgentLoopConfig | None) ->
     if config is None:
         return None
     if agent == "antigravity":
-        return config.antigravity_model or None
+        return config.antigravity_models[0] if config.antigravity_models else None
     if agent == "codex":
         model = config.codex_model
         if not model:
