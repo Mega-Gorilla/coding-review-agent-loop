@@ -88,6 +88,12 @@ auth/quota error near or after the cutoff, the tool surfaces this migration
 guidance. Notes: Antigravity turns are single-shot (no cross-round session
 resume) and report estimated token usage (`agy` emits no token counts).
 
+**Billing / quota note:**
+- `agy` usage counts against a **separate Antigravity-specific quota**, not the same token pool as the Gemini app/chat in your subscription. The two meters are tracked independently and can diverge.
+- Your Google AI subscription tier (Pro/Ultra) **raises** the Antigravity limits rather than sharing one pool; the free / Google One tier is small.
+- When the included quota is exhausted, continued use draws on **Google AI credits** (pay-as-you-go), so monitor actual spend for the first runs.
+- Exact limits are not officially well-documented and have changed since launch — treat numbers as fluid.
+
 ## Install / Use
 
 Clone the repo first:
