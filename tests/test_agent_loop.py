@@ -1278,6 +1278,37 @@ def test_parse_claude_output_extracts_model_from_model_usage():
     assert model == "claude-sonnet-4-6"
 
 
+def test_parse_claude_output_extracts_primary_model_from_model_usage():
+    raw = json.dumps({
+        "result": "Reviewed.",
+        "modelUsage": {
+            "claude-haiku-4-5-20251001": {"inputTokens": 4750, "outputTokens": 20},
+            "claude-sonnet-4-6": {
+                "inputTokens": 18,
+                "outputTokens": 8263,
+                "cacheReadInputTokens": 715975,
+            },
+        },
+    })
+    text, sid, usage, raw_usage, model = _parse_claude_output(raw)
+    assert text == "Reviewed."
+    assert model == "claude-sonnet-4-6"
+
+
+def test_parse_claude_output_prefers_top_level_model_over_model_usage():
+    raw = json.dumps({
+        "result": "Reviewed.",
+        "model": "claude-opus-4-1",
+        "modelUsage": {
+            "claude-haiku-4-5-20251001": {"outputTokens": 20},
+            "claude-sonnet-4-6": {"outputTokens": 8263},
+        },
+    })
+    text, sid, usage, raw_usage, model = _parse_claude_output(raw)
+    assert text == "Reviewed."
+    assert model == "claude-opus-4-1"
+
+
 def test_parse_gemini_output_extracts_json_response():
     raw = json.dumps({
         "response": "Reviewed.\n<!-- AGENT_STATE: approved -->",

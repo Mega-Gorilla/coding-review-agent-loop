@@ -45,13 +45,22 @@ def _normalize_claude_usage(payload: object) -> UsageMetadata | None:
 
 
 def _extract_claude_model(data: dict) -> str | None:
-    """Model id Claude reported running (`model`, else a `modelUsage` key)."""
+    """Model id Claude reported running (`model`, else primary `modelUsage` key)."""
     model = data.get("model")
     if isinstance(model, str) and model:
         return model
     model_usage = data.get("modelUsage")
     if isinstance(model_usage, dict) and model_usage:
-        return next(iter(model_usage))
+        def output_tokens(model_id: str) -> int:
+            usage = model_usage.get(model_id)
+            if not isinstance(usage, dict):
+                return 0
+            return coerce_int(usage.get("outputTokens")) or 0
+
+        return max(
+            model_usage,
+            key=output_tokens,
+        )
     return None
 
 
