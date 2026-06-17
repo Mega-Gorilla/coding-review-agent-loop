@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
 from coding_review_agent_loop.comment_rendering import (
+    _public_reviewer_name,
     _render_public_pr_review_comment,
     _render_public_plan_review_comment,
     _render_public_coder_followup_comment,
@@ -57,7 +58,13 @@ def main() -> None:
     parser.add_argument("--output", required=True, help="Path to write rendered markdown.")
     parser.add_argument("--reviewer", default="Codex", help="Reviewer display name.")
     parser.add_argument("--context-file", default=None, help="Optional JSON context file.")
+    parser.add_argument(
+        "--model",
+        default="",
+        help="Model the agent actually ran, stamped into the signature (#332).",
+    )
     args = parser.parse_args()
+    model_used = args.model or None
 
     try:
         text = Path(args.file).read_text(encoding="utf-8")
@@ -77,6 +84,7 @@ def main() -> None:
                 human_requirements_resolved_flag=False,
                 prior_items=prior_items,
                 dispositions=parsed.dispositions,
+                model_used=model_used,
             )
         elif args.kind == "plan_review":
             parsed = parse_plan_review(text, reviewer=args.reviewer)
@@ -86,19 +94,26 @@ def main() -> None:
                 human_requirements_resolved_flag=False,
                 prior_items=prior_items,
                 dispositions=parsed.dispositions,
+                model_used=model_used,
             )
         elif args.kind == "coder_followup":
             parsed = validate_structured_coder_followup(text)
             if parsed is None:
                 print("render_response: coder_followup did not parse", file=sys.stderr)
                 sys.exit(1)
-            rendered = _render_public_coder_followup_comment(parsed)
+            signature = _public_reviewer_name(args.reviewer, None, model_used)
+            rendered = _render_public_coder_followup_comment(
+                parsed, signature=signature, prior_items=prior_items
+            )
         elif args.kind == "plan_revision":
             parsed = validate_structured_plan_revision(text)
             if parsed is None:
                 print("render_response: plan_revision did not parse", file=sys.stderr)
                 sys.exit(1)
-            rendered = _render_public_plan_revision_comment(parsed, prior_items=prior_items)
+            signature = _public_reviewer_name(args.reviewer, None, model_used)
+            rendered = _render_public_plan_revision_comment(
+                parsed, prior_items=prior_items, raw_text=text, signature=signature
+            )
         else:
             print(f"render_response: unknown kind {args.kind}", file=sys.stderr)
             sys.exit(1)
