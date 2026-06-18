@@ -24,7 +24,10 @@ if TYPE_CHECKING:
     from ..config import AgentLoopConfig
 
 
-_CODEX_THREAD_ID_RE = re.compile(r"[0-9a-fA-F-]+")
+_CODEX_THREAD_ID_RE = re.compile(
+    r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 _CODEX_REASONING_EFFORT_KEYS = (
     "effort",
     "reasoning_effort",
@@ -156,6 +159,9 @@ def _find_codex_rollout(thread_id: str) -> Path | None:
 
 
 def _model_record_containers(record: dict[object, object]) -> tuple[dict[object, object], ...]:
+    # Codex rollout model metadata is known to appear at the top level or in
+    # payload, turn, and turn_context containers. The fixture test covering the
+    # current turn_context/payload shape should fail visibly if that schema drifts.
     containers = [record]
     for key in ("payload", "turn", "turn_context"):
         value = record.get(key)
