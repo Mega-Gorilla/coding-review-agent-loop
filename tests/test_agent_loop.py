@@ -1774,10 +1774,6 @@ def _write_codex_rollout(
     [
         ({"payload": {"model": "gpt-5.5"}}, "gpt-5.5"),
         (
-            {"type": "turn_context", "payload": {"model": "gpt-5.5", "effort": "high"}},
-            "gpt-5.5 (high)",
-        ),
-        (
             {"turn": {"model": "gpt-5.5", "model_reasoning_effort": "medium"}},
             "gpt-5.5 (medium)",
         ),
@@ -1799,6 +1795,111 @@ def test_codex_backend_detects_model_from_rollout(tmp_path, monkeypatch, record,
     config = make_config(tmp_path)
 
     result = CODEX_BACKEND.run(runner, config, "Review this PR.", run_id="run-1")
+
+    assert result.model_used == expected
+
+
+def test_codex_backend_parses_current_turn_context_rollout_schema(tmp_path, monkeypatch):
+    thread_id = "019ed9d8-1111-7222-8333-444444444444"
+    codex_home = tmp_path / "codex-home"
+    _write_codex_rollout(
+        codex_home,
+        thread_id,
+        [
+            {
+                "timestamp": "2026-06-18T12:00:00.000Z",
+                "type": "turn_context",
+                "payload": {
+                    "model": "gpt-5.5",
+                    "effort": "high",
+                },
+            }
+        ],
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runner = FakeRunner(
+        codex_outputs=[
+            {
+                "public_response": "last message text",
+                "stdout": json.dumps({"type": "thread.started", "thread_id": thread_id}),
+            }
+        ]
+    )
+
+    result = CODEX_BACKEND.run(
+        runner,
+        make_config(tmp_path),
+        "Review this PR.",
+        run_id="run-1",
+    )
+
+    assert result.model_used == "gpt-5.5 (high)"
+
+
+def test_codex_backend_accepts_mixed_case_uuid_for_rollout_lookup(tmp_path, monkeypatch):
+    thread_id = "019ED9d8-1111-7222-8333-444444444444"
+    codex_home = tmp_path / "codex-home"
+    _write_codex_rollout(
+        codex_home,
+        thread_id,
+        [{"payload": {"model": "gpt-5.5", "effort": "medium"}}],
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runner = FakeRunner(
+        codex_outputs=[
+            {
+                "public_response": "last message text",
+                "stdout": json.dumps({"type": "thread.started", "thread_id": thread_id}),
+            }
+        ]
+    )
+
+    result = CODEX_BACKEND.run(
+        runner,
+        make_config(tmp_path),
+        "Review this PR.",
+        run_id="run-1",
+    )
+
+    assert result.model_used == "gpt-5.5 (medium)"
+
+
+@pytest.mark.parametrize(
+    ("thread_id", "declared_model", "expected"),
+    [
+        ("*", None, None),
+        ("deadbeef-dead-beef-dead-beef", "gpt-5.4", "gpt-5.4"),
+    ],
+)
+def test_codex_backend_rejects_non_uuid_thread_id_before_rollout_lookup(
+    tmp_path,
+    monkeypatch,
+    thread_id,
+    declared_model,
+    expected,
+):
+    codex_home = tmp_path / "codex-home"
+    _write_codex_rollout(
+        codex_home,
+        thread_id,
+        [{"payload": {"model": "wrong-model"}}],
+    )
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    runner = FakeRunner(
+        codex_outputs=[
+            {
+                "public_response": "last message text",
+                "stdout": json.dumps({"type": "thread.started", "thread_id": thread_id}),
+            }
+        ]
+    )
+
+    result = CODEX_BACKEND.run(
+        runner,
+        make_config(tmp_path, codex_model=declared_model),
+        "Review this PR.",
+        run_id="run-1",
+    )
 
     assert result.model_used == expected
 
@@ -18465,8 +18566,8 @@ def test_config_rejects_model_arg_conflicts(tmp_path):
 
 
 def test_config_rejects_codex_effort_without_model(tmp_path):
-    # Effort alone can't be stamped (codex doesn't report its model), so it requires
-    # an explicit --codex-model.
+    # Rollout model detection is best-effort, so effort alone cannot be labeled
+    # reliably and requires an explicit --codex-model.
     with pytest.raises(AgentLoopError, match="requires --codex-model"):
         make_config(tmp_path, codex_reasoning_effort="high")
     # With a model it's accepted.
