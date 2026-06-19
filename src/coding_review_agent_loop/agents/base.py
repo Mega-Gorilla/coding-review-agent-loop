@@ -109,6 +109,8 @@ the response file. For structured plan revisions only, if signed human
 requirements are present, place `<!-- HUMAN_REQUIREMENTS_ADDRESSED -->` and the
 `### Human requirements` section after the JSON object and before the
 `AGENT_PLAN_STATE` footer.
+You MUST write this file before your turn ends. A turn that ends without
+writing this file results in a review failure.
 """
 
 
