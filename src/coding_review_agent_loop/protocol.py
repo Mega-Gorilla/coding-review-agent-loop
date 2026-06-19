@@ -1058,8 +1058,6 @@ def parse_structured_pr_review(text: str, *, reviewer: str) -> ParsedReview | No
             future=_structured_followups(future_followups, reviewer=reviewer),
         ),
     )
-    if state == "blocking" and followups.future:
-        raise AgentLoopError("Blocking structured reviews may not include future follow-ups.")
     return _finalize_parsed_review(
         state=state,
         summary=summary,
@@ -1118,8 +1116,6 @@ def parse_structured_plan_review(text: str, *, reviewer: str) -> ParsedPlanRevie
         allowed_same_status="same-plan",
         is_plan_review=True,
     )
-    if state == "blocking" and future_followups:
-        raise AgentLoopError("Blocking structured plan reviews may not include future follow-ups.")
     items = _dedupe_plan_review_items(
         PlanReviewItems(
             blocking=_structured_followups(blocking_items, reviewer=reviewer),
