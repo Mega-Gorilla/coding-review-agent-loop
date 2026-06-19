@@ -3423,7 +3423,7 @@ class TestAntigravitySkill:
         [
             (
                 (),
-                ("Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (High)"),
+                ("Gemini 3.5 Flash (High)", "Gemini 3.1 Pro (High)"),
                 ("quota", "rate limit", "resource exhausted", "RESOURCE_EXHAUSTED", "429"),
             ),
             (("--model", "Model X"), ("Model X",), ("quota", "rate limit", "resource exhausted", "RESOURCE_EXHAUSTED", "429")),
@@ -3434,7 +3434,7 @@ class TestAntigravitySkill:
             ),
             (
                 ("--antigravity-quota-signatures", "Quota Hit", "429"),
-                ("Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (High)"),
+                ("Gemini 3.5 Flash (High)", "Gemini 3.1 Pro (High)"),
                 ("Quota Hit", "429"),
             ),
         ],
