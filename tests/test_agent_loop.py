@@ -9308,6 +9308,13 @@ def test_review_prompt_includes_failing_github_check_status(tmp_path):
     assert "- Failing checks: tests/test_security.py (failure)" in prompt
 
 
+@pytest.mark.parametrize("compact_context", [False, True])
+def test_review_prompt_includes_no_ci_wait_instruction(tmp_path, compact_context):
+    config = make_config(tmp_path)
+    prompt = build_review_prompt(77, 1, config, reviewer="codex", compact_context=compact_context)
+    assert "Do not defer your review to wait for CI" in prompt
+
+
 def test_review_prompt_mentions_branch_protection_forbidden_when_checks_exist(tmp_path):
     runner = FakeRunner(
         codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
