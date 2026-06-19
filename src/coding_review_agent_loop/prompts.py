@@ -1598,6 +1598,7 @@ Treat the GitHub PR checks block in the volatile tail as authoritative for curre
 Do not say or imply that tests passed globally unless the GitHub PR checks
 state is `passing` or `no_checks`. If only a local subset passed while GitHub
 checks are `failing`, `pending`, or `unavailable`, say that explicitly.
+Do not defer your review to wait for CI checks to finish. Review the PR now and report any pending or failing check status in your findings.
 When the PR changes files under `alembic/versions/`, verify migration topology:
 new revisions should descend from the current head unless the PR intentionally
 adds a merge migration.
@@ -1974,6 +1975,7 @@ Treat the GitHub PR checks block above as authoritative for current CI state.
 Do not say or imply that tests passed globally unless the GitHub PR checks
 state is `passing` or `no_checks`. If only a local subset passed while GitHub
 checks are `failing`, `pending`, or `unavailable`, say that explicitly.
+Do not defer your review to wait for CI checks to finish. Review the PR now and report any pending or failing check status in your findings.
 When the PR changes files under `alembic/versions/`, verify migration topology:
 new revisions should descend from the current head unless the PR intentionally
 adds a merge migration.
