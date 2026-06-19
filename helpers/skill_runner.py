@@ -7,14 +7,14 @@ Subcommands:
     --issue N --repo OWNER/REPO
     --plan-file PATH
     --reviewers REVIEWER [REVIEWER ...]
-    [--workdir-codex PATH] [--workdir-gemini PATH] [--workdir PATH]
+    [--workdir-codex PATH] [--workdir-gemini PATH] [--workdir-antigravity PATH] [--workdir PATH]
     [--dry-run]
 
   run-pr-round
     --pr N --repo OWNER/REPO
     --reviewers REVIEWER [REVIEWER ...]
     [--head-sha SHA]
-    [--workdir PATH] [--workdir-codex PATH] [--workdir-gemini PATH]
+    [--workdir PATH] [--workdir-codex PATH] [--workdir-gemini PATH] [--workdir-antigravity PATH]
     [--dry-run]
 
   run-pr-fix
@@ -50,9 +50,9 @@ Subcommands:
 
   run-implement
     --issue N --repo OWNER/REPO
-    --coder {codex,gemini}
+    --coder {codex,gemini,antigravity}
     --plan-file PATH
-    [--base BRANCH] [--workdir PATH] [--dry-run]
+    [--base BRANCH] [--workdir PATH] [--workdir-codex PATH] [--workdir-gemini PATH] [--workdir-antigravity PATH] [--dry-run]
 
     Reversed roles: an external coder implements an approved plan and opens a PR
     (validated for the PR marker, human-requirements ack, in-workdir tests, an
@@ -62,9 +62,9 @@ Subcommands:
 
   run-implement-by-phase
     --issue N --repo OWNER/REPO
-    --coder {codex,gemini}
+    --coder {codex,gemini,antigravity}
     --plan-file PATH
-    [--base BRANCH] [--workdir PATH] [--workdir-codex PATH] [--workdir-gemini PATH]
+    [--base BRANCH] [--workdir PATH] [--workdir-codex PATH] [--workdir-gemini PATH] [--workdir-antigravity PATH]
     [--dry-run]
 
     Reversed roles: decompose an approved plan into child phase issues, then
@@ -73,9 +73,9 @@ Subcommands:
 
   run-decompose
     --issue N --repo OWNER/REPO
-    --coder {codex,gemini}
+    --coder {codex,gemini,antigravity}
     --plan-file PATH
-    [--workdir PATH] [--workdir-codex PATH] [--workdir-gemini PATH]
+    [--workdir PATH] [--workdir-codex PATH] [--workdir-gemini PATH] [--workdir-antigravity PATH]
     [--dry-run]
 
     Reversed roles: an external coder decomposes an approved plan into child
@@ -3112,7 +3112,7 @@ def cmd_run_implement(args: argparse.Namespace) -> None:
     if not dry_run and not explicit_workdir:
         print(
             "skill_runner: run-implement requires an explicit push-capable "
-            "--workdir (or --workdir-codex/--workdir-gemini); the external coder "
+            "--workdir (or --workdir-codex/--workdir-gemini/--workdir-antigravity); the external coder "
             "commits, pushes a branch, and opens a PR there.",
             file=sys.stderr,
         )
@@ -3758,7 +3758,7 @@ def cmd_run_implement_by_phase(args: argparse.Namespace) -> None:
     if not dry_run and not explicit_workdir:
         print(
             "skill_runner: run-implement-by-phase requires an explicit push-capable "
-            "--workdir (or --workdir-codex/--workdir-gemini); the external coder "
+            "--workdir (or --workdir-codex/--workdir-gemini/--workdir-antigravity); the external coder "
             "commits, pushes a branch, and opens a PR for the first agent phase there.",
             file=sys.stderr,
         )
@@ -3958,7 +3958,7 @@ def main() -> None:
         "--coder", type=normalize_agent_name,
         choices=["claude", "codex", "gemini", "antigravity"], default="claude",
         help="Who writes the plan: 'claude' (default, host supplies --plan-file) or "
-             "an external coder ('codex'/'gemini') run by the skill (reversed roles, #307).",
+             "an external coder ('codex'/'gemini'/'antigravity') run by the skill (reversed roles, #307).",
     )
     p_plan.add_argument(
         "--plan-file", default=None,
@@ -3967,6 +3967,7 @@ def main() -> None:
     p_plan.add_argument("--reviewers", type=normalize_agent_name, nargs="+", required=True)
     p_plan.add_argument("--workdir-codex", default=None)
     p_plan.add_argument("--workdir-gemini", default=None)
+    p_plan.add_argument("--workdir-antigravity", default=None)
     p_plan.add_argument("--workdir", default=None)
     p_plan_mem = p_plan.add_mutually_exclusive_group()
     p_plan_mem.add_argument("--agent-memory", dest="agent_memory", action="store_true", default=True,
@@ -3988,6 +3989,7 @@ def main() -> None:
     p_pr.add_argument("--workdir", default=None)
     p_pr.add_argument("--workdir-codex", default=None)
     p_pr.add_argument("--workdir-gemini", default=None)
+    p_pr.add_argument("--workdir-antigravity", default=None)
     p_pr.add_argument(
         "--test-command",
         default=None,
@@ -4070,6 +4072,7 @@ def main() -> None:
     )
     p_impl.add_argument("--workdir-codex", default=None)
     p_impl.add_argument("--workdir-gemini", default=None)
+    p_impl.add_argument("--workdir-antigravity", default=None)
     p_impl.add_argument("--dry-run", action="store_true")
     _add_antigravity_options(p_impl)
 
@@ -4125,6 +4128,7 @@ def main() -> None:
     )
     p_impl_phase.add_argument("--workdir-codex", default=None)
     p_impl_phase.add_argument("--workdir-gemini", default=None)
+    p_impl_phase.add_argument("--workdir-antigravity", default=None)
     p_impl_phase.add_argument("--dry-run", action="store_true")
     _add_antigravity_options(p_impl_phase)
 
@@ -4145,6 +4149,7 @@ def main() -> None:
     p_decompose.add_argument("--workdir", default=None)
     p_decompose.add_argument("--workdir-codex", default=None)
     p_decompose.add_argument("--workdir-gemini", default=None)
+    p_decompose.add_argument("--workdir-antigravity", default=None)
     p_decompose.add_argument("--dry-run", action="store_true")
     _add_antigravity_options(p_decompose)
 
@@ -4173,6 +4178,7 @@ def main() -> None:
     p_task.add_argument("--reviewers", type=normalize_agent_name, nargs="+", required=True)
     p_task.add_argument("--workdir-codex", default=None)
     p_task.add_argument("--workdir-gemini", default=None)
+    p_task.add_argument("--workdir-antigravity", default=None)
     p_task.add_argument("--workdir", default=None)
     p_task_mem = p_task.add_mutually_exclusive_group()
     p_task_mem.add_argument("--agent-memory", dest="agent_memory", action="store_true", default=True,
