@@ -2619,11 +2619,13 @@ def test_parse_plan_review_drops_future_followups_in_blocking_reviews():
     review = structured_plan_review(
         state="blocking",
         summary="Still blocked.",
+        blocking_plan_issues=["Need clearer rollback coverage."],
         future_followups=["Do this later."],
     )
 
-    with pytest.raises(AgentLoopError, match="Blocking structured plan reviews may not include future"):
-        parse_plan_review(review, reviewer="OpenAI Codex")
+    result = parse_plan_review(review, reviewer="OpenAI Codex")
+    assert result.items.future == ()
+    assert result.items.blocking  # blocking item survives
 
 
 def test_parse_plan_review_rejects_future_disposition_in_blocking_reviews():
@@ -3546,7 +3548,7 @@ def test_parse_pr_review_rejects_invalid_structured_candidate_instead_of_falling
         parse_pr_review(payload, reviewer="OpenAI Codex")
 
 
-def test_parse_structured_pr_review_rejects_future_followups_in_blocking_reviews():
+def test_parse_structured_pr_review_strips_future_followups_in_blocking_reviews():
     payload = (
         json.dumps(
             {
@@ -3563,8 +3565,10 @@ def test_parse_structured_pr_review_rejects_future_followups_in_blocking_reviews
         + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
     )
 
-    with pytest.raises(AgentLoopError, match="Blocking structured reviews may not include future"):
-        parse_structured_pr_review(payload, reviewer="OpenAI Codex")
+    result = parse_structured_pr_review(payload, reviewer="OpenAI Codex")
+    assert result is not None
+    assert result.followups.future == ()
+    assert result.blocking_items  # blocking item survives
 
 
 def test_parse_pr_review_rejects_structured_candidate_with_unknown_nested_keys():
@@ -3832,7 +3836,7 @@ def test_parse_structured_plan_review_dedupes_same_plan_against_blocking_items()
     ]
 
 
-def test_parse_structured_plan_review_rejects_blocking_future_followups():
+def test_parse_structured_plan_review_strips_blocking_future_followups():
     payload = (
         json.dumps(
             {
@@ -3849,8 +3853,10 @@ def test_parse_structured_plan_review_rejects_blocking_future_followups():
         + "\n<!-- AGENT_PLAN_STATE: blocking -->\n-- OpenAI Codex"
     )
 
-    with pytest.raises(AgentLoopError, match="Blocking structured plan reviews may not include future"):
-        parse_structured_plan_review(payload, reviewer="OpenAI Codex")
+    result = parse_structured_plan_review(payload, reviewer="OpenAI Codex")
+    assert result is not None
+    assert result.items.future == ()
+    assert result.items.blocking  # blocking item survives
 
 
 def test_validate_structured_coder_followup_accepts_v1_payload():
