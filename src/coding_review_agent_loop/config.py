@@ -34,8 +34,8 @@ DEFAULT_ANTIGRAVITY_QUOTA_SIGNATURES: tuple[str, ...] = (
 # legacy antigravity_model nor an explicit antigravity_models chain is given. Named
 # for discoverability/symmetry with DEFAULT_ANTIGRAVITY_QUOTA_SIGNATURES.
 DEFAULT_ANTIGRAVITY_MODELS: tuple[str, ...] = (
-    "Gemini 3.1 Pro (High)",
     "Gemini 3.5 Flash (High)",
+    "Gemini 3.1 Pro (High)",
 )
 
 

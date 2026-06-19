@@ -18429,7 +18429,7 @@ def test_config_from_args_antigravity_defaults(tmp_path):
     assert config.coder == "antigravity"
     assert config.antigravity_cmd == "agy"
     assert config.antigravity_model is None
-    assert config.antigravity_models == ("Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (High)")
+    assert config.antigravity_models == ("Gemini 3.5 Flash (High)", "Gemini 3.1 Pro (High)")
     assert config.antigravity_quota_signatures == ("quota", "rate limit", "resource exhausted", "RESOURCE_EXHAUSTED", "429")
     assert config.antigravity_args == ("--dangerously-skip-permissions",)
     assert config.antigravity_dir == default_agent_workdir("OWNER/REPO", "antigravity").resolve()
@@ -18588,7 +18588,7 @@ def test_agent_signature_uses_configured_model(tmp_path):
     config = make_config(tmp_path, codex_model="gpt-5.2-codex", codex_reasoning_effort="high")
     assert agent_signature("codex", config) == "OpenAI Codex: gpt-5.2-codex (high)"
     # antigravity model is always declared (effort already embedded).
-    assert agent_signature("antigravity", config) == "Google Antigravity: Gemini 3.1 Pro (High)"
+    assert agent_signature("antigravity", config) == "Google Antigravity: Gemini 3.5 Flash (High)"
     # gemini with no declared model falls back to the generic signature.
     assert agent_signature("gemini", make_config(tmp_path)) == "Google Gemini"
 
