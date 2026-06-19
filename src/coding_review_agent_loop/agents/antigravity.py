@@ -55,8 +55,14 @@ GitHub, print this exact line immediately before it:
 
 {PUBLIC_RESPONSE_MARKER}
 
-Only content after that line will be posted to GitHub. Do not print the marker
-until you are done with all internal reasoning, tool use, and review work.
+Only content after that line will be posted to GitHub. Run any verification
+steps (tests, file inspection) before you are ready to finalize. When you are
+ready to submit your review: print this marker, output the structured JSON
+response, then end your turn immediately — no further tool calls, narration, or
+output after the response. If background work is still pending, print the marker
+and response now without waiting; do not defer to a background task result. A
+turn that ends without printing this marker results in an empty response and a
+review failure.
 """
 
 

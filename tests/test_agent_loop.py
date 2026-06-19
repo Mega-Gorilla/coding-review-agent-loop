@@ -18786,3 +18786,27 @@ def test_render_public_agent_comment_stamps_model_for_every_kind():
     ]
 
     assert all(comment.endswith(f"-- Google Antigravity: {model}") for comment in rendered)
+
+
+# ---------------------------------------------------------------------------
+# Antigravity prompt — turn-end requirement (#385)
+# ---------------------------------------------------------------------------
+
+
+def test_antigravity_prompt_includes_terminal_response_instruction():
+    from coding_review_agent_loop.agents.antigravity import _with_public_response_marker_instruction
+    composed = _with_public_response_marker_instruction("BASE PROMPT")
+    assert "end your turn immediately" in composed
+    assert "do not defer to a background task result" in composed
+
+
+def test_antigravity_prompt_excludes_old_wait_instruction():
+    from coding_review_agent_loop.agents.antigravity import _with_public_response_marker_instruction
+    composed = _with_public_response_marker_instruction("BASE PROMPT")
+    assert "Do not print the marker until you are done with all internal reasoning" not in composed
+
+
+def test_base_response_file_instruction_includes_must_write_before_turn_ends(tmp_path):
+    from coding_review_agent_loop.agents.base import with_public_response_file_instruction
+    composed = with_public_response_file_instruction("BASE PROMPT", tmp_path / "response.md")
+    assert "before your turn ends" in composed
