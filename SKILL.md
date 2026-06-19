@@ -7,6 +7,19 @@ Claude (you, the host) performs coder/plan turns using your active session conte
 External agents (Codex, Gemini) are invoked via their local CLIs as subprocesses.
 GitHub operations go through `gh`.
 
+**Skill vs the `agent-loop` CLI (when to use which):** use the skill when you want to
+participate/oversee, want Claude turns on your **session model** (e.g. Opus, no
+`--claude-model` needed), or want to avoid the `claude -p` model/binary gotchas; use the
+CLI for hands-off automation — optionally a `--test-command` gate and, with
+`--auto-merge`, CI-wait + merge (both are configuration-dependent; without them the CLI
+runs no gate and won't poll/merge). The skill never auto-merges (merge stays a human
+decision). Keeping the skill also reduces reliance on
+`claude -p` for Claude turns if it is ever billed/restricted differently (announced once,
+then reversed) — whether interactive-session usage is treated differently depends on
+Anthropic's current terms and product behavior (see the "Billing and terms note" below),
+so this is about reducing the dependency, not a guaranteed billing outcome. See the
+"Skill vs CLI — which to use" section in [`README.md`](README.md) for the full comparison.
+
 ## Prerequisites
 
 - `gh` authenticated and configured.
@@ -57,7 +70,8 @@ resume model, and the same posture: **merge is always a human decision.** For an
 mode, you need `OWNER/REPO` and the reviewer set (`codex`, `gemini`, and/or
 `antigravity` — the `agy` CLI, the migration path for Gemini CLI consumer access
 that Google retires on 2026-06-18). `antigravity` works wherever an external
-coder/reviewer does (`--coder antigravity` / `--reviewers antigravity ...`).
+coder/reviewer does (`--coder antigravity` / `--reviewers antigravity ...`); `agy` is
+accepted as an alias (e.g. `--coder agy` / `--reviewers agy`), normalized to `antigravity`.
 With no override, it uses the ordered fallback chain `Gemini 3.1 Pro (High)` →
 `Gemini 3.5 Flash (High)`. Use `--model MODEL` for the legacy single-model
 override or `--antigravity-models MODEL [MODEL ...]` for a custom ordered chain;

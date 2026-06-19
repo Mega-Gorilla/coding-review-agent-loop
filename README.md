@@ -67,7 +67,7 @@ Currently supported local agent CLIs:
 - Gemini CLI via `gemini`
 - Antigravity CLI via `agy` (first-class backend; also the Gemini CLI migration path — see below)
 
-The `agy` backend is supported in every role the other external agents support — `--coder antigravity` and `--reviewer antigravity` — and in skill mode (`--coder antigravity` / `--reviewers antigravity`).
+The `agy` backend is supported in every role the other external agents support — `--coder antigravity` and `--reviewer antigravity` — and in skill mode (`--coder antigravity` / `--reviewers antigravity`). `agy` is also accepted as an alias for `antigravity` in these flags (e.g. `--coder agy`, `--reviewer agy`, skill `--reviewers agy`, `run_external --agent agy`); it is normalized to the canonical `antigravity` internally.
 
 ### Gemini CLI → Antigravity migration
 
@@ -126,6 +126,38 @@ plan, implement (one-shot, decompose, or by-phase), address blocking PR review
 with `run-pr-fix`, and hand the PR back for re-review; the host (Claude) can
 review. See [`SKILL.md`](SKILL.md) for the step-by-step instructions and
 [`docs/skill_mode.md`](docs/skill_mode.md) for the design overview.
+
+### Skill vs CLI — which to use
+
+Both drive the same review loop; they differ in **how Claude's own turns run** and **how
+much they automate**. (External agents — Codex/Gemini/Antigravity — run as subprocesses
+either way; the difference is only the Claude turns.)
+
+**Use the CLI (`agent-loop`) for hands-off automation.** It's a closed-loop driver: it
+loops to approval and implements, and — when configured — runs a test gate
+(`--test-command`) and, with `--auto-merge`, waits for CI (`wait_for_ci`) and merges.
+Without those flags it runs no test gate and does not poll/merge (pending checks stop the
+run).
+It runs without an interactive session (cron/CI/scripts). Claude turns run as isolated
+`claude -p` subprocesses — which means a Claude turn uses the Claude CLI's *default* model
+unless you pass `--claude-model`, and it depends on the `claude` binary being on `PATH`.
+
+**Use the skill (inside a Claude Code session) for high-touch / oversight.** Claude's
+coder/reviewer turns run in *your* interactive session instead of `claude -p`, which:
+- uses **your session model** (e.g. Opus) for Claude turns — no `--claude-model` needed;
+- **doesn't depend on the `claude` binary** (immune to "claude not found" / mid-update races);
+- lets you **watch and steer** each round (plans, reviews, clarifications);
+- keeps PR **merge a human decision** — the skill never auto-merges or waits on CI.
+
+Rule of thumb: **CLI for fire-and-forget through merge; the skill when you want to
+participate, use your session model, or avoid the `claude -p` model/binary gotchas.**
+
+Keeping the skill also **reduces reliance on programmatic `claude -p`** for Claude turns —
+useful if `claude -p` is ever billed or restricted differently (such a change was announced
+once, then reversed). Whether interactive-session usage is actually treated differently
+from `claude -p` depends on Anthropic's current terms and product behavior; see the billing
+note in [`SKILL.md`](SKILL.md). This is about reducing the `claude -p` dependency, not a
+guaranteed billing outcome.
 
 ## Develop This Tool
 
