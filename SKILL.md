@@ -101,7 +101,7 @@ These are the building blocks; the modes sequence them.
      --issue ISSUE --repo OWNER/REPO \
      --plan-file /tmp/agent-loop-skill/{session-id}/plan-r{N}.md \
      --reviewers codex gemini \
-     [--workdir-codex /path/to/checkout] [--workdir-gemini /path/to/checkout]
+     [--workdir-codex /path/to/checkout] [--workdir-gemini /path/to/checkout] [--workdir-antigravity /path/to/checkout]
    ```
    It prints a JSON result:
    ```json
@@ -180,7 +180,7 @@ phase that would be implemented.
    ```bash
    python -m helpers.skill_runner run-pr-round \
      --pr PR_NUMBER --repo OWNER/REPO --reviewers codex gemini \
-     [--head-sha SHA] [--workdir-codex /path/to/checkout] [--workdir-gemini /path/to/checkout] \
+     [--head-sha SHA] [--workdir-codex /path/to/checkout] [--workdir-gemini /path/to/checkout] [--workdir-antigravity /path/to/checkout] \
      [--test-command "pytest -q"] [--test-workdir .] \
      [--approved-followups summarize|issue]
    ```

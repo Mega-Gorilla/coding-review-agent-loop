@@ -1568,7 +1568,8 @@ class TestRunTaskRound:
     def _task_args(self, **over):
         base = dict(task="do X", task_file=None, repo="o/r", coder="codex",
                     plan_file=None, reviewers=["codex"], workdir=None,
-                    workdir_codex=None, workdir_gemini=None, gemini_cmd="gemini",
+                    workdir_codex=None, workdir_gemini=None, workdir_antigravity=None,
+                    gemini_cmd="gemini",
                     antigravity_models=None, antigravity_quota_signatures=None,
                     model=None, dry_run=False)
         base.update(over)
@@ -2895,6 +2896,7 @@ class TestRunDecompose:
             workdir=str(tmp_path),
             workdir_codex=None,
             workdir_gemini=None,
+            workdir_antigravity=None,
             dry_run=False,
         ))
 
@@ -2950,6 +2952,7 @@ class TestRunDecompose:
             workdir=str(tmp_path),
             workdir_codex=None,
             workdir_gemini=None,
+            workdir_antigravity=None,
             dry_run=False,
         ))
 
@@ -2996,6 +2999,7 @@ class TestRunImplementByPhase:
             workdir=str(tmp_path),
             workdir_codex=None,
             workdir_gemini=None,
+            workdir_antigravity=None,
             base="main",
             dry_run=dry_run,
         )
@@ -3335,7 +3339,7 @@ class TestRunReviewerUnavailable:
             issue=1, repo="o/r", reviewers=["gemini", "claude"],
             coder="claude", plan_file=str(plan), dry_run=True,
             agent_memory=False, refresh_agent_memory=False,
-            workdir=str(tmp_path), workdir_codex=None, workdir_gemini=None,
+            workdir=str(tmp_path), workdir_codex=None, workdir_gemini=None, workdir_antigravity=None,
         ))
 
         out = capsys.readouterr().out
@@ -3630,3 +3634,98 @@ def test_render_response_coder_followup_stamps_model_signature():
     assert result.returncode == 0, result.stderr
     rendered = Path(out).read_text(encoding="utf-8")
     assert "Google Antigravity: Gemini 3.1 Pro (High)" in rendered
+
+
+# ---------------------------------------------------------------------------
+# helpers/skill_runner.py — --workdir-antigravity parser parity (#374)
+# ---------------------------------------------------------------------------
+
+class TestWorkdirAntigravityParser:
+    """
+    Verify that --workdir-antigravity is accepted by all six affected subcommands.
+    Each test patches sys.argv with the minimum required arguments plus
+    --workdir-antigravity /tmp/agy, stubs out the dispatched command handler to
+    capture the parsed namespace, calls main(), and asserts the stored value.
+    """
+
+    def _run(self, monkeypatch, argv, cmd_attr, captured):
+        import helpers.skill_runner as sr
+        monkeypatch.setattr(sys, "argv", argv)
+        monkeypatch.setattr(sr, cmd_attr, lambda args: captured.update(vars(args)))
+        sr.main()
+
+    def test_run_plan_round_accepts_workdir_antigravity(self, monkeypatch):
+        import helpers.skill_runner as sr
+        captured = {}
+        self._run(
+            monkeypatch,
+            ["sr", "run-plan-round", "--issue", "1", "--repo", "o/r",
+             "--plan-file", "/dev/null", "--reviewers", "codex",
+             "--workdir-antigravity", "/tmp/agy"],
+            "cmd_run_plan_round",
+            captured,
+        )
+        assert captured.get("workdir_antigravity") == "/tmp/agy"
+
+    def test_run_pr_round_accepts_workdir_antigravity(self, monkeypatch):
+        import helpers.skill_runner as sr
+        captured = {}
+        self._run(
+            monkeypatch,
+            ["sr", "run-pr-round", "--pr", "1", "--repo", "o/r",
+             "--reviewers", "codex", "--workdir-antigravity", "/tmp/agy"],
+            "cmd_run_pr_round",
+            captured,
+        )
+        assert captured.get("workdir_antigravity") == "/tmp/agy"
+
+    def test_run_implement_accepts_workdir_antigravity(self, monkeypatch):
+        import helpers.skill_runner as sr
+        captured = {}
+        self._run(
+            monkeypatch,
+            ["sr", "run-implement", "--issue", "1", "--repo", "o/r",
+             "--coder", "codex", "--plan-file", "/dev/null",
+             "--workdir-antigravity", "/tmp/agy"],
+            "cmd_run_implement",
+            captured,
+        )
+        assert captured.get("workdir_antigravity") == "/tmp/agy"
+
+    def test_run_implement_by_phase_accepts_workdir_antigravity(self, monkeypatch):
+        import helpers.skill_runner as sr
+        captured = {}
+        self._run(
+            monkeypatch,
+            ["sr", "run-implement-by-phase", "--issue", "1", "--repo", "o/r",
+             "--coder", "codex", "--plan-file", "/dev/null",
+             "--workdir-antigravity", "/tmp/agy"],
+            "cmd_run_implement_by_phase",
+            captured,
+        )
+        assert captured.get("workdir_antigravity") == "/tmp/agy"
+
+    def test_run_decompose_accepts_workdir_antigravity(self, monkeypatch):
+        import helpers.skill_runner as sr
+        captured = {}
+        self._run(
+            monkeypatch,
+            ["sr", "run-decompose", "--issue", "1", "--repo", "o/r",
+             "--coder", "codex", "--plan-file", "/dev/null",
+             "--workdir-antigravity", "/tmp/agy"],
+            "cmd_run_decompose",
+            captured,
+        )
+        assert captured.get("workdir_antigravity") == "/tmp/agy"
+
+    def test_run_task_round_accepts_workdir_antigravity(self, monkeypatch):
+        import helpers.skill_runner as sr
+        captured = {}
+        self._run(
+            monkeypatch,
+            ["sr", "run-task-round", "--task", "do X", "--repo", "o/r",
+             "--reviewers", "codex", "--workdir-antigravity", "/tmp/agy"],
+            "cmd_run_task_round",
+            captured,
+        )
+        assert captured.get("workdir_antigravity") == "/tmp/agy"
