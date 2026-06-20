@@ -594,10 +594,38 @@ def _resolve_agent_memory_dir(value: Path | None, *, repo: str, primary_dir: Pat
     return (primary_dir / value).resolve()
 
 
+def preflight_agent_commands(
+    args: argparse.Namespace,
+    runner: Runner,
+    configured_reviewers: tuple[AgentName, ...],
+) -> None:
+    """Validate configured agent CLIs before repository or workdir operations."""
+    if args.dry_run:
+        return
+
+    command_options = {
+        "claude": (args.claude_cmd, "--claude-cmd"),
+        "codex": (args.codex_cmd, "--codex-cmd"),
+        "gemini": (args.gemini_cmd, "--gemini-cmd"),
+        "antigravity": (args.antigravity_cmd, "--antigravity-cmd"),
+    }
+    configured_agents = dict.fromkeys((args.coder, *configured_reviewers))
+    for agent in configured_agents:
+        command, override_flag = command_options[agent]
+        resolved = shutil.which(command)
+        if resolved is None:
+            raise AgentLoopError(
+                f"{command} CLI not found on PATH; install it or pass "
+                f"{override_flag} <path>."
+            )
+        runner.remember_agent_command(command, resolved, override_flag)
+
+
 def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfig:
     configured_reviewers = tuple(args.reviewer or ["codex"])
     if len(set(configured_reviewers)) != len(configured_reviewers):
         raise AgentLoopError("--reviewer cannot include the same agent more than once.")
+    preflight_agent_commands(args, runner, configured_reviewers)
 
     detect_dir = args.codex_dir.resolve() if args.codex_dir is not None else Path.cwd().resolve()
     repo = args.repo or detect_repo(runner, detect_dir, args.gh_cmd)

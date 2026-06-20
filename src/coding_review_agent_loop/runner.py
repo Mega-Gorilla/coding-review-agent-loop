@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence, TypeVar
 
 from .errors import AgentLoopError
 
@@ -29,6 +30,9 @@ class CommandResult:
 # under a pseudo-terminal (see run_with_log use_pty), so we strip these from the
 # captured output before parsing it.
 _ANSI_RE = re.compile(r"\x1B\[[0-9;?]*[ -/]*[@-~]|\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)|\x1B[()][AB0-2]")
+_SPAWN_ATTEMPTS = 3
+_SPAWN_RETRY_BACKOFF_SECONDS = 2
+_SpawnResult = TypeVar("_SpawnResult")
 
 
 def strip_ansi(text: str) -> str:
@@ -49,6 +53,58 @@ def ensure_log_dir_ignored(log_dir: Path) -> None:
 class Runner:
     def __init__(self, *, dry_run: bool = False):
         self.dry_run = dry_run
+        self._resolved_commands: dict[str, str] = {}
+        self._command_override_flags: dict[str, str] = {}
+
+    def remember_agent_command(
+        self,
+        command: str,
+        resolved_path: str,
+        override_flag: str,
+    ) -> None:
+        """Retain preflight evidence for a later spawn-time PATH race."""
+        self._resolved_commands[command] = resolved_path
+        self._command_override_flags[command] = override_flag
+
+    def _missing_command_error(self, command: str) -> AgentLoopError:
+        override_flag = self._command_override_flags.get(command)
+        if override_flag is None:
+            command_name = Path(command).name
+            override_flag = f"--{command_name}-cmd"
+        return AgentLoopError(
+            f"{command} CLI not found on PATH; install it or pass "
+            f"{override_flag} <path>."
+        )
+
+    @staticmethod
+    def _is_dangling_symlink(path: str | None) -> bool:
+        return bool(path and os.path.islink(path) and not os.path.exists(path))
+
+    def _spawn_with_retry(
+        self,
+        cmd: list[str],
+        spawn_attempt: Callable[[], _SpawnResult],
+    ) -> _SpawnResult:
+        command = cmd[0]
+        resolved = shutil.which(command)
+        if resolved is not None:
+            self._resolved_commands[command] = resolved
+
+        for attempt in range(1, _SPAWN_ATTEMPTS + 1):
+            try:
+                return spawn_attempt()
+            except FileNotFoundError as exc:
+                current = shutil.which(command)
+                if current is not None:
+                    self._resolved_commands[command] = current
+                candidate = current or self._resolved_commands.get(command)
+                if not self._is_dangling_symlink(candidate):
+                    raise self._missing_command_error(command) from exc
+                if attempt == _SPAWN_ATTEMPTS:
+                    raise self._missing_command_error(command) from exc
+                time.sleep(_SPAWN_RETRY_BACKOFF_SECONDS)
+
+        raise AssertionError("spawn retry loop exited unexpectedly")
 
     def run(
         self,
@@ -122,14 +178,17 @@ class Runner:
             # stderr=subprocess.STDOUT merges stderr into the log file.
             # All agent backends (Claude, Codex, Gemini) use run_with_log,
             # so stderr capture is uniform across them (issue #266).
-            proc = subprocess.Popen(
+            proc = self._spawn_with_retry(
                 cmd,
-                cwd=cwd,
-                stdin=subprocess.DEVNULL,
-                stdout=log_file,
-                stderr=subprocess.STDOUT,
-                text=True,
-                env={**os.environ, **env} if env is not None else None,
+                lambda: subprocess.Popen(
+                    cmd,
+                    cwd=cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_file,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env={**os.environ, **env} if env is not None else None,
+                ),
             )
             try:
                 while True:
@@ -191,21 +250,36 @@ class Runner:
         started = time.monotonic()
         next_progress = started + progress_interval_seconds
         header = f"$ {' '.join(cmd)}\n\n"
-        master_fd, slave_fd = pty.openpty()
         chunks: list[bytes] = []
         with log_path.open("wb") as log_file:
             log_file.write(header.encode("utf-8"))
             log_file.flush()
-            proc = subprocess.Popen(
-                cmd,
-                cwd=cwd,
-                stdin=slave_fd,
-                stdout=slave_fd,
-                stderr=slave_fd,
-                close_fds=True,
-                start_new_session=True,
-                env={**os.environ, **env} if env is not None else None,
-            )
+            allocated_fds: tuple[int, int] | None = None
+
+            def spawn_pty() -> subprocess.Popen[bytes]:
+                nonlocal allocated_fds
+                master_fd, slave_fd = pty.openpty()
+                allocated_fds = (master_fd, slave_fd)
+                try:
+                    return subprocess.Popen(
+                        cmd,
+                        cwd=cwd,
+                        stdin=slave_fd,
+                        stdout=slave_fd,
+                        stderr=slave_fd,
+                        close_fds=True,
+                        start_new_session=True,
+                        env={**os.environ, **env} if env is not None else None,
+                    )
+                except BaseException:
+                    os.close(master_fd)
+                    os.close(slave_fd)
+                    allocated_fds = None
+                    raise
+
+            proc = self._spawn_with_retry(cmd, spawn_pty)
+            assert allocated_fds is not None
+            master_fd, slave_fd = allocated_fds
             os.close(slave_fd)
             try:
                 while True:
