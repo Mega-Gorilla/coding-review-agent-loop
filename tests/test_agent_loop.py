@@ -18424,6 +18424,238 @@ def test_antigravity_backend_ignores_partial_response_file_on_fallback(tmp_path)
     assert result.model_used == "ModelB"
 
 
+def test_antigravity_backend_writes_gemini_md_single_shot_instruction(tmp_path):
+    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+
+    agy_dir = tmp_path / "antigravity"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    captured: list[str] = []
+
+    class CapturingRunner(FakeRunner):
+        def run_with_log(self, args, *, cwd, **kwargs):
+            gemini_md = cwd / "GEMINI.md"
+            captured.append(gemini_md.read_text(encoding="utf-8") if gemini_md.exists() else "")
+            return super().run_with_log(args, cwd=cwd, **kwargs)
+
+    runner = CapturingRunner(antigravity_outputs=[("ok", 0)])
+    config = make_config(tmp_path, antigravity_dir=agy_dir)
+    AntigravityBackend().run(runner, config, "Review this PR.", run_id="r1")
+
+    assert captured, "run_with_log was not called"
+    assert "Do NOT spawn background execution tasks" in captured[0]
+    # prefix is stripped → file deleted (no remaining content after it)
+    assert not (agy_dir / "GEMINI.md").exists()
+    # Lock file must not appear in the worktree root (it lives in .git/ only)
+    assert not (agy_dir / "GEMINI.md.lock").exists()
+
+
+def test_antigravity_backend_preserves_existing_gemini_md_during_and_after_run(tmp_path):
+    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+
+    agy_dir = tmp_path / "antigravity"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    original_content = "# My project rules\nUse tabs.\n"
+    (agy_dir / "GEMINI.md").write_text(original_content, encoding="utf-8")
+    captured: list[str] = []
+
+    class CapturingRunner(FakeRunner):
+        def run_with_log(self, args, *, cwd, **kwargs):
+            gemini_md = cwd / "GEMINI.md"
+            captured.append(gemini_md.read_text(encoding="utf-8") if gemini_md.exists() else "")
+            return super().run_with_log(args, cwd=cwd, **kwargs)
+
+    runner = CapturingRunner(antigravity_outputs=[("ok", 0)])
+    config = make_config(tmp_path, antigravity_dir=agy_dir)
+    AntigravityBackend().run(runner, config, "Review this PR.", run_id="r1")
+
+    assert captured, "run_with_log was not called"
+    # Instruction was prepended before the original content during the run
+    assert "Do NOT spawn background execution tasks" in captured[0]
+    assert "My project rules" in captured[0]
+    assert captured[0].index("Do NOT spawn") < captured[0].index("My project rules")
+    # Prefix stripped after the run → original content remains
+    after = (agy_dir / "GEMINI.md").read_text(encoding="utf-8")
+    assert after == original_content
+    assert "Do NOT spawn" not in after
+
+
+def test_antigravity_backend_preserves_agent_edits_to_gemini_md(tmp_path):
+    """Agent (coder role) edits the content after our prefix — preserved after run."""
+    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+
+    agy_dir = tmp_path / "antigravity"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    original_content = "# Original rules\n"
+    (agy_dir / "GEMINI.md").write_text(original_content, encoding="utf-8")
+
+    class EditingRunner(FakeRunner):
+        def run_with_log(self, args, *, cwd, **kwargs):
+            # Simulate agent appending to the file after the injected prefix
+            gemini_md = cwd / "GEMINI.md"
+            current = gemini_md.read_text(encoding="utf-8")
+            gemini_md.write_text(current + "# New agent-added rules\n", encoding="utf-8")
+            return super().run_with_log(args, cwd=cwd, **kwargs)
+
+    runner = EditingRunner(antigravity_outputs=[("ok", 0)])
+    config = make_config(tmp_path, antigravity_dir=agy_dir)
+    AntigravityBackend().run(runner, config, "Review this PR.", run_id="r1")
+
+    after = (agy_dir / "GEMINI.md").read_text(encoding="utf-8")
+    # Original content and agent's new content both present; our prefix stripped
+    assert "Original rules" in after
+    assert "New agent-added rules" in after
+    assert "Do NOT spawn" not in after
+
+
+def test_antigravity_backend_cleans_up_gemini_md_on_exception(tmp_path):
+    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+
+    agy_dir = tmp_path / "antigravity"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+
+    class RaisingRunner(FakeRunner):
+        def run_with_log(self, args, *, cwd, **kwargs):
+            raise RuntimeError("subprocess failed")
+
+    # Sub-test A: no pre-existing GEMINI.md — prefix stripped → file deleted
+    runner = RaisingRunner()
+    config = make_config(tmp_path, antigravity_dir=agy_dir)
+    with pytest.raises(RuntimeError):
+        AntigravityBackend().run(runner, config, "Review this PR.", run_id="r1")
+    assert not (agy_dir / "GEMINI.md").exists()
+
+    # Sub-test B: pre-existing GEMINI.md — prefix stripped, original content restored
+    original_content = "# Existing rules\n"
+    (agy_dir / "GEMINI.md").write_text(original_content, encoding="utf-8")
+    runner2 = RaisingRunner()
+    with pytest.raises(RuntimeError):
+        AntigravityBackend().run(runner2, config, "Review this PR.", run_id="r2")
+    after = (agy_dir / "GEMINI.md").read_text(encoding="utf-8")
+    assert after == original_content
+    assert "Do NOT spawn" not in after
+
+
+def test_antigravity_backend_gemini_md_lock_serializes_concurrent_access(tmp_path):
+    """flock on GEMINI.md.lock prevents a second run from starting until the first
+    completes its inject→run→strip sequence."""
+    import fcntl
+    import threading
+    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+
+    agy_dir = tmp_path / "antigravity"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    config = make_config(tmp_path, antigravity_dir=agy_dir)
+
+    order: list[str] = []
+    # Lock lives in .git/ to avoid polluting the worktree
+    lock_path = agy_dir / ".git" / "GEMINI.md.lock"
+    (agy_dir / ".git").mkdir(parents=True, exist_ok=True)
+
+    # Thread A: pre-acquires the exclusive lock, records "A-holds", sleeps briefly,
+    # records "A-releases", then releases the lock. This simulates another process
+    # holding the lock while running agy.
+    lock_acquired = threading.Event()
+    lock_released = threading.Event()
+
+    def hold_lock():
+        lf = lock_path.open("a+")
+        fcntl.flock(lf, fcntl.LOCK_EX)
+        order.append("A-holds")
+        lock_acquired.set()
+        lock_released.wait()
+        order.append("A-releases")
+        fcntl.flock(lf, fcntl.LOCK_UN)
+        lf.close()
+
+    t = threading.Thread(target=hold_lock, daemon=True)
+    t.start()
+    lock_acquired.wait()
+
+    # Thread B (main): tries to run AntigravityBackend — should block on LOCK_EX
+    # until Thread A releases.
+    run_started = threading.Event()
+
+    class RecordingRunner(FakeRunner):
+        def run_with_log(self, args, *, cwd, **kwargs):
+            order.append("B-run")
+            return super().run_with_log(args, cwd=cwd, **kwargs)
+
+    def run_backend():
+        AntigravityBackend().run(
+            RecordingRunner(antigravity_outputs=[("ok", 0)]),
+            config,
+            "Review.",
+            run_id="r1",
+        )
+        order.append("B-done")
+
+    backend_thread = threading.Thread(target=run_backend, daemon=True)
+    backend_thread.start()
+
+    # Give the backend thread a moment to block on the lock, then release it.
+    import time
+    time.sleep(0.05)
+    lock_released.set()
+    t.join(timeout=5)
+    backend_thread.join(timeout=10)
+
+    # A-holds must precede B-run and A-releases must precede B-run
+    assert "A-holds" in order
+    assert "A-releases" in order
+    assert "B-run" in order
+    assert order.index("A-holds") < order.index("B-run")
+    assert order.index("A-releases") < order.index("B-run")
+
+
+def test_antigravity_module_imports_without_fcntl():
+    """Antigravity module must import cleanly even when fcntl is unavailable (Windows)."""
+    import importlib
+    import sys
+
+    # Remove any cached import of the module under test
+    mods_to_remove = [k for k in sys.modules if "antigravity" in k]
+    for m in mods_to_remove:
+        del sys.modules[m]
+
+    # Simulate a platform without fcntl by hiding it
+    original = sys.modules.pop("fcntl", None)
+    sys.modules["fcntl"] = None  # type: ignore[assignment]
+    try:
+        import coding_review_agent_loop.agents.antigravity as mod
+        assert hasattr(mod, "AntigravityBackend")
+    finally:
+        if original is not None:
+            sys.modules["fcntl"] = original
+        else:
+            sys.modules.pop("fcntl", None)
+        # Re-remove so later tests get a clean import
+        for k in list(sys.modules):
+            if "antigravity" in k:
+                del sys.modules[k]
+
+
+def test_antigravity_backend_git_lock_path_follows_linked_worktree(tmp_path):
+    """_git_lock_path resolves a file-form .git marker (linked worktree) to the real
+    git dir instead of trying to mkdir the .git file."""
+    from coding_review_agent_loop.agents.antigravity import _git_lock_path
+
+    agy_dir = tmp_path / "worktree"
+    agy_dir.mkdir()
+    real_git_dir = tmp_path / "repo.git" / "worktrees" / "wt"
+    real_git_dir.mkdir(parents=True)
+
+    # Simulate the .git file that git worktree add creates
+    (agy_dir / ".git").write_text(
+        f"gitdir: {real_git_dir}\n", encoding="utf-8"
+    )
+
+    lock = _git_lock_path(agy_dir)
+    assert lock.parent == real_git_dir
+    assert lock.name == "GEMINI.md.lock"
+    # Must not attempt to mkdir over the .git file
+    assert (agy_dir / ".git").is_file()
+
+
 def test_antigravity_backend_strips_public_response_marker(tmp_path):
     from coding_review_agent_loop.agents.antigravity import AntigravityBackend
     from coding_review_agent_loop.protocol import PUBLIC_RESPONSE_MARKER
