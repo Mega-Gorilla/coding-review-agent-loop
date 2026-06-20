@@ -1,8 +1,10 @@
 import base64
 import datetime
 import json
+import os
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -12035,6 +12037,126 @@ def test_omitted_agent_dirs_default_to_repo_scoped_temp_checkouts(monkeypatch, t
     ).resolve()
 
 
+@pytest.mark.parametrize(
+    ("coder", "reviewer", "missing_command", "override_flag"),
+    [
+        ("claude", "codex", "missing-claude", "--claude-cmd"),
+        ("claude", "gemini", "missing-gemini", "--gemini-cmd"),
+    ],
+)
+def test_config_preflight_rejects_missing_agent_before_repo_detection(
+    monkeypatch,
+    coder,
+    reviewer,
+    missing_command,
+    override_flag,
+):
+    parser = build_parser()
+    args = parser.parse_args([
+        "task",
+        "Fix the bug",
+        "--coder",
+        coder,
+        "--reviewer",
+        reviewer,
+        f"--{coder}-cmd",
+        missing_command if override_flag == f"--{coder}-cmd" else coder,
+        f"--{reviewer}-cmd",
+        missing_command if override_flag == f"--{reviewer}-cmd" else reviewer,
+    ])
+    detection_calls = []
+    monkeypatch.setattr(
+        "coding_review_agent_loop.config.detect_repo",
+        lambda *call_args: detection_calls.append(call_args),
+    )
+    monkeypatch.setattr(
+        "coding_review_agent_loop.config.shutil.which",
+        lambda command: None if command == missing_command else f"/bin/{command}",
+    )
+
+    with pytest.raises(
+        AgentLoopError,
+        match=rf"{missing_command} CLI not found on PATH.*{override_flag}",
+    ):
+        config_from_args(args, Runner())
+
+    assert detection_calls == []
+
+
+def test_config_preflight_checks_only_unique_configured_agents(monkeypatch, tmp_path):
+    parser = build_parser()
+    args = parser.parse_args([
+        "task",
+        "Fix the bug",
+        "--repo",
+        "OWNER/REPO",
+        "--coder",
+        "codex",
+        "--reviewer",
+        "codex",
+        "--codex-dir",
+        str(tmp_path / "codex"),
+    ])
+    checked = []
+
+    def fake_which(command):
+        checked.append(command)
+        return f"/bin/{command}"
+
+    monkeypatch.setattr("coding_review_agent_loop.config.shutil.which", fake_which)
+
+    config = config_from_args(args, Runner())
+
+    assert config.coder == "codex"
+    assert checked == ["codex"]
+
+
+def test_config_preflight_accepts_custom_absolute_command(tmp_path):
+    command = tmp_path / "custom-codex"
+    command.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    command.chmod(0o755)
+    parser = build_parser()
+    args = parser.parse_args([
+        "task",
+        "Fix the bug",
+        "--repo",
+        "OWNER/REPO",
+        "--coder",
+        "codex",
+        "--reviewer",
+        "codex",
+        "--codex-cmd",
+        str(command),
+    ])
+
+    config = config_from_args(args, Runner())
+
+    assert config.codex_cmd == str(command)
+
+
+def test_config_preflight_skips_dry_run_command_preview(monkeypatch):
+    parser = build_parser()
+    args = parser.parse_args([
+        "task",
+        "Fix the bug",
+        "--repo",
+        "OWNER/REPO",
+        "--dry-run",
+        "--claude-cmd",
+        "missing-claude",
+        "--codex-cmd",
+        "missing-codex",
+    ])
+    monkeypatch.setattr(
+        "coding_review_agent_loop.config.shutil.which",
+        lambda command: pytest.fail(f"unexpected preflight for {command}"),
+    )
+
+    config = config_from_args(args, Runner(dry_run=True))
+
+    assert config.dry_run is True
+
+
 def test_omitted_cli_base_is_preserved_for_runtime_resolution(tmp_path):
     parser = build_parser()
     args = parser.parse_args([
@@ -18712,6 +18834,130 @@ def test_runner_pty_reports_tty_and_strips_ansi(tmp_path):
     assert "GREEN" in result.stdout
     assert "\x1b[" not in result.stdout  # ANSI stripped from captured output
     assert result.returncode == 0
+
+
+@pytest.mark.parametrize("use_pty", [False, True])
+def test_runner_retries_dangling_symlink_spawn_and_recovers(
+    monkeypatch,
+    tmp_path,
+    use_pty,
+):
+    import coding_review_agent_loop.runner as runner_module
+
+    missing_target = tmp_path / "updating-agent-target"
+    command = tmp_path / "agent"
+    command.symlink_to(missing_target)
+    runner = Runner()
+    runner.remember_agent_command(str(command), str(command), "--codex-cmd")
+    original_popen = runner_module.subprocess.Popen
+    popen_calls = []
+    sleep_calls = []
+
+    def flaky_popen(*args, **kwargs):
+        popen_calls.append(args[0])
+        if len(popen_calls) == 1:
+            raise FileNotFoundError(str(command))
+        return original_popen(*args, **kwargs)
+
+    def restore_command(delay):
+        sleep_calls.append(delay)
+        command.unlink()
+        command.symlink_to(sys.executable)
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", flaky_popen)
+    monkeypatch.setattr(runner_module.time, "sleep", restore_command)
+
+    result = runner.run_with_log(
+        [str(command), "-c", "print('recovered')"],
+        cwd=tmp_path,
+        log_path=tmp_path / "logs" / f"retry-{use_pty}.log",
+        label="Retry probe",
+        progress_interval_seconds=999,
+        use_pty=use_pty,
+    )
+
+    assert result.returncode == 0
+    assert "recovered" in result.stdout
+    assert len(popen_calls) == 2
+    assert sleep_calls[0] == 2
+    assert all(delay == 1 for delay in sleep_calls[1:])
+
+
+@pytest.mark.parametrize("use_pty", [False, True])
+def test_runner_dangling_symlink_spawn_retry_is_bounded(
+    monkeypatch,
+    tmp_path,
+    use_pty,
+):
+    import coding_review_agent_loop.runner as runner_module
+
+    command = tmp_path / "agent"
+    command.symlink_to(tmp_path / "missing-target")
+    runner = Runner()
+    runner.remember_agent_command(str(command), str(command), "--codex-cmd")
+    popen_calls = []
+    sleep_calls = []
+
+    def missing_popen(*args, **kwargs):
+        popen_calls.append(args[0])
+        raise FileNotFoundError(str(command))
+
+    monkeypatch.setattr(runner_module.subprocess, "Popen", missing_popen)
+    monkeypatch.setattr(
+        runner_module.time,
+        "sleep",
+        lambda delay: sleep_calls.append(delay),
+    )
+
+    with pytest.raises(
+        AgentLoopError,
+        match=r"CLI not found on PATH.*--codex-cmd",
+    ):
+        runner.run_with_log(
+            [str(command), "--version"],
+            cwd=tmp_path,
+            log_path=tmp_path / "logs" / f"bounded-{use_pty}.log",
+            label="Bounded retry probe",
+            progress_interval_seconds=999,
+            use_pty=use_pty,
+        )
+
+    assert len(popen_calls) == 3
+    assert sleep_calls == [2, 2]
+
+
+def test_runner_missing_command_without_dangling_evidence_does_not_retry(
+    monkeypatch,
+    tmp_path,
+):
+    import coding_review_agent_loop.runner as runner_module
+
+    popen_calls = []
+    sleep_calls = []
+
+    def missing_popen(*args, **kwargs):
+        popen_calls.append(args[0])
+        raise FileNotFoundError("missing-agent")
+
+    monkeypatch.setattr(runner_module.shutil, "which", lambda command: None)
+    monkeypatch.setattr(runner_module.subprocess, "Popen", missing_popen)
+    monkeypatch.setattr(
+        runner_module.time,
+        "sleep",
+        lambda delay: sleep_calls.append(delay),
+    )
+
+    with pytest.raises(AgentLoopError, match="missing-agent CLI not found on PATH"):
+        Runner().run_with_log(
+            ["missing-agent", "--version"],
+            cwd=tmp_path,
+            log_path=tmp_path / "logs" / "missing.log",
+            label="Missing probe",
+            progress_interval_seconds=999,
+        )
+
+    assert len(popen_calls) == 1
+    assert sleep_calls == []
 
 
 def test_antigravity_registry():
