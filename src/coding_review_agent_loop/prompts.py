@@ -831,16 +831,11 @@ run relevant tests, commit, push, and open a pull request against {config.base}.
 {_memory_block(memory)}
 
 Do not wait for {reviewer_name} yourself; this local orchestrator will run {reviewer_name} after
-you create the PR. In your final response, include the PR number using exactly
-this marker:
+you create the PR. Use blocking here to hand the PR to {reviewer_name} for review. Do not place
+your signature before the AGENT_STATE marker. Your response must end with, in this exact order:
 
 <!-- AGENT_PR: <number> -->
-
-Also include exactly one state marker:
-
 <!-- AGENT_STATE: blocking -->
-
-Use blocking here to hand the PR to {reviewer_name} for review. Sign the response as:
 -- {coder_signature}
 """
 
@@ -877,18 +872,18 @@ areas to change, edge cases, and test strategy.
 {_memory_block(memory)}
 
 Do not wait for {reviewer_name} yourself; this local orchestrator will run
-{reviewer_name} to review the plan. End your final response with exactly one
-planning marker:
+{reviewer_name} to review the plan. Use blocking to hand the plan to {reviewer_name}
+for review. If the issue is materially ambiguous before a useful plan can be written,
+ask focused clarifying questions and use <!-- AGENT_CLARIFY --> instead. Do not place
+your signature before the AGENT_PLAN_STATE or AGENT_CLARIFY marker. Your response
+must end with, in this exact order:
 
 <!-- AGENT_PLAN_STATE: blocking -->
+-- {coder_signature}
 
-Use blocking here to hand the plan to {reviewer_name} for review. If the issue
-is materially ambiguous before a useful plan can be written, ask focused
-clarifying questions and end with exactly this marker:
+or, if clarifying:
 
 <!-- AGENT_CLARIFY -->
-
-Sign the response as:
 -- {coder_signature}
 """
 
@@ -1289,12 +1284,11 @@ the `AGENT_PLAN_STATE` footer immediately after the JSON. Make the footer state
 match the JSON state, and include only your standalone signature after the
 footer.
 
-This is planning round {round_number}. End your final response with exactly one
-planning marker:
+This is planning round {round_number}. Use blocking to hand the revised plan back to
+{reviewer_name}. Do not place your signature before the AGENT_PLAN_STATE footer. Your
+response must end with, in this exact order:
 
 <!-- AGENT_PLAN_STATE: blocking -->
-
-Use blocking to hand the revised plan back to {reviewer_name}. Sign the response as:
 -- {coder_signature}
 """
 
@@ -1405,16 +1399,12 @@ Approved implementation plan:
 {approved_plan}
 
 Do not wait for {reviewer_name} yourself; this local orchestrator will run
-{reviewer_name} after you create the PR. In your final response, include the PR
-number using exactly this marker:
+{reviewer_name} after you create the PR. Use blocking here to hand the PR to
+{reviewer_name} for review. Do not place your signature before the AGENT_STATE
+marker. Your response must end with, in this exact order:
 
 <!-- AGENT_PR: <number> -->
-
-Also include exactly one state marker:
-
 <!-- AGENT_STATE: blocking -->
-
-Use blocking here to hand the PR to {reviewer_name} for review. Sign the response as:
 -- {coder_signature}
 """
 
@@ -1438,22 +1428,26 @@ Use this local checkout as your workspace. Decide between two paths:
 (a) If the task is clear enough to implement, create a branch, implement the
     change, run relevant tests, commit, push, and open a pull request against
     {config.base}. Do not wait for {reviewer_name}; this local orchestrator
-    will run {reviewer_name} after you create the PR. End your final response
-    with both markers:
+    will run {reviewer_name} after you create the PR.
 {_scratch_file_guidance()}
 {_coder_test_reporting_guidance()}
 
-    <!-- AGENT_PR: <number> -->
-    <!-- AGENT_STATE: blocking -->
-
 (b) If the task is genuinely ambiguous or missing information that would change
     the implementation, do NOT write code. Instead, ask focused clarifying
-    questions and end your final response with exactly this marker:
-
-    <!-- AGENT_CLARIFY -->
+    questions.
 
 Prefer (a) when reasonable assumptions can be documented in the PR description;
-choose (b) only for material ambiguity. Sign your response as:
+choose (b) only for material ambiguity. Do not place your signature before the
+AGENT_STATE or AGENT_CLARIFY marker. Your response must end with, in this exact
+order — for (a):
+
+<!-- AGENT_PR: <number> -->
+<!-- AGENT_STATE: blocking -->
+-- {coder_signature}
+
+or for (b):
+
+<!-- AGENT_CLARIFY -->
 -- {coder_signature}
 """
 
@@ -1481,17 +1475,20 @@ Clarification so far:
 {qa_blocks}
 
 Now proceed. Strongly prefer to implement the task and open a PR. Only ask
-again if a critical detail is still missing. Use the same response markers as
-before:
+again if a critical detail is still missing.
 {_scratch_file_guidance()}
 {_coder_test_reporting_guidance()}
 
-- For implementation: include both <!-- AGENT_PR: <number> --> and
-  <!-- AGENT_STATE: blocking --> at the end of your final response.
-- For another clarification round: end your final response with exactly
-  <!-- AGENT_CLARIFY -->.
+Do not place your signature before the AGENT_STATE or AGENT_CLARIFY marker.
+Your response must end with, in this exact order:
 
-Sign your response as:
+For implementation:
+<!-- AGENT_PR: <number> -->
+<!-- AGENT_STATE: blocking -->
+-- {coder_signature}
+
+For another clarification round:
+<!-- AGENT_CLARIFY -->
 -- {coder_signature}
 """
 
