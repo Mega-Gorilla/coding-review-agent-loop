@@ -133,6 +133,7 @@ from .comment_rendering import (
     _render_public_review_comment,
     _replace_structured_section,
     _review_freeform_summary_text,
+    normalize_freeform_signature,
     render_public_agent_comment,
     render_canonical_plan_revision,
     render_canonical_plan_steps,
@@ -1520,7 +1521,7 @@ def _implement_approved_issue(
         config=config,
         pr_number=pr_number,
         body=_attach_round_metadata(
-            coder_output,
+            normalize_freeform_signature(coder_output, agent=config.coder, config=config, model_used=coder_response.model_used),
             PostedRoundMetadata(
                 flow="pr",
                 role="coder",
@@ -1528,6 +1529,7 @@ def _implement_approved_issue(
                 round_number=1,
                 subject=str(initial_pr_context.metadata.head_sha or "unknown"),
                 prior_items=(),
+                model_used=coder_response.model_used,
             ),
         ),
     )
@@ -1667,6 +1669,10 @@ def _run_plan_first_loop(
                 config=config,
                 model_used=plan_response.model_used,
             )
+        else:
+            public_plan_output = normalize_freeform_signature(
+                plan_output, agent=config.coder, config=config, model_used=plan_response.model_used
+            )
         post_issue_comment(
             runner,
             config=config,
@@ -1683,6 +1689,7 @@ def _run_plan_first_loop(
                     canonical_plan=canonical_plan,
                     raw_structured_coder_response=raw_structured_coder_response,
                     compact_prior_summaries=tuple(compact_prior_summaries),
+                    model_used=plan_response.model_used,
                 ),
             ),
         )
@@ -1733,9 +1740,7 @@ def _run_plan_first_loop(
             resumed_record = resumed_by_name.get(reviewer_name)
             if resumed_record is not None:
                 review_output = resumed_record.body
-                # Resumed from a posted comment: the model is not recorded, so the
-                # signature falls back to the configured model (#332).
-                review_model_used = None
+                review_model_used = resumed_record.metadata.model_used
                 structured_review = parse_structured_plan_review(
                     review_output,
                     reviewer=reviewer_name,
@@ -1885,6 +1890,7 @@ def _run_plan_first_loop(
                             new_items=tuple(reviewer_new_unresolved_items),
                             state=review_state,
                             compact_prior_summaries=tuple(compact_prior_summaries),
+                            model_used=review_model_used,
                         ),
                     ),
                 )
@@ -2274,6 +2280,9 @@ def _run_plan_first_loop(
             )
         else:
             current_plan = plan_response.text
+            public_comment = normalize_freeform_signature(
+                plan_response.text, agent=config.coder, config=config, model_used=plan_response.model_used
+            )
         coder_session_id = plan_response.session_id
         post_issue_comment(
             runner,
@@ -2291,6 +2300,7 @@ def _run_plan_first_loop(
                     canonical_plan=canonical_plan,
                     raw_structured_coder_response=raw_structured_coder_response,
                     compact_prior_summaries=tuple(compact_prior_summaries),
+                    model_used=plan_response.model_used,
                 ),
             ),
         )
@@ -2371,7 +2381,7 @@ def run_issue_loop(
             config=config,
             pr_number=pr_number,
             body=_attach_round_metadata(
-                coder_output,
+                normalize_freeform_signature(coder_output, agent=config.coder, config=config, model_used=coder_response.model_used),
                 PostedRoundMetadata(
                     flow="pr",
                     role="coder",
@@ -2379,6 +2389,7 @@ def run_issue_loop(
                     round_number=1,
                     subject=str(initial_pr_metadata.head_sha or "unknown"),
                     prior_items=(),
+                    model_used=coder_response.model_used,
                 ),
             ),
         )
@@ -2476,7 +2487,7 @@ def run_task_loop(
                     config=config,
                     pr_number=pr_number,
                     body=_attach_round_metadata(
-                        coder_output,
+                        normalize_freeform_signature(coder_output, agent=config.coder, config=config, model_used=coder_response.model_used),
                         PostedRoundMetadata(
                             flow="pr",
                             role="coder",
@@ -2484,6 +2495,7 @@ def run_task_loop(
                             round_number=1,
                             subject=str(initial_pr_metadata.head_sha or "unknown"),
                             prior_items=(),
+                            model_used=coder_response.model_used,
                         ),
                     ),
                 )
@@ -2674,7 +2686,7 @@ def run_pr_loop(
                 resumed_record = resumed_by_name.get(reviewer_name)
                 if resumed_record is not None:
                     review_output = resumed_record.body
-                    review_model_used = None
+                    review_model_used = resumed_record.metadata.model_used
                     reparsed_review = parse_review(review_output, reviewer=reviewer_name)
                     parsed_review = ParsedReview(
                         state=resumed_record.metadata.state or parse_agent_state(review_output),
@@ -2842,6 +2854,7 @@ def run_pr_loop(
                                     dispositions=parsed_review.dispositions,
                                     new_items=tuple(reviewer_new_unresolved_items),
                                     state=review_state,
+                                    model_used=review_model_used,
                                 ),
                             ),
                         )
@@ -2890,6 +2903,7 @@ def run_pr_loop(
                                 dispositions=parsed_review.dispositions,
                                 new_items=tuple(reviewer_new_unresolved_items),
                                 state=review_state,
+                                model_used=review_model_used,
                             ),
                         ),
                     )
@@ -3196,6 +3210,9 @@ def run_pr_loop(
                     coder_output,
                     assigned_workdir=active_workdir(config),
                 )
+                public_comment = normalize_freeform_signature(
+                    coder_output, agent=config.coder, config=config, model_used=coder_response.model_used
+                )
 
             unresolved_items = _reconcile_human_requirements_ack_item(
                 unresolved_items,
@@ -3220,6 +3237,7 @@ def run_pr_loop(
                         prior_items=tuple(unresolved_items),
                         raw_structured_coder_response=raw_structured_coder_response,
                         compact_prior_summaries=tuple(pr_compact_prior_summaries),
+                        model_used=coder_response.model_used,
                     ),
                 ),
             )
