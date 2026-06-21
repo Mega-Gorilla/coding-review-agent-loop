@@ -2014,7 +2014,7 @@ def _run_plan_first_loop(
                         f"Planning round {round_number}: {reviewer_name} approved without "
                         "HUMAN_REQUIREMENTS_RESOLVED; attempting repair",
                     )
-                    repaired_text, _, repair_attempts = _run_structured_repair(
+                    repaired_text, repaired_validated, repair_attempts = _run_structured_repair(
                         review_output,
                         runner=runner,
                         config=config,
@@ -2036,61 +2036,53 @@ def _run_plan_first_loop(
                     _log_repair_attempts(
                         config, f"Planning round {round_number}: {reviewer_name}", repair_attempts
                     )
-                    if repaired_text is not None:
-                        try:
-                            repaired_parsed = _validate_plan_review_response(
-                                repaired_text,
-                                reviewer=reviewer_name,
-                                unresolved_items=prior_unresolved_items,
-                                current_round_items=round_new_unresolved_items,
+                    if repaired_validated is not None:
+                        repaired_parsed = repaired_validated
+                        if (
+                            repaired_parsed.state == "approved"
+                            and human_requirements_resolved(repaired_text)
+                        ):
+                            log(
+                                config,
+                                f"Planning round {round_number}: repair recovered "
+                                f"HUMAN_REQUIREMENTS_RESOLVED for {reviewer_name}",
                             )
-                            if (
-                                repaired_parsed.state == "approved"
-                                and human_requirements_resolved(repaired_text)
-                            ):
-                                log(
-                                    config,
-                                    f"Planning round {round_number}: repair recovered "
-                                    f"HUMAN_REQUIREMENTS_RESOLVED for {reviewer_name}",
+                            continue
+                        if repaired_parsed.state == "blocking":
+                            log(
+                                config,
+                                f"Planning round {round_number}: repair returned blocking for "
+                                f"{reviewer_name}; treating as reviewer blocking",
+                            )
+                            blocking_reviews.append((reviewer_name, repaired_text))
+                            for item in repaired_parsed.items.blocking:
+                                new_item = _next_unresolved_item(
+                                    item_number=next_unresolved_item_number,
+                                    reviewer=item.reviewer,
+                                    source_round=round_number,
+                                    text=item.text,
+                                    status="blocking",
                                 )
-                                continue
-                            if repaired_parsed.state == "blocking":
-                                log(
-                                    config,
-                                    f"Planning round {round_number}: repair returned blocking for "
-                                    f"{reviewer_name}; treating as reviewer blocking",
+                                round_new_unresolved_items.append(new_item)
+                                unresolved_items = [*unresolved_items, new_item]
+                                next_unresolved_item_number += 1
+                            for item in repaired_parsed.items.same_plan:
+                                new_item = _next_unresolved_item(
+                                    item_number=next_unresolved_item_number,
+                                    reviewer=item.reviewer,
+                                    source_round=round_number,
+                                    text=item.text,
+                                    status="same-plan",
                                 )
-                                blocking_reviews.append((reviewer_name, repaired_text))
-                                for item in repaired_parsed.items.blocking:
-                                    new_item = _next_unresolved_item(
-                                        item_number=next_unresolved_item_number,
-                                        reviewer=item.reviewer,
-                                        source_round=round_number,
-                                        text=item.text,
-                                        status="blocking",
-                                    )
-                                    round_new_unresolved_items.append(new_item)
-                                    unresolved_items = [*unresolved_items, new_item]
-                                    next_unresolved_item_number += 1
-                                for item in repaired_parsed.items.same_plan:
-                                    new_item = _next_unresolved_item(
-                                        item_number=next_unresolved_item_number,
-                                        reviewer=item.reviewer,
-                                        source_round=round_number,
-                                        text=item.text,
-                                        status="same-plan",
-                                    )
-                                    round_new_unresolved_items.append(new_item)
-                                    unresolved_items = [*unresolved_items, new_item]
-                                    next_unresolved_item_number += 1
-                                all_approved = False
-                                must_fix_items = [
-                                    item for item in unresolved_items
-                                    if item.status in {"blocking", "same-plan"}
-                                ]
-                                continue
-                        except AgentLoopError:
-                            pass
+                                round_new_unresolved_items.append(new_item)
+                                unresolved_items = [*unresolved_items, new_item]
+                                next_unresolved_item_number += 1
+                            all_approved = False
+                            must_fix_items = [
+                                item for item in unresolved_items
+                                if item.status in {"blocking", "same-plan"}
+                            ]
+                            continue
                     still_missing.append(reviewer_name)
                 if still_missing:
                     log(
@@ -3052,7 +3044,7 @@ def run_pr_loop(
                                 f"Round {round_number}: {reviewer_name} approved without "
                                 "HUMAN_REQUIREMENTS_RESOLVED; attempting repair",
                             )
-                            repaired_text, _, repair_attempts = _run_structured_repair(
+                            repaired_text, repaired_validated, repair_attempts = _run_structured_repair(
                                 review_output,
                                 runner=runner,
                                 config=config,
@@ -3074,60 +3066,52 @@ def run_pr_loop(
                             _log_repair_attempts(
                                 config, f"Round {round_number}: {reviewer_name}", repair_attempts
                             )
-                            if repaired_text is not None:
-                                try:
-                                    repaired_parsed = _validate_review_response(
-                                        repaired_text,
-                                        reviewer=reviewer_name,
-                                        unresolved_items=prior_unresolved_items,
-                                        current_round_items=round_new_unresolved_items,
+                            if repaired_validated is not None:
+                                repaired_parsed = repaired_validated
+                                if (
+                                    repaired_parsed.state == "approved"
+                                    and human_requirements_resolved(repaired_text)
+                                ):
+                                    log(
+                                        config,
+                                        f"Round {round_number}: repair recovered "
+                                        f"HUMAN_REQUIREMENTS_RESOLVED for {reviewer_name}",
                                     )
-                                    if (
-                                        repaired_parsed.state == "approved"
-                                        and human_requirements_resolved(repaired_text)
-                                    ):
-                                        log(
-                                            config,
-                                            f"Round {round_number}: repair recovered "
-                                            f"HUMAN_REQUIREMENTS_RESOLVED for {reviewer_name}",
+                                    continue
+                                if repaired_parsed.state == "blocking":
+                                    log(
+                                        config,
+                                        f"Round {round_number}: repair returned blocking for "
+                                        f"{reviewer_name}; treating as reviewer blocking",
+                                    )
+                                    for item in repaired_parsed.blocking_items:
+                                        new_item = _next_unresolved_item(
+                                            item_number=next_unresolved_item_number,
+                                            reviewer=item.reviewer,
+                                            source_round=round_number,
+                                            text=item.text,
+                                            status="blocking",
                                         )
-                                        continue
-                                    if repaired_parsed.state == "blocking":
-                                        log(
-                                            config,
-                                            f"Round {round_number}: repair returned blocking for "
-                                            f"{reviewer_name}; treating as reviewer blocking",
+                                        round_new_unresolved_items.append(new_item)
+                                        unresolved_items.append(new_item)
+                                        next_unresolved_item_number += 1
+                                    for item in repaired_parsed.followups.same_pr:
+                                        new_item = _next_unresolved_item(
+                                            item_number=next_unresolved_item_number,
+                                            reviewer=item.reviewer,
+                                            source_round=round_number,
+                                            text=item.text,
+                                            status="same-pr",
                                         )
-                                        for item in repaired_parsed.blocking_items:
-                                            new_item = _next_unresolved_item(
-                                                item_number=next_unresolved_item_number,
-                                                reviewer=item.reviewer,
-                                                source_round=round_number,
-                                                text=item.text,
-                                                status="blocking",
-                                            )
-                                            round_new_unresolved_items.append(new_item)
-                                            unresolved_items.append(new_item)
-                                            next_unresolved_item_number += 1
-                                        for item in repaired_parsed.followups.same_pr:
-                                            new_item = _next_unresolved_item(
-                                                item_number=next_unresolved_item_number,
-                                                reviewer=item.reviewer,
-                                                source_round=round_number,
-                                                text=item.text,
-                                                status="same-pr",
-                                            )
-                                            round_new_unresolved_items.append(new_item)
-                                            unresolved_items.append(new_item)
-                                            next_unresolved_item_number += 1
-                                        all_approved = False
-                                        must_fix_items = [
-                                            item for item in unresolved_items
-                                            if item.status in {"blocking", "same-pr"}
-                                        ]
-                                        continue
-                                except AgentLoopError:
-                                    pass
+                                        round_new_unresolved_items.append(new_item)
+                                        unresolved_items.append(new_item)
+                                        next_unresolved_item_number += 1
+                                    all_approved = False
+                                    must_fix_items = [
+                                        item for item in unresolved_items
+                                        if item.status in {"blocking", "same-pr"}
+                                    ]
+                                    continue
                             still_missing.append(reviewer_name)
                         if still_missing:
                             log(

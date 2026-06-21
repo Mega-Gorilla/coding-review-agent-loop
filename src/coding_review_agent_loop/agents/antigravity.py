@@ -187,26 +187,35 @@ class AntigravityBackend:
                 if role == "repair"
                 else _git_lock_path(config.antigravity_dir)
             )
-            single_shot_instruction = _REPAIR_GEMINI_MD if role == "repair" else (
-                "# Agent Loop Single-Shot Session\n\n"
-                "You are running in a single-shot, non-interactive `agy --print` session"
-                " invoked by an automated orchestrator. There will be no follow-up turns.\n\n"
-                "**Do NOT spawn background execution tasks or subagents under any"
-                " circumstances.**\n\n"
-                "**For code review tasks: DO NOT run tests, builds, compilation,"
-                " mutation, commits, background work, or unrelated discovery commands.**"
-                " You may use only the strict allow-listed read-only commands to inspect"
-                " the assigned checkout and local PR diff. Prefer `git diff"
-                " <base>...HEAD`, `git show`, `git status`, `git log`, `rg`, `sed`, and"
-                " direct file reads over web search. Do not fetch, checkout, reset, clean,"
-                " or write files. Tests are CI's responsibility; your job is to read code"
-                " and identify issues. If you find yourself about to run `pytest`, `npm"
-                " test`, `go test`, or any build command, stop and write your review from"
-                " code inspection alone.\n\n"
-                "For non-review tasks that require shell commands, run them synchronously"
-                " in this same turn before writing your response.\n\n"
-                "---\n\n"
-            )
+            if role == "repair":
+                single_shot_instruction = _REPAIR_GEMINI_MD
+            else:
+                resolved_base = (config.base or "").strip()
+                diff_cmd = (
+                    f"`git diff {resolved_base}...HEAD`"
+                    if resolved_base
+                    else "`git diff <base>...HEAD` (replace `<base>` with the resolved base branch)"
+                )
+                single_shot_instruction = (
+                    "# Agent Loop Single-Shot Session\n\n"
+                    "You are running in a single-shot, non-interactive `agy --print` session"
+                    " invoked by an automated orchestrator. There will be no follow-up turns.\n\n"
+                    "**Do NOT spawn background execution tasks or subagents under any"
+                    " circumstances.**\n\n"
+                    "**For code review tasks: DO NOT run tests, builds, compilation,"
+                    " mutation, commits, background work, or unrelated discovery commands.**"
+                    f" You may use only the strict allow-listed read-only commands to inspect"
+                    " the assigned checkout and local PR diff. Prefer "
+                    f"{diff_cmd}, `git show`, `git status`, `git log`, `rg`, `sed`, and"
+                    " direct file reads over web search. Do not fetch, checkout, reset, clean,"
+                    " or write files. Tests are CI's responsibility; your job is to read code"
+                    " and identify issues. If you find yourself about to run `pytest`, `npm"
+                    " test`, `go test`, or any build command, stop and write your review from"
+                    " code inspection alone.\n\n"
+                    "For non-review tasks that require shell commands, run them synchronously"
+                    " in this same turn before writing your response.\n\n"
+                    "---\n\n"
+                )
             settings_path = _antigravity_settings_path()
             settings_lock_path = settings_path.with_suffix(".json.lock")
             settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -273,6 +282,8 @@ class AntigravityBackend:
                         finally:
                             fcntl.flock(gemini_lock_file, fcntl.LOCK_UN)
                             gemini_lock_file.close()
+                            if role == "repair":
+                                gemini_lock_path.unlink(missing_ok=True)
                     finally:
                         if original_settings_text is None:
                             settings_path.unlink(missing_ok=True)
