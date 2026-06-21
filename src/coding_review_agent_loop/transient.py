@@ -22,7 +22,7 @@ TRANSIENT_AGENT_OUTPUT_RE = re.compile(
     re.I,
 )
 NON_RETRYABLE_AGENT_OUTPUT_RE = re.compile(
-    r"auth(?:entication|orization)?|unauthorized|forbidden|invalid api key|"
+    r"\bauth(?:entication|orization)?\b|unauthorized|forbidden|invalid api key|"
     r"credit|billing|dirty (?:checkout|workdir|working tree)",
     re.I,
 )

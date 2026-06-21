@@ -6180,6 +6180,39 @@ def test_collect_prior_compact_summaries_infers_departed_item_label(
     assert "Anthropic Claude: " + disposition in summaries[0]
 
 
+def test_collect_prior_compact_summaries_future_blocked_by_blocking_outcome_infers_resolved():
+    """An item with both 'future' and 'blocking' outcomes is labelled 'resolved' (blocking wins)."""
+    prior_item = UnresolvedReviewItem(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Original blocking item.",
+        status="blocking",
+    )
+    dispositions_by_item = {
+        "item-1": [
+            ReviewItemDisposition(
+                item_id="item-1",
+                reviewer="Reviewer A",
+                disposition="future",
+            ),
+            ReviewItemDisposition(
+                item_id="item-1",
+                reviewer="Reviewer B",
+                disposition="blocking",
+            ),
+        ]
+    }
+
+    summaries = _collect_prior_compact_summaries(
+        (prior_item,),
+        (),
+        dispositions_by_item,
+    )
+
+    assert summaries[0].startswith("[item-1] resolved:")
+
+
 @pytest.mark.parametrize("terminator", ["<!-- AGENT_STATE: approved -->", "-- OpenAI Codex"])
 def test_parse_non_blocking_followups_stops_at_final_markers(terminator):
     review = f"""
@@ -7076,6 +7109,50 @@ def test_source_line_references_with_5xx_numbers_are_not_transient(text):
 def test_explicit_server_error_phrases_remain_transient(text):
     assert _is_transient_agent_output(text)
     assert _failure_category(text) == "transient"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "The authoritative PR diff shows no regressions.",
+        "Authoritative source confirms the change.",
+        "The author of this commit fixed the bug.",
+        "This is an authoritative reference.",
+    ],
+)
+def test_auth_prefix_words_are_not_non_retryable(text):
+    """Words starting with 'auth' that are not auth-failure keywords must not match."""
+    from coding_review_agent_loop.transient import NON_RETRYABLE_AGENT_OUTPUT_RE
+
+    assert not NON_RETRYABLE_AGENT_OUTPUT_RE.search(text), (
+        f"NON_RETRYABLE_AGENT_OUTPUT_RE unexpectedly matched: {text!r}"
+    )
+    assert _is_transient_agent_output(text) is False or True  # no crash; classification is unrelated
+    assert _failure_category(text) != "non-retryable"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "authentication failed",
+        "Authorization error",
+        "auth failed",
+        "unauthorized",
+        "forbidden",
+        "Invalid API Key",
+        "billing issue",
+        "credit limit exceeded",
+        "dirty checkout",
+    ],
+)
+def test_genuine_auth_and_billing_terms_remain_non_retryable(text):
+    """Real auth/billing/dirty-checkout diagnostics must still be non-retryable."""
+    from coding_review_agent_loop.transient import NON_RETRYABLE_AGENT_OUTPUT_RE
+
+    assert NON_RETRYABLE_AGENT_OUTPUT_RE.search(text), (
+        f"NON_RETRYABLE_AGENT_OUTPUT_RE did not match: {text!r}"
+    )
+    assert _failure_category(text) == "non-retryable"
 
 
 def test_plan_review_does_not_post_diagnostics_without_plan_state(tmp_path):
@@ -17103,6 +17180,115 @@ def test_envelope_normalization_plan_review_drops_after_footer_hr_marker():
         "item-1": "resolved",
         "item-2": "future",
     }
+
+
+@pytest.mark.parametrize(
+    "expected_kind",
+    ["pr_review", "plan_review", "coder_followup", "plan_revision"],
+)
+def test_envelope_normalization_recovers_reversed_signature_before_footer(expected_kind):
+    """Signature placed before the AGENT_STATE footer is reordered deterministically."""
+    if expected_kind == "pr_review":
+        json_obj = {
+            "schema_version": 1,
+            "kind": "pr_review",
+            "state": "blocking",
+            "summary": "Found issues.",
+            "blocking_items": ["Fix the bug"],
+            "same_pr_followups": [],
+            "future_followups": [],
+            "prior_item_dispositions": [],
+        }
+        footer = "<!-- AGENT_STATE: blocking -->"
+        signature = "-- OpenAI Codex"
+    elif expected_kind == "plan_review":
+        json_obj = {
+            "schema_version": 1,
+            "kind": "plan_review",
+            "state": "blocking",
+            "summary": "Plan needs work.",
+            "blocking_plan_issues": ["Missing tests"],
+            "same_plan_followups": [],
+            "future_followups": [],
+            "prior_plan_item_dispositions": [],
+        }
+        footer = "<!-- AGENT_PLAN_STATE: blocking -->"
+        signature = "-- OpenAI Codex"
+    elif expected_kind == "coder_followup":
+        json_obj = {
+            "schema_version": 1,
+            "kind": "coder_followup",
+            "state": "approved",
+            "summary": "All done.",
+            "addressed_items": [],
+            "remaining_items": [],
+            "addressed_item_notes": {},
+            "remaining_item_notes": {},
+            "human_requirements": {"addressed_ids": [], "checked_discussion_directly": False},
+        }
+        footer = "<!-- AGENT_STATE: approved -->"
+        signature = "-- Anthropic Claude"
+    else:  # plan_revision
+        json_obj = {
+            "schema_version": 1,
+            "kind": "plan_revision",
+            "state": "blocking",
+            "summary": "Revised.",
+            "prior_plan_item_dispositions": [],
+            "plan_steps": ["Do the thing."],
+        }
+        footer = "<!-- AGENT_PLAN_STATE: blocking -->"
+        signature = "-- Anthropic Claude"
+
+    # Reversed: signature comes before footer
+    raw = f"{json.dumps(json_obj)}\n{signature}\n{footer}"
+    normalized = attempt_envelope_normalization(raw, expected_kind=expected_kind)
+
+    assert normalized is not None, f"Expected normalization to succeed for {expected_kind}"
+    # Canonical order: JSON → footer → signature
+    assert normalized.endswith(f"\n{footer}\n{signature}"), (
+        f"Expected footer before signature; got:\n{normalized}"
+    )
+    assert normalized.index(footer) < normalized.index(signature)
+
+
+def test_envelope_normalization_reversed_signature_state_mismatch_returns_none():
+    """Reversed-signature recovery must not proceed when state mismatches."""
+    json_obj = {
+        "schema_version": 1,
+        "kind": "pr_review",
+        "state": "approved",  # JSON says approved
+        "summary": "All good.",
+        "blocking_items": [],
+        "same_pr_followups": [],
+        "future_followups": [],
+        "prior_item_dispositions": [],
+    }
+    # Footer says blocking — mismatch
+    raw = f"{json.dumps(json_obj)}\n-- OpenAI Codex\n<!-- AGENT_STATE: blocking -->"
+
+    assert attempt_envelope_normalization(raw, expected_kind="pr_review") is None
+
+
+def test_envelope_normalization_reversed_signature_with_extra_prose_returns_none():
+    """Reversed-signature recovery must not fire when extra prose precedes the footer."""
+    json_obj = {
+        "schema_version": 1,
+        "kind": "pr_review",
+        "state": "blocking",
+        "summary": "Issues found.",
+        "blocking_items": ["Fix it"],
+        "same_pr_followups": [],
+        "future_followups": [],
+        "prior_item_dispositions": [],
+    }
+    # Extra prose between JSON and signature — not a clean reversed envelope
+    raw = (
+        f"{json.dumps(json_obj)}\nExtra prose here.\n"
+        "-- OpenAI Codex\n<!-- AGENT_STATE: blocking -->"
+    )
+
+    assert attempt_envelope_normalization(raw, expected_kind="pr_review") is None
 
 
 def test_envelope_normalization_returns_none_when_no_footer():

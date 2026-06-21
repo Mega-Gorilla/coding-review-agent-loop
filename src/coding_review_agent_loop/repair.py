@@ -106,6 +106,25 @@ def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> st
         return None
 
     before_footer = trailing[: state_match.start()]
+    after_footer_raw = trailing[state_match.end() :]
+    footer = trailing[state_match.start() : state_match.end()].strip()
+
+    # Normalize reversed-order envelope: JSON + signature + footer → JSON + footer + signature.
+    # Applies when before_footer is exactly one signature line and nothing follows the footer.
+    if not after_footer_raw.strip():
+        before_stripped = before_footer.strip()
+        sig_candidate = _SIGNATURE_LINE_RE.search(before_stripped)
+        if sig_candidate is not None and before_stripped == before_stripped[sig_candidate.start() : sig_candidate.end()].strip():
+            footer_state = state_match.group(1).lower()
+            payload_state = payload.get("state")
+            state_ok = not (
+                isinstance(payload_state, str)
+                and payload_state.strip()
+                and payload_state.strip() != footer_state
+            )
+            if state_ok:
+                return f"{json_text}\n{footer}\n{before_stripped}"
+
     preserved_before = ""
     if expected_kind in {"pr_review", "plan_review"}:
         before_lstripped = before_footer.lstrip()
@@ -126,9 +145,7 @@ def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> st
     elif before_footer.strip():
         return None
 
-    footer = trailing[state_match.start() : state_match.end()].strip()
-    after_footer = trailing[state_match.end() :]
-    after_footer_lstripped = after_footer.lstrip()
+    after_footer_lstripped = after_footer_raw.lstrip()
     preserved_after = ""
     if expected_kind == "pr_review":
         marker_match = HUMAN_REQUIREMENTS_RESOLVED_RE.match(after_footer_lstripped)
