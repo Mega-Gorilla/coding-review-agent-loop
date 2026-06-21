@@ -1008,21 +1008,20 @@ plan review.
 Use blocking only when the current plan still has blocking plan issues or
 same-plan follow-ups. All configured reviewers ({reviewer_group}) must approve
 in the same planning round before implementation can proceed.
-
-End your final response with exactly one planning marker:
+Use approved only if there are no blocking plan issues, no Same-plan
+follow-ups, and no carried-forward plan items left active for this planning
+round. Structured responses must start with one top-level JSON object, place
+the `AGENT_PLAN_STATE` footer immediately after that payload, then your
+standalone signature on the final line. Do not include prose or code fences
+before the JSON object. Do not place your signature before the
+AGENT_PLAN_STATE footer. Your response must end with, in this exact order:
 
 <!-- AGENT_PLAN_STATE: approved -->
+-- {reviewer_signature}
 
 or:
 
 <!-- AGENT_PLAN_STATE: blocking -->
-
-Use approved only if there are no blocking plan issues, no Same-plan
-follow-ups, and no carried-forward plan items left active for this planning
-round. Structured responses must start with one top-level JSON object, place
-the `AGENT_PLAN_STATE` footer immediately after that payload, and end with only
-your standalone signature. Do not include prose or code fences before the JSON
-object. Always sign your response:
 -- {reviewer_signature}
 """
 
@@ -1104,18 +1103,17 @@ Current implementation plan from {coder_name}:
 {plan}
 
 All configured reviewers ({reviewer_group}) must approve in the same planning
-round before implementation can proceed. End your final response with exactly
-one planning marker:
+round before implementation can proceed. Use approved only if there are no
+blocking plan issues, no Same-plan follow-ups, and no carried-forward plan
+items left active for this planning round. Do not place your signature before
+the AGENT_PLAN_STATE footer. Your response must end with, in this exact order:
 
 <!-- AGENT_PLAN_STATE: approved -->
+-- {reviewer_signature}
 
 or:
 
 <!-- AGENT_PLAN_STATE: blocking -->
-
-Use approved only if there are no blocking plan issues, no Same-plan
-follow-ups, and no carried-forward plan items left active for this planning
-round. Always sign your response:
 -- {reviewer_signature}
 """
 
@@ -1363,11 +1361,11 @@ Blocking plan review payload:
 
 {review}
 
-End your final response with exactly one planning marker:
+Use blocking to hand the revised plan back to {reviewer_name}. Do not place
+your signature before the AGENT_PLAN_STATE footer. Your response must end with,
+in this exact order:
 
 <!-- AGENT_PLAN_STATE: blocking -->
-
-Use blocking to hand the revised plan back to {reviewer_name}. Sign the response as:
 -- {coder_signature}
 """
 
@@ -1743,15 +1741,16 @@ available, or produce a blocking review explaining the limitation.
 Reviewer: {reviewer_name}
 Action for this call: {action}
 
-End your final response with exactly one marker:
+Use blocking only for issues that should prevent merge. Do not place your
+signature before the AGENT_STATE footer. Your response must end with, in this
+exact order:
 
 <!-- AGENT_STATE: approved -->
+-- {reviewer_signature}
 
 or:
 
 <!-- AGENT_STATE: blocking -->
-
-Use blocking only for issues that should prevent merge. Always sign your response:
 -- {reviewer_signature}
 """
 
@@ -2010,19 +2009,17 @@ After the JSON object, include only:
 
 Do not include any extra prose, headings, bullets, or fenced blocks before or
 after that structured response. The footer AGENT_STATE must match the JSON
-`state`.
-
-End your final response with exactly one marker:
+`state`. Do not place your signature before the AGENT_STATE footer.
+Use approved only if there are no blocking issues, no Same-PR follow-ups, and
+no carried-forward unresolved items left active for this round. Your response
+must end with, in this exact order:
 
 <!-- AGENT_STATE: approved -->
+-- {reviewer_signature}
 
 or:
 
 <!-- AGENT_STATE: blocking -->
-
-Use approved only if there are no blocking issues, no Same-PR follow-ups, and
-no carried-forward unresolved items left active for this round. Always sign
-your response:
 -- {reviewer_signature}
 """
 
@@ -2061,13 +2058,12 @@ Do not create a new PR.
 {_structured_coder_followup_guidance(
     reviewer_name=reviewer_name,
     human_requirements_context=human_requirements_context,
-)}This is round {round_number}. End your final response with exactly one marker:
+)}This is round {round_number}. Use blocking to hand the updated PR back to {reviewer_name}.
+If you cannot safely address the review, explain why and still use the blocking
+marker so a human can intervene. Do not place your signature before the
+AGENT_STATE footer. Your response must end with, in this exact order:
 
 <!-- AGENT_STATE: blocking -->
-
-Use blocking to hand the updated PR back to {reviewer_name}. If you cannot safely address
-the review, explain why and still use the blocking marker so a human can
-intervene. Sign the response as:
 -- {coder_signature}
 """
 
@@ -2110,12 +2106,11 @@ Same-PR follow-ups:
 {_structured_coder_followup_guidance(
     reviewer_name=reviewer_name,
     human_requirements_context=human_requirements_context,
-)}This is round {round_number}. End your final response with exactly one marker:
+)}This is round {round_number}. Use blocking to hand the updated PR back to {reviewer_name}.
+If you cannot safely address the follow-ups, explain why and still use the
+blocking marker so a human can intervene. Do not place your signature before
+the AGENT_STATE footer. Your response must end with, in this exact order:
 
 <!-- AGENT_STATE: blocking -->
-
-Use blocking to hand the updated PR back to {reviewer_name}. If you cannot safely address
-the follow-ups, explain why and still use the blocking marker so a human can
-intervene. Sign the response as:
 -- {coder_signature}
 """
