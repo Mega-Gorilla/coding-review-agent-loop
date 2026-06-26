@@ -2,201 +2,73 @@ import base64
 import datetime
 import json
 import os
-import re
-import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-import coding_review_agent_loop.orchestrator as orchestrator
 from coding_review_agent_loop.agents.base import with_public_response_file_instruction
-from coding_review_agent_loop.agents.claude import (
-    BACKEND as CLAUDE_BACKEND,
-    _normalize_claude_usage,
-    _parse_claude_output,
-)
-from coding_review_agent_loop.agents.codex import (
-    BACKEND as CODEX_BACKEND,
-    _extract_codex_usage,
-    _normalize_codex_usage,
-)
-from coding_review_agent_loop.agents.gemini import (
-    BACKEND as GEMINI_BACKEND,
-    PUBLIC_RESPONSE_MARKER,
-    _normalize_gemini_usage,
-    _parse_gemini_payload,
-)
+from coding_review_agent_loop.agents.gemini import PUBLIC_RESPONSE_MARKER
 from coding_review_agent_loop.cli import (
-    AgentLoopConfig,
     AgentLoopError,
-    CommandResult,
     Runner,
     build_parser,
     config_from_args,
     ensure_log_dir_ignored,
     is_clarification_request,
-    parse_agent_state,
-    parse_pr_number,
     run_issue_loop,
     run_pr_loop,
     run_task_loop,
 )
-from coding_review_agent_loop.errors import QuotaResetExceededError, UnknownPriorItemDispositionError
-from coding_review_agent_loop.orchestrator import (
-    _decode_public_response_json_prefix,
-    _format_reset_duration,
-    _failure_category,
-    _HumanRequirementsRecoveryContext,
-    _is_transient_agent_output,
-    _is_transient_public_response,
-    _parse_rate_limit_reset_seconds,
-    _recover_plan_revision_human_requirements_acknowledgement,
-    _run_validated_agent,
-    _split_reconstructable_plan_revision_response,
-)
+from coding_review_agent_loop.comment_rendering import normalize_freeform_signature
 from coding_review_agent_loop.config import (
     default_agent_memory_dir,
     default_agent_workdir,
     default_cache_root,
     resolve_base_branch,
 )
-from coding_review_agent_loop.comment_rendering import (
-    _render_public_coder_followup_comment,
-    _render_public_plan_review_comment,
-    _render_public_plan_revision_comment,
-    _render_public_pr_review_comment,
-    normalize_freeform_signature,
-)
-from coding_review_agent_loop.decomposition import (
-    CreatedPhaseIssue,
-    MAX_DECOMPOSITION_PHASES,
-    RecordedPhase,
-    approved_plan_hash,
-    find_existing_phase_implementation_handoff,
-    format_decomposition_parent_summary,
-    format_one_shot_impl_handoff_comment,
-    format_phase_implementation_handoff_comment,
-    parse_plan_decomposition,
-)
-from coding_review_agent_loop.github import (
-    HumanReviewRequirement,
-    IssueComment,
-    IssueContext,
-    PullRequestReviewContext,
-    PullRequestMetadata,
-    get_issue_context,
-    get_pr_checks,
-)
-from coding_review_agent_loop.followups import (
-    MAX_APPROVED_FOLLOWUP_ISSUES,
-    reconcile_approved_followups,
-)
-from coding_review_agent_loop.memory import AgentMemoryContext
-from coding_review_agent_loop.migrations import MigrationValidationResult, validate_pr_migration_topology
+from coding_review_agent_loop.errors import QuotaResetExceededError
+from coding_review_agent_loop.github import IssueComment
 from coding_review_agent_loop.orchestrator import (
-    ITEM_SUMMARY_LIMIT,
-    HUMAN_REQUIREMENTS_ACK_ITEM_ID,
     PostedRoundMetadata,
     ValidatedAgentResponse,
-    _apply_unresolved_item_dispositions,
     _attach_round_metadata,
-    _collect_prior_compact_summaries,
     _decode_round_metadata,
     _encode_round_metadata,
-    _format_unresolved_item_label,
+    _failure_category,
+    _format_reset_duration,
+    _is_transient_agent_output,
+    _is_transient_public_response,
+    _parse_rate_limit_reset_seconds,
     _plan_subject,
-    _render_public_review_comment,
-    _reconcile_human_requirements_ack_item,
-    _review_freeform_summary_text,
-    _resume_pr_round,
     _resume_plan_round,
+    _run_validated_agent,
     _strip_round_metadata,
     _validate_coder_followup_response,
-    _validate_plan_revision_response,
-    _validate_review_response,
     _validate_plan_review_response,
-    render_public_agent_comment,
+    _validate_review_response,
     render_canonical_plan_revision,
-    render_canonical_plan_steps,
-)
-from coding_review_agent_loop.prompts import (
-    COMPACT_PLANNING_VOLATILE_TAIL_MARKER,
-    COMPACT_PR_REVIEW_VOLATILE_TAIL_MARKER,
-    CompactPlanTailContext,
-    CompactPrReviewTailContext,
-    CompactPriorContext,
-    HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
-    HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK,
-    _build_followup_guidance,
-    _build_unresolved_items_guidance,
-    build_followup_prompt,
-    build_issue_implementation_prompt,
-    build_issue_plan_prompt,
-    build_issue_prompt,
-    build_task_prompt,
-    build_same_pr_followup_prompt,
-    build_plan_review_prompt,
-    build_plan_revision_prompt,
-    build_review_prompt,
-    format_human_requirements,
-    format_issue_context,
-    render_coder_human_requirements_prompt_context,
+    render_public_agent_comment,
 )
 from coding_review_agent_loop.protocol import (
-    ApprovedFollowup,
-    _expect_string_list,
-    _extract_structured_coder_followup_payload,
-    _extract_structured_plan_review_payload,
-    _extract_structured_plan_revision_payload,
-    _extract_structured_pr_review_payload,
-    normalize_response_file_structured_text,
-    parse_approved_followups,
-    parse_human_requirements_acknowledgement,
-    parse_pr_review,
+    UnresolvedReviewItem,
     parse_plan_item_dispositions,
     parse_plan_review,
-    parse_plan_review_items,
-    parse_plan_state,
-    parse_structured_plan_review,
-    parse_structured_pr_review,
-    parse_review,
-    parse_non_blocking_followups,
-    parse_signed_human_requirement_body,
-    parse_unresolved_item_dispositions,
-    ReviewItemDisposition,
-    UnresolvedReviewItem,
-    validate_human_requirements_acknowledgement,
+    parse_pr_review,
     validate_structured_coder_followup,
-    validate_structured_human_requirements_acknowledgement,
-    validate_structured_plan_state,
     validate_structured_plan_revision,
 )
-from coding_review_agent_loop.workdir_guard import (
-    extract_reported_tests_from_response,
-    validate_response_tests_within_workdir,
-    validate_test_commands_within_workdir,
-)
-
-from unittest.mock import MagicMock, patch
-
-
-
 from agent_loop_helpers import (
     FakeRunner,
-    json_dumps,
     command_index,
-    read_usage_summary,
+    make_config,
     prior_item_dispositions,
-    blocking_issues,
     prior_plan_item_dispositions,
-    structured_pr_review,
+    structured_coder_followup,
     structured_plan_review,
     structured_plan_revision,
-    structured_plan_state,
-    structured_coder_followup,
-    make_config,
-    plan_decomposition_json,
+    structured_pr_review,
 )
 
 @pytest.fixture(autouse=True)
@@ -230,162 +102,6 @@ def _agent_commands_available(monkeypatch):
     monkeypatch.setattr(config_module.shutil, "which", which)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def test_pre_review_tests_can_be_disabled(tmp_path):
     runner = FakeRunner(
         claude_outputs=[
@@ -408,14 +124,6 @@ def test_pre_review_tests_can_be_disabled(tmp_path):
     assert commands.count(["pytest", "tests/test_agent_loop.py"]) == 1
 
 
-
-
-
-
-
-
-
-
 def test_ensure_log_dir_ignored_does_not_overwrite_existing_file(tmp_path):
     log_dir = tmp_path / "logs"
     log_dir.mkdir()
@@ -425,10 +133,6 @@ def test_ensure_log_dir_ignored_does_not_overwrite_existing_file(tmp_path):
     ensure_log_dir_ignored(log_dir)
 
     assert gitignore.read_text(encoding="utf-8") == "custom\n"
-
-
-
-
 
 
 @pytest.mark.parametrize(
@@ -518,10 +222,6 @@ def test_plan_review_does_not_post_diagnostics_without_plan_state(tmp_path):
     assert len(runner.comments) == 1
     assert runner.comments[0].startswith("Plan:")
     assert not any(diagnostic in comment for comment in runner.comments)
-
-
-
-
 
 
 def test_plan_loop_retries_plain_agent_plan_state_near_miss_once(tmp_path):
@@ -661,18 +361,6 @@ def test_gemini_response_file_repair_ignores_raw_stdout_transient_diagnostics(tm
     assert captured_repairs == [malformed_public_review]
     assert not any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
     assert any("Response file review passed after repair." in comment for comment in runner.comments)
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_diagnostic_shaped_public_response_remains_transient(tmp_path):
@@ -955,38 +643,9 @@ def test_run_validated_agent_recovers_fenced_coder_followup_from_raw_stdout(tmp_
     assert response.text == valid_followup
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Issue #271: coder_followup path through attempt_envelope_normalization
 # ---------------------------------------------------------------------------
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -994,21 +653,9 @@ def test_run_validated_agent_recovers_fenced_coder_followup_from_raw_stdout(tmp_
 # ---------------------------------------------------------------------------
 
 
-
-
-
 # ---------------------------------------------------------------------------
 # Issue #274: combined envelope+disposition strip via _run_validated_agent
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
 
 
 def test_gemini_duplicate_trailing_agent_state_marker_normalizes_without_repair(tmp_path):
@@ -1066,22 +713,6 @@ def test_gemini_pre_marker_429_malformed_public_response_fails_deterministically
     assert "Failure category: transient" not in message
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 @pytest.mark.parametrize("text,expected_secs", [
     ("Retry-After: 3600", 3600),
     ("retry after 1800", 1800),
@@ -1125,76 +756,6 @@ def test_format_reset_duration(seconds, expected):
 
 def test_quota_reset_exceeded_error_exit_code():
     assert QuotaResetExceededError.EXIT_CODE == 3
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_agent_memory_default_parent_ignores_generated_contents(tmp_path):
@@ -1288,88 +849,6 @@ def test_agent_memory_can_be_disabled(tmp_path):
     assert "Agent memory context:" not in prompt
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def test_resume_plan_round_marks_empty_ledger_incomplete_after_same_subject_prior_new_items():
     plan = "Plan text."
     subject = _plan_subject(plan)
@@ -1416,28 +895,6 @@ def test_resume_plan_round_marks_empty_ledger_incomplete_after_same_subject_prio
 
     assert resumed is not None
     assert resumed[1].ledger_may_be_incomplete is True
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_shared_workdir_requires_explicit_override(tmp_path):
@@ -2066,12 +1523,6 @@ def test_clean_existing_auto_agent_dir_is_synced(tmp_path):
     assert ["git", "pull", "--ff-only", "origin", "main"] in commands
 
 
-
-
-
-
-
-
 @pytest.mark.parametrize("mode", ["issue", "task"])
 def test_issue_and_task_loops_use_repo_default_when_base_is_omitted(tmp_path, mode):
     runner = FakeRunner(
@@ -2151,8 +1602,6 @@ def test_reviewer_checkout_is_refreshed_to_pr_head_before_review(tmp_path):
     assert fetch_index < pr_fetch_index < checkout_index < head_index < review_index
 
 
-
-
 def test_reviewer_checkout_refreshes_each_round_before_review(tmp_path):
     runner = FakeRunner(
         claude_outputs=["Fixed.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
@@ -2219,8 +1668,6 @@ def test_dirty_explicit_reviewer_checkout_fails_before_review_invocation(tmp_pat
         run_pr_loop(runner, pr_number=77, config=config, workdirs_ready=True)
 
     assert not any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
-
-
 
 
 def test_dirty_existing_auto_agent_dir_is_cleaned_before_sync(tmp_path, capsys):
@@ -2741,66 +2188,6 @@ def test_explicit_agent_args_replace_dangerous_profile(tmp_path):
     assert config.gemini_args == ("--approval-mode", "auto_edit")
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def test_resume_plan_round_prefers_latest_metadata_ledger_for_same_plan_replay():
     current_plan = "Revised plan.\n- Add the active-ledger replay test.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
     subject = _plan_subject(current_plan)
@@ -3139,60 +2526,6 @@ def test_decode_round_metadata_rejects_missing_or_invalid_required_fields(payloa
         _decode_round_metadata(encoded=base64.urlsafe_b64encode(encoded).decode("ascii"))
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 def test_is_clarification_request_detects_marker():
     assert is_clarification_request("need more info\n<!-- AGENT_CLARIFY -->")
     assert is_clarification_request("<!-- agent_clarify -->")
@@ -3435,55 +2768,9 @@ def test_is_clarification_request_requires_clarify_at_end():
     assert not is_clarification_request(multi_clarify_bad)
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Reverse flow: Codex creates PR, Claude reviews
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_public_response_file_instruction_mentions_plan_revision_human_ack_exception(tmp_path):
@@ -3498,130 +2785,9 @@ def test_public_response_file_instruction_mentions_plan_revision_human_ack_excep
     assert "before the\n`AGENT_PLAN_STATE` footer" in prompt
 
 
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Repair pass tests
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -3629,74 +2795,22 @@ def test_public_response_file_instruction_mentions_plan_revision_human_ack_excep
 # ---------------------------------------------------------------------------
 
 
-
 # --- repair.py prompt content tests ---
-
-
-
-
-
-
-
-
-
-
-
 
 
 # --- _reviewer_human_requirements_instruction tests ---
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 # --- _surfaced_reviewer_requirement_ids tests ---
-
-
-
-
-
 
 
 # --- PR loop repair-first tests ---
 
 
-
-
-
-
-
-
-
-
 # --- Plan loop repair-first tests ---
 
 
-
-
-
-
-
-
-
 # --- Protocol regression tests ---
-
-
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -3704,82 +2818,20 @@ def test_public_response_file_instruction_mentions_plan_revision_human_ack_excep
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Tests for issue #273: deterministic recovery of same-round prior-item dispositions
 # ---------------------------------------------------------------------------
 
 
-
 # --- Unit tests for strip_unknown_prior_item_dispositions ---
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # --- Integration tests via _run_validated_agent ---
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Antigravity (agy) backend + Gemini retirement guidance (#215)
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_runner_pty_reports_tty_and_strips_ansi(tmp_path):
@@ -3970,32 +3022,6 @@ def test_runner_absolute_path_spawn_does_not_retry(monkeypatch, tmp_path, use_pt
     assert sleep_calls == []
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 # ---------------------------------------------------------------------------
 # Dynamic model-specific signatures (#332)
 # ---------------------------------------------------------------------------
@@ -4155,10 +3181,6 @@ def test_render_public_agent_comment_stamps_model_for_every_kind():
 # ---------------------------------------------------------------------------
 
 
-
-
-
-
 def test_base_response_file_instruction_includes_must_write_before_turn_ends(tmp_path):
     from coding_review_agent_loop.agents.base import with_public_response_file_instruction
     composed = with_public_response_file_instruction("BASE PROMPT", tmp_path / "response.md")
@@ -4166,30 +3188,6 @@ def test_base_response_file_instruction_includes_must_write_before_turn_ends(tmp
 
 
 # ── Tests: issue #400 – toolPermission: "strict" injection for reviewer ────────
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_reviewer_and_coder_call_sites_pass_correct_role(tmp_path):
@@ -4263,19 +3261,6 @@ def test_run_agent_result_passes_role_to_backend(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 # Shared PR review guidance unit and integration tests (#413, #417)
 # ---------------------------------------------------------------------------
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -4365,8 +3350,6 @@ def test_resume_plan_round_preserves_stored_model_used():
     assert resumed is not None
     _current_plan, state = resumed
     assert state.completed_reviews[0].metadata.model_used == "gpt-5.5 (medium)"
-
-
 
 
 def test_normalize_freeform_signature_replaces_existing(tmp_path):
@@ -4509,7 +3492,5 @@ def test_run_plan_loop_freeform_revision_includes_model(tmp_path):
     revision_body = runner.issue_comments[2]["body"]
     stripped = _strip_round_metadata(revision_body)
     assert stripped.endswith("-- Anthropic Claude: gpt-5.5 (medium)")
-
-
 
 

@@ -1,202 +1,34 @@
-import base64
-import datetime
 import json
-import os
 import re
-import subprocess
-import sys
-from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
-import coding_review_agent_loop.orchestrator as orchestrator
-from coding_review_agent_loop.agents.base import with_public_response_file_instruction
-from coding_review_agent_loop.agents.claude import (
-    BACKEND as CLAUDE_BACKEND,
-    _normalize_claude_usage,
-    _parse_claude_output,
-)
-from coding_review_agent_loop.agents.codex import (
-    BACKEND as CODEX_BACKEND,
-    _extract_codex_usage,
-    _normalize_codex_usage,
-)
-from coding_review_agent_loop.agents.gemini import (
-    BACKEND as GEMINI_BACKEND,
-    PUBLIC_RESPONSE_MARKER,
-    _normalize_gemini_usage,
-    _parse_gemini_payload,
-)
-from coding_review_agent_loop.cli import (
-    AgentLoopConfig,
-    AgentLoopError,
-    CommandResult,
-    Runner,
-    build_parser,
-    config_from_args,
-    ensure_log_dir_ignored,
-    is_clarification_request,
-    parse_agent_state,
-    parse_pr_number,
-    run_issue_loop,
-    run_pr_loop,
-    run_task_loop,
-)
-from coding_review_agent_loop.errors import QuotaResetExceededError, UnknownPriorItemDispositionError
+from coding_review_agent_loop.cli import AgentLoopError, run_issue_loop
+from coding_review_agent_loop.decomposition import approved_plan_hash, format_one_shot_impl_handoff_comment
+from coding_review_agent_loop.github import get_issue_context
 from coding_review_agent_loop.orchestrator import (
-    _decode_public_response_json_prefix,
-    _format_reset_duration,
-    _failure_category,
-    _HumanRequirementsRecoveryContext,
-    _is_transient_agent_output,
-    _is_transient_public_response,
-    _parse_rate_limit_reset_seconds,
-    _recover_plan_revision_human_requirements_acknowledgement,
-    _run_validated_agent,
-    _split_reconstructable_plan_revision_response,
-)
-from coding_review_agent_loop.config import (
-    default_agent_memory_dir,
-    default_agent_workdir,
-    default_cache_root,
-    resolve_base_branch,
-)
-from coding_review_agent_loop.comment_rendering import (
-    _render_public_coder_followup_comment,
-    _render_public_plan_review_comment,
-    _render_public_plan_revision_comment,
-    _render_public_pr_review_comment,
-    normalize_freeform_signature,
-)
-from coding_review_agent_loop.decomposition import (
-    CreatedPhaseIssue,
-    MAX_DECOMPOSITION_PHASES,
-    RecordedPhase,
-    approved_plan_hash,
-    find_existing_phase_implementation_handoff,
-    format_decomposition_parent_summary,
-    format_one_shot_impl_handoff_comment,
-    format_phase_implementation_handoff_comment,
-    parse_plan_decomposition,
-)
-from coding_review_agent_loop.github import (
-    HumanReviewRequirement,
-    IssueComment,
-    IssueContext,
-    PullRequestReviewContext,
-    PullRequestMetadata,
-    get_issue_context,
-    get_pr_checks,
-)
-from coding_review_agent_loop.followups import (
-    MAX_APPROVED_FOLLOWUP_ISSUES,
-    reconcile_approved_followups,
-)
-from coding_review_agent_loop.memory import AgentMemoryContext
-from coding_review_agent_loop.migrations import MigrationValidationResult, validate_pr_migration_topology
-from coding_review_agent_loop.orchestrator import (
-    ITEM_SUMMARY_LIMIT,
-    HUMAN_REQUIREMENTS_ACK_ITEM_ID,
     PostedRoundMetadata,
-    ValidatedAgentResponse,
-    _apply_unresolved_item_dispositions,
     _attach_round_metadata,
-    _collect_prior_compact_summaries,
     _decode_round_metadata,
-    _encode_round_metadata,
-    _format_unresolved_item_label,
     _plan_subject,
-    _render_public_review_comment,
-    _reconcile_human_requirements_ack_item,
-    _review_freeform_summary_text,
-    _resume_pr_round,
-    _resume_plan_round,
     _strip_round_metadata,
-    _validate_coder_followup_response,
-    _validate_plan_revision_response,
-    _validate_review_response,
-    _validate_plan_review_response,
-    render_public_agent_comment,
-    render_canonical_plan_revision,
-    render_canonical_plan_steps,
 )
 from coding_review_agent_loop.prompts import (
     COMPACT_PLANNING_VOLATILE_TAIL_MARKER,
-    COMPACT_PR_REVIEW_VOLATILE_TAIL_MARKER,
-    CompactPlanTailContext,
-    CompactPrReviewTailContext,
-    CompactPriorContext,
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
-    HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK,
-    _build_followup_guidance,
-    _build_unresolved_items_guidance,
-    build_followup_prompt,
-    build_issue_implementation_prompt,
-    build_issue_plan_prompt,
-    build_issue_prompt,
-    build_task_prompt,
-    build_same_pr_followup_prompt,
-    build_plan_review_prompt,
-    build_plan_revision_prompt,
-    build_review_prompt,
-    format_human_requirements,
-    format_issue_context,
-    render_coder_human_requirements_prompt_context,
 )
-from coding_review_agent_loop.protocol import (
-    ApprovedFollowup,
-    _expect_string_list,
-    _extract_structured_coder_followup_payload,
-    _extract_structured_plan_review_payload,
-    _extract_structured_plan_revision_payload,
-    _extract_structured_pr_review_payload,
-    normalize_response_file_structured_text,
-    parse_approved_followups,
-    parse_human_requirements_acknowledgement,
-    parse_pr_review,
-    parse_plan_item_dispositions,
-    parse_plan_review,
-    parse_plan_review_items,
-    parse_plan_state,
-    parse_structured_plan_review,
-    parse_structured_pr_review,
-    parse_review,
-    parse_non_blocking_followups,
-    parse_signed_human_requirement_body,
-    parse_unresolved_item_dispositions,
-    ReviewItemDisposition,
-    UnresolvedReviewItem,
-    validate_human_requirements_acknowledgement,
-    validate_structured_coder_followup,
-    validate_structured_human_requirements_acknowledgement,
-    validate_structured_plan_state,
-    validate_structured_plan_revision,
-)
-from coding_review_agent_loop.workdir_guard import (
-    extract_reported_tests_from_response,
-    validate_response_tests_within_workdir,
-    validate_test_commands_within_workdir,
-)
-
-from unittest.mock import MagicMock, patch
-
-
-
+from coding_review_agent_loop.protocol import UnresolvedReviewItem
 from agent_loop_helpers import (
     FakeRunner,
-    json_dumps,
     command_index,
-    read_usage_summary,
+    make_config,
     prior_item_dispositions,
-    blocking_issues,
     prior_plan_item_dispositions,
-    structured_pr_review,
     structured_plan_review,
     structured_plan_revision,
     structured_plan_state,
-    structured_coder_followup,
-    make_config,
-    plan_decomposition_json,
+    structured_pr_review,
 )
 
 @pytest.fixture(autouse=True)
