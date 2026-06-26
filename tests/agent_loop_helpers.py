@@ -136,6 +136,7 @@ from coding_review_agent_loop.prompts import (
     HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK,
     _build_followup_guidance,
     _build_unresolved_items_guidance,
+    _phased_plan_guard,
     build_followup_prompt,
     build_issue_implementation_prompt,
     build_issue_plan_prompt,

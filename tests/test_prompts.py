@@ -1800,3 +1800,70 @@ def test_build_review_prompt_followup_guidance_parity(tmp_path, approved_followu
     compact = build_review_prompt(77, 1, config, reviewer="codex", compact_context=True)
     assert g in non_compact
     assert g in compact
+
+
+@pytest.mark.parametrize("mode", ["plan-only", "implement-one-shot"])
+def test_plan_review_prompt_includes_phased_plan_guard_in_non_decompose_mode(tmp_path, mode):
+    config = make_config(tmp_path, plan_execution_mode=mode)
+    guard = _phased_plan_guard(config)
+    assert guard != ""
+    assert "implement-by-phase" in guard
+    assert "scope" in guard.lower() or "single deliverable" in guard
+    for compact in (False, True):
+        prompt = build_plan_review_prompt(56, 1, "Plan.", config, reviewer="codex", compact_context=compact)
+        assert guard.strip() in prompt
+
+
+@pytest.mark.parametrize("mode", ["decompose-only", "implement-by-phase"])
+def test_plan_review_prompt_omits_phased_plan_guard_in_decompose_mode(tmp_path, mode):
+    config = make_config(tmp_path, plan_execution_mode=mode)
+    guard = _phased_plan_guard(config)
+    assert guard == ""
+    for compact in (False, True):
+        prompt = build_plan_review_prompt(56, 1, "Plan.", config, reviewer="codex", compact_context=compact)
+        assert "Phased-delivery guard" not in prompt
+
+
+def test_compact_plan_review_stable_prefix_is_byte_identical_with_phased_guard(tmp_path):
+    config = make_config(tmp_path, plan_execution_mode="plan-only")
+    issue_context = _compact_issue_context()
+    memory = _compact_memory_context(tmp_path)
+    unresolved_item = UnresolvedReviewItem(
+        item_id="item-1",
+        reviewer="OpenAI Codex",
+        source_round=1,
+        text="Active ledger item.",
+        status="blocking",
+    )
+    first = build_plan_review_prompt(
+        56,
+        2,
+        "Plan tail A.",
+        config,
+        reviewer="codex",
+        memory=memory,
+        issue_context=issue_context,
+        unresolved_items=(unresolved_item,),
+        compact_context=True,
+        compact_prior=CompactPriorContext(("[item-0] resolved: old",)),
+        compact_tail=CompactPlanTailContext(subject="subject-a", action="Review A."),
+    )
+    second = build_plan_review_prompt(
+        56,
+        3,
+        "Plan tail B.",
+        config,
+        reviewer="codex",
+        memory=memory,
+        issue_context=issue_context,
+        unresolved_items=(unresolved_item,),
+        compact_context=True,
+        compact_prior=CompactPriorContext(("[item-0] resolved: old",)),
+        compact_tail=CompactPlanTailContext(subject="subject-b", action="Review B."),
+    )
+
+    first_prefix, _ = first.split(COMPACT_PLANNING_VOLATILE_TAIL_MARKER, 1)
+    second_prefix, _ = second.split(COMPACT_PLANNING_VOLATILE_TAIL_MARKER, 1)
+    assert first_prefix.encode() == second_prefix.encode()
+    assert "Phased-delivery guard" in first_prefix
+    assert "implement-by-phase" in first_prefix

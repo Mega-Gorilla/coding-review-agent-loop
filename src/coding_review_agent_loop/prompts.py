@@ -616,6 +616,22 @@ def _compact_prior_ledger_block(compact_prior: CompactPriorContext | None) -> st
     )
 
 
+def _phased_plan_guard(config: AgentLoopConfig) -> str:
+    if config.plan_execution_mode in {"decompose-only", "implement-by-phase"}:
+        return ""
+    return (
+        "Phased-delivery guard: if the plan defers any implementation to future PRs, "
+        "future phases, or future issues — for example, language like \"Phase N of M\", "
+        "\"phases X–Y deferred to future PRs\", or \"handled in a follow-up PR\" — "
+        "return blocking and include a blocking issue instructing the coder to either "
+        "(1) scope the plan down to a single deliverable that fits in one PR, or "
+        "(2) re-invoke with `--plan-execution-mode implement-by-phase` so phases are "
+        "tracked as GitHub child issues created mechanically from structured JSON. "
+        "A phased plan approved in this mode leaves later phases as untracked prose "
+        "with no mechanical follow-up.\n"
+    )
+
+
 def _canonical_plan_ledger_rules() -> str:
     return """Canonical compact planning ledger rules
 
@@ -1000,7 +1016,7 @@ them forward explicitly.
 Signed human issue requirements are approval-critical issue constraints for this
 plan review.
 {human_requirements_guidance}
-Use blocking only when the current plan still has blocking plan issues or
+{_phased_plan_guard(config)}Use blocking only when the current plan still has blocking plan issues or
 same-plan follow-ups. All configured reviewers ({reviewer_group}) must approve
 in the same planning round before implementation can proceed.
 Use approved only if there are no blocking plan issues, no Same-plan
@@ -1074,7 +1090,7 @@ item already marked `"future"`, explicitly re-evaluate.
             "Signed human issue requirements are approval-critical issue constraints for this plan review.\n"
             f"{human_requirements_guidance}"
         ),
-        response_protocol=_plan_review_schema_and_rules() + "\n" + unresolved_items_guidance,
+        response_protocol=_plan_review_schema_and_rules() + "\n" + unresolved_items_guidance + _phased_plan_guard(config),
     )
     subject_line = f"Current plan subject: {compact_tail.subject}" if compact_tail and compact_tail.subject else "Current plan subject: (unknown)"
     action = (
