@@ -16,6 +16,7 @@ from .protocol import (
     PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE,
     PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE,
     SIGNATURE_RE,
+    ParsedDiscussReview,
     ParsedPlanReview,
     ParsedReview,
     ReviewItemDisposition,
@@ -616,3 +617,38 @@ def render_public_agent_comment(
             model_used=model_used,
         )
     raise AgentLoopError(f"Unknown render kind: {kind}")
+
+
+def render_discuss_consensus_comment(
+    *,
+    outcome: str,
+    reviewer_votes: list[ParsedDiscussReview],
+    split_proposals: list[str],
+    subject: str,
+    config: object,
+) -> str:
+    outcome_heading = {
+        "implement": "Consensus: Implement",
+        "do-not-implement": "Consensus: Do Not Implement",
+        "needs-human": "Consensus: Needs Human Review",
+        "split": "Consensus: Split",
+    }.get(outcome, f"Consensus: {outcome}")
+    lines: list[str] = [
+        f"## {outcome_heading}",
+        "",
+        "| Reviewer | Outcome | Rationale |",
+        "| --- | --- | --- |",
+    ]
+    for vote in reviewer_votes:
+        rationale = vote.rationale.replace("|", "\\|").replace("\n", " ")
+        lines.append(f"| {vote.reviewer} | {vote.outcome} | {rationale} |")
+    if outcome == "split" and split_proposals:
+        lines.append("")
+        lines.append("### Proposed sub-issues")
+        lines.append("")
+        for proposal in split_proposals:
+            lines.append(f"- {proposal}")
+    lines.append("")
+    lines.append("-- Orchestrator")
+    lines.append(f"<!-- AGENT_DISCUSS_CONSENSUS: {subject} -->")
+    return "\n".join(lines)

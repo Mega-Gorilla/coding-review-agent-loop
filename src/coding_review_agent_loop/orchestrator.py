@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import re
 import sys
@@ -58,6 +59,7 @@ from .prompts import (
     CompactPlanTailContext,
     CompactPriorContext,
     CompactPrReviewTailContext,
+    build_discuss_review_prompt,
     build_followup_prompt,
     build_issue_implementation_prompt,
     build_issue_plan_prompt,
@@ -74,6 +76,7 @@ from .prompts import (
 )
 from .protocol import (
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
+    ParsedDiscussReview,
     ParsedPlanReview,
     ParsedReview,
     PUBLIC_RESPONSE_MARKER,
@@ -97,6 +100,7 @@ from .protocol import (
     validate_structured_coder_followup,
     validate_structured_plan_state,
     validate_structured_plan_revision,
+    validate_structured_discuss_review,
 )
 from .protocol import parse_review
 from .repair import (
@@ -140,6 +144,7 @@ from .comment_rendering import (
     _replace_structured_section,
     _review_freeform_summary_text,
     normalize_freeform_signature,
+    render_discuss_consensus_comment,
     render_public_agent_comment,
     render_canonical_plan_revision,
     render_canonical_plan_steps,
@@ -223,7 +228,7 @@ PUBLIC_RESPONSE_ARTIFACT_PREFIX_RE = re.compile(
     re.I,
 )
 STRUCTURED_PUBLIC_RESPONSE_KINDS = frozenset(
-    {"plan_review", "pr_review", "coder_followup", "plan_revision"}
+    {"plan_review", "pr_review", "coder_followup", "plan_revision", "discuss_review"}
 )
 PLAN_REVISION_FOOTER_RE = re.compile(r"(?m)^<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*-->\s*$")
 STRUCTURED_FENCE_RE = re.compile(
@@ -3371,6 +3376,119 @@ def run_pr_loop(
 
         raise AgentLoopError(
             f"Reached max rounds ({config.max_rounds}) for PR #{pr_number}; human review required."
+        )
+    finally:
+        if owned_usage_context:
+            _persist_usage_summary(config, usage_context)
+
+
+DISCUSS_CONSENSUS_MARKER_RE = re.compile(
+    r"<!--\s*AGENT_DISCUSS_CONSENSUS:\s*([0-9a-f]+)\s*-->",
+    re.I,
+)
+
+
+def _discuss_subject(issue_context: IssueContext) -> str:
+    text = (issue_context.title or "") + "\n\n" + (issue_context.body or "")
+    return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
+
+
+def _aggregate_discuss_votes(
+    votes: list[ParsedDiscussReview],
+) -> tuple[str, list[str]]:
+    outcomes = [v.outcome for v in votes]
+    if any(o == "do-not-implement" for o in outcomes):
+        return "do-not-implement", []
+    if any(o == "needs-human" for o in outcomes):
+        return "needs-human", []
+    if all(o == "implement" for o in outcomes):
+        return "implement", []
+    if all(o == "split" for o in outcomes):
+        seen: set[str] = set()
+        merged: list[str] = []
+        for v in votes:
+            for p in v.split_proposals:
+                if p not in seen:
+                    seen.add(p)
+                    merged.append(p)
+        return "split", merged
+    return "needs-human", []
+
+
+def _run_discuss_loop(
+    runner: Runner,
+    *,
+    issue_number: int,
+    config: AgentLoopConfig,
+    usage_context: RunUsageContext,
+) -> int:
+    from .config import reviewers as _reviewers
+    issue_context = get_issue_context(runner, config=config, issue_number=issue_number)
+    subject = _discuss_subject(issue_context)
+    for comment in issue_context.comments or []:
+        body = comment.body or ""
+        m = DISCUSS_CONSENSUS_MARKER_RE.search(body)
+        if m and m.group(1).lower() == subject:
+            log(config, f"discuss: found matching consensus comment for issue #{issue_number}; skipping")
+            return 0
+    memory = prepare_agent_memory(runner, config)
+    reviewer_votes: list[ParsedDiscussReview] = []
+    for reviewer in _reviewers(config):
+        reviewer_name = agent_display_name(reviewer)
+        log(config, f"discuss: invoking {reviewer_name} on issue #{issue_number}")
+        response = _run_validated_agent(
+            runner,
+            agent=reviewer,
+            config=config,
+            prompt=build_discuss_review_prompt(
+                issue_number,
+                config,
+                reviewer=reviewer,
+                memory=memory,
+                issue_context=issue_context,
+            ),
+            marker_description="<!-- AGENT_PLAN_STATE: approved -->",
+            validate=lambda text, r=reviewer_name: validate_structured_discuss_review(text, reviewer=r),
+            usage_context=usage_context,
+            use_repair=True,
+            repair_expected_kind="discuss_review",
+            role="reviewer",
+        )
+        parsed = response.marker_value
+        assert isinstance(parsed, ParsedDiscussReview)
+        reviewer_votes.append(parsed)
+    outcome, split_proposals = _aggregate_discuss_votes(reviewer_votes)
+    body = render_discuss_consensus_comment(
+        outcome=outcome,
+        reviewer_votes=reviewer_votes,
+        split_proposals=split_proposals,
+        subject=subject,
+        config=config,
+    )
+    post_issue_comment(runner, config=config, issue_number=issue_number, body=body)
+    log(config, f"discuss: posted consensus comment for issue #{issue_number} (outcome: {outcome})")
+    return 0
+
+
+def run_discuss_loop(
+    runner: Runner,
+    *,
+    issue_number: int,
+    config: AgentLoopConfig,
+    usage_context: RunUsageContext | None = None,
+) -> int:
+    owned_usage_context = usage_context is None
+    usage_context = usage_context or _new_usage_context(config)
+    try:
+        config = resolve_base_branch(config, runner)
+        ensure_agent_workdirs(config, runner)
+        log(config, f"discuss: validating issue #{issue_number}")
+        validate_open_issue(runner, config=config, issue_number=issue_number)
+        return _run_discuss_loop(
+            runner,
+            issue_number=issue_number,
+            config=config,
+            usage_context=usage_context,
         )
     finally:
         if owned_usage_context:

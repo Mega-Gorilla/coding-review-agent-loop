@@ -21,6 +21,8 @@ from coding_review_agent_loop.orchestrator import (
 )
 from coding_review_agent_loop.protocol import (
     ApprovedFollowup,
+    DISCUSS_OUTCOME_VALUES,
+    ParsedDiscussReview,
     _expect_string_list,
     _extract_structured_coder_followup_payload,
     _extract_structured_plan_review_payload,
@@ -34,6 +36,7 @@ from coding_review_agent_loop.protocol import (
     parse_plan_review,
     parse_plan_review_items,
     parse_plan_state,
+    parse_structured_discuss_review,
     parse_structured_plan_review,
     parse_structured_pr_review,
     parse_review,
@@ -44,6 +47,7 @@ from coding_review_agent_loop.protocol import (
     UnresolvedReviewItem,
     validate_human_requirements_acknowledgement,
     validate_structured_coder_followup,
+    validate_structured_discuss_review,
     validate_structured_human_requirements_acknowledgement,
     validate_structured_plan_state,
     validate_structured_plan_revision,
@@ -51,6 +55,7 @@ from coding_review_agent_loop.protocol import (
 from coding_review_agent_loop.agents.gemini import PUBLIC_RESPONSE_MARKER
 from coding_review_agent_loop.errors import UnknownPriorItemDispositionError
 from coding_review_agent_loop.orchestrator import (
+    _aggregate_discuss_votes,
     _decode_public_response_json_prefix,
     _failure_category,
     _is_transient_public_response,
@@ -2621,4 +2626,159 @@ def test_extract_structured_plan_revision_payload_rejects_bad_footer_ordering():
 def test_expect_string_list_enforces_min_length():
     with pytest.raises(AgentLoopError, match="must contain at least 1 item"):
         _expect_string_list([], context="plan_revision.plan_steps", item_context="plan_revision.plan_steps", min_length=1)
+
+
+# --- discuss_review protocol tests ---
+
+
+def _discuss_review(
+    *,
+    outcome: str = "implement",
+    rationale: str = "The feature is well-scoped.",
+    split_proposals: list[str] | None = None,
+    reviewer: str = "Gemini",
+    footer: str = "approved",
+) -> str:
+    payload: dict = {
+        "schema_version": 1,
+        "kind": "discuss_review",
+        "outcome": outcome,
+        "rationale": rationale,
+    }
+    if split_proposals is not None:
+        payload["split_proposals"] = split_proposals
+    return json.dumps(payload) + f"\n<!-- AGENT_PLAN_STATE: {footer} -->\n-- {reviewer}"
+
+
+def test_parse_structured_discuss_review_accepts_implement():
+    text = _discuss_review(outcome="implement")
+    result = parse_structured_discuss_review(text, reviewer="Gemini")
+    assert result is not None
+    assert result.outcome == "implement"
+    assert result.reviewer == "Gemini"
+
+
+def test_parse_structured_discuss_review_accepts_do_not_implement():
+    text = _discuss_review(outcome="do-not-implement", rationale="Out of scope.")
+    result = parse_structured_discuss_review(text, reviewer="Gemini")
+    assert result is not None
+    assert result.outcome == "do-not-implement"
+
+
+def test_parse_structured_discuss_review_accepts_needs_human():
+    text = _discuss_review(outcome="needs-human", rationale="Needs clarification.")
+    result = parse_structured_discuss_review(text, reviewer="OpenAI Codex")
+    assert result is not None
+    assert result.outcome == "needs-human"
+
+
+def test_parse_structured_discuss_review_accepts_split_with_proposals():
+    text = _discuss_review(
+        outcome="split",
+        rationale="Too broad.",
+        split_proposals=["Sub-issue A", "Sub-issue B"],
+    )
+    result = parse_structured_discuss_review(text, reviewer="Gemini")
+    assert result is not None
+    assert result.outcome == "split"
+    assert result.split_proposals == ("Sub-issue A", "Sub-issue B")
+
+
+def test_parse_structured_discuss_review_rejects_unknown_outcome():
+    from coding_review_agent_loop.errors import AgentLoopError as _AgentLoopError
+    text = _discuss_review(outcome="maybe")
+    with pytest.raises(_AgentLoopError, match="outcome must be one of"):
+        parse_structured_discuss_review(text, reviewer="Gemini")
+
+
+def test_parse_structured_discuss_review_rejects_split_with_empty_proposals():
+    from coding_review_agent_loop.errors import AgentLoopError as _AgentLoopError
+    text = _discuss_review(outcome="split", split_proposals=[])
+    with pytest.raises(_AgentLoopError, match="split_proposals must be non-empty"):
+        parse_structured_discuss_review(text, reviewer="Gemini")
+
+
+def test_parse_structured_discuss_review_rejects_blocking_footer():
+    from coding_review_agent_loop.errors import AgentLoopError as _AgentLoopError
+    text = _discuss_review(footer="blocking")
+    with pytest.raises(_AgentLoopError, match="approved"):
+        parse_structured_discuss_review(text, reviewer="Gemini")
+
+
+def test_parse_structured_discuss_review_rejects_wrong_kind():
+    from coding_review_agent_loop.errors import AgentLoopError as _AgentLoopError
+    payload = json.dumps({
+        "schema_version": 1,
+        "kind": "plan_review",
+        "outcome": "implement",
+        "rationale": "Looks good.",
+    }) + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- Gemini"
+    with pytest.raises(_AgentLoopError, match="kind mismatch"):
+        parse_structured_discuss_review(payload, reviewer="Gemini")
+
+
+def test_validate_structured_discuss_review_raises_when_no_marker():
+    from coding_review_agent_loop.errors import AgentLoopError as _AgentLoopError
+    with pytest.raises(_AgentLoopError, match="structured format"):
+        validate_structured_discuss_review("No structured content here.", reviewer="Gemini")
+
+
+def test_discuss_outcome_values_contains_all_four():
+    assert DISCUSS_OUTCOME_VALUES == {"implement", "do-not-implement", "needs-human", "split"}
+
+
+# --- _aggregate_discuss_votes tests ---
+
+
+def _vote(outcome: str, rationale: str = "reason", proposals: tuple[str, ...] = ()) -> ParsedDiscussReview:
+    return ParsedDiscussReview(
+        outcome=outcome,
+        rationale=rationale,
+        split_proposals=proposals,
+        reviewer="Test",
+    )
+
+
+def test_aggregate_discuss_votes_unanimous_implement():
+    votes = [_vote("implement"), _vote("implement")]
+    outcome, proposals = _aggregate_discuss_votes(votes)
+    assert outcome == "implement"
+    assert proposals == []
+
+
+def test_aggregate_discuss_votes_veto_do_not_implement():
+    votes = [_vote("implement"), _vote("do-not-implement"), _vote("implement")]
+    outcome, proposals = _aggregate_discuss_votes(votes)
+    assert outcome == "do-not-implement"
+
+
+def test_aggregate_discuss_votes_needs_human_beats_implement():
+    votes = [_vote("implement"), _vote("needs-human")]
+    outcome, proposals = _aggregate_discuss_votes(votes)
+    assert outcome == "needs-human"
+
+
+def test_aggregate_discuss_votes_do_not_implement_beats_needs_human():
+    votes = [_vote("needs-human"), _vote("do-not-implement")]
+    outcome, proposals = _aggregate_discuss_votes(votes)
+    assert outcome == "do-not-implement"
+
+
+def test_aggregate_discuss_votes_all_split_merges_proposals():
+    votes = [
+        _vote("split", proposals=("Sub A", "Sub B")),
+        _vote("split", proposals=("Sub B", "Sub C")),
+    ]
+    outcome, proposals = _aggregate_discuss_votes(votes)
+    assert outcome == "split"
+    assert "Sub A" in proposals
+    assert "Sub B" in proposals
+    assert "Sub C" in proposals
+    assert proposals.index("Sub A") < proposals.index("Sub B") < proposals.index("Sub C")
+
+
+def test_aggregate_discuss_votes_mixed_falls_back_to_needs_human():
+    votes = [_vote("implement"), _vote("split", proposals=("X",))]
+    outcome, proposals = _aggregate_discuss_votes(votes)
+    assert outcome == "needs-human"
 

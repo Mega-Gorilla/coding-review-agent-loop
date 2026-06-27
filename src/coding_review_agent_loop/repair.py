@@ -85,7 +85,7 @@ def strip_unknown_prior_item_dispositions(
 
 def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> str | None:
     """Trim envelope-only trailing material without changing structured JSON."""
-    if expected_kind not in {"pr_review", "plan_review", "plan_revision", "coder_followup"}:
+    if expected_kind not in {"pr_review", "plan_review", "plan_revision", "coder_followup", "discuss_review"}:
         return None
 
     stripped = raw.lstrip()
@@ -100,7 +100,7 @@ def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> st
 
     json_text = stripped[:json_end].rstrip()
     trailing = stripped[json_end:]
-    state_re = PLAN_STATE_RE if expected_kind in {"plan_review", "plan_revision"} else STATE_RE
+    state_re = PLAN_STATE_RE if expected_kind in {"plan_review", "plan_revision", "discuss_review"} else STATE_RE
     state_match = state_re.search(trailing)
     if state_match is None:
         return None
@@ -196,7 +196,7 @@ def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> st
 # Uses str.replace("{raw_response}", raw, 1) for substitution because the prompt
 # itself contains literal { } characters in the JSON examples.
 _REPAIR_PROMPT = """\
-You are a format-repair assistant. An AI agent produced a code review, plan review, plan revision, or coder follow-up that failed strict schema validation. Extract its intent and reformat it into one of these four valid formats.
+You are a format-repair assistant. An AI agent produced a code review, plan review, plan revision, coder follow-up, or discuss review that failed strict schema validation. Extract its intent and reformat it into one of these valid formats.
 
 {expected_kind_instruction}
 
@@ -261,6 +261,24 @@ You are a format-repair assistant. An AI agent produced a code review, plan revi
 }
 <!-- AGENT_STATE: approved -->
 -- <Coder Name>
+
+## Valid Format E — Discuss Review:
+
+{
+  "schema_version": 1,
+  "kind": "discuss_review",
+  "outcome": "implement" | "do-not-implement" | "needs-human" | "split",
+  "rationale": "<short rationale>",
+  "split_proposals": ["Sub-issue title 1", "Sub-issue title 2"]
+}
+<!-- AGENT_PLAN_STATE: approved -->
+-- <Reviewer Name>
+
+Notes:
+- outcome must be exactly one of the four values above.
+- rationale is required and must be non-empty.
+- split_proposals is required and must be non-empty when outcome is "split"; omit or use [] otherwise.
+- footer must always be <!-- AGENT_PLAN_STATE: approved --> (never blocking).
 
 ## Valid Format D — Plan Revision:
 
@@ -652,6 +670,52 @@ item-1 is removed because it was a same-round finding, not an eligible carried p
 The future_followups entry is moved to blocking_plan_issues because it concerns current-plan correctness.
 Only genuinely independent later work should remain in future_followups on an approved review.
 
+## WORKED EXAMPLE 13 — discuss_review with outcome and rationale:
+
+Original (malformed): discuss_review JSON wrapped in ```json fences.
+
+```json
+{
+  "schema_version": 1,
+  "kind": "discuss_review",
+  "outcome": "implement",
+  "rationale": "The feature is well-scoped and fills a clear user need."
+}
+```
+
+<!-- AGENT_PLAN_STATE: approved -->
+-- Gemini
+
+CORRECT repair — strip fences, output bare JSON + AGENT_PLAN_STATE footer + signature:
+{
+  "schema_version": 1,
+  "kind": "discuss_review",
+  "outcome": "implement",
+  "rationale": "The feature is well-scoped and fills a clear user need."
+}
+<!-- AGENT_PLAN_STATE: approved -->
+-- Gemini
+
+## WORKED EXAMPLE 14 — discuss_review with outcome split and split_proposals:
+
+Original (malformed): discuss_review without split_proposals despite split outcome.
+
+CORRECT repair — add split_proposals derived from rationale; footer must be AGENT_PLAN_STATE: approved:
+{
+  "schema_version": 1,
+  "kind": "discuss_review",
+  "outcome": "split",
+  "rationale": "Issue is too broad; should be split into authentication and authorization sub-issues.",
+  "split_proposals": ["Implement authentication flow", "Implement authorization checks"]
+}
+<!-- AGENT_PLAN_STATE: approved -->
+-- Reviewer
+
+Notes:
+- discuss_review uses AGENT_PLAN_STATE (not AGENT_STATE).
+- Footer state must always be "approved" for discuss_review; never "blocking".
+- split_proposals is only required when outcome is "split"; omit or use [] for other outcomes.
+
 ## FORMAT:
 1. Start DIRECTLY with { — no prose, no markdown fences.
 2. After }: For approved `pr_review` or `plan_review` that now includes `<!-- HUMAN_REQUIREMENTS_RESOLVED -->`,
@@ -667,7 +731,7 @@ Output ONLY the repaired response. No explanations.
 {raw_response}"""
 
 _REPAIR_MODEL = "gemini-3.1-flash-lite"
-_SUPPORTED_EXPECTED_KINDS = {"pr_review", "plan_review", "coder_followup", "plan_revision"}
+_SUPPORTED_EXPECTED_KINDS = {"pr_review", "plan_review", "coder_followup", "plan_revision", "discuss_review"}
 RepairOutcome = Literal[
     "succeeded", "nonzero_exit", "empty_output", "timeout", "spawn_error", "invalid_output"
 ]

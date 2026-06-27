@@ -218,6 +218,26 @@ class StructuredPlanState:
 
 
 @dataclass(frozen=True)
+class StructuredDiscussReview:
+    schema_version: int
+    kind: str
+    outcome: str
+    rationale: str
+    split_proposals: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ParsedDiscussReview:
+    outcome: str
+    rationale: str
+    split_proposals: tuple[str, ...]
+    reviewer: str
+
+
+DISCUSS_OUTCOME_VALUES = frozenset({"implement", "do-not-implement", "needs-human", "split"})
+
+
+@dataclass(frozen=True)
 class ParsedHumanRequirementsAcknowledgement:
     marker_present: bool
     section_present: bool
@@ -797,6 +817,31 @@ def _extract_structured_plan_state_payload(text: str) -> dict[str, object] | Non
         state_marker_name="AGENT_PLAN_STATE",
         context_label="Structured plan state",
     )
+
+
+def _extract_structured_discuss_review_payload(text: str) -> dict[str, object] | None:
+    text, _status = normalize_response_file_structured_text(text)
+    extracted = _extract_json_object_prefix(text)
+    if extracted is None:
+        return None
+    payload, trailing = extracted
+    result = _consume_structured_footer_and_signature(
+        payload=payload,
+        trailing=trailing,
+        state_re=PLAN_STATE_RE,
+        state_marker_name="AGENT_PLAN_STATE",
+        context_label="Structured discuss review",
+    )
+    if result is None:
+        return None
+    footer_match = PLAN_STATE_RE.search(trailing)
+    if footer_match is not None:
+        footer_state = footer_match.group(1).lower()
+        if footer_state != "approved":
+            raise AgentLoopError(
+                f"Structured discuss review footer AGENT_PLAN_STATE must be `approved`; got `{footer_state}`."
+            )
+    return result
 
 
 def _extract_structured_coder_followup_payload(text: str) -> dict[str, object] | None:
@@ -1729,3 +1774,49 @@ def parse_plan_review(text: str, *, reviewer: str) -> ParsedPlanReview:
 def parse_non_blocking_followups(text: str, *, reviewer: str) -> list[ApprovedFollowup]:
     """Extract legacy non-blocking follow-ups as future follow-ups."""
     return list(parse_approved_followups(text, reviewer=reviewer).future)
+
+
+def parse_structured_discuss_review(
+    text: str, *, reviewer: str
+) -> ParsedDiscussReview | None:
+    payload = _extract_structured_discuss_review_payload(text)
+    if payload is None:
+        return None
+    _require_supported_schema_version(payload)
+    kind = payload.get("kind")
+    if isinstance(kind, str) and kind != "discuss_review":
+        raise AgentLoopError("Structured response kind mismatch: expected `discuss_review`.")
+    _expect_exact_keys(
+        payload,
+        context="discuss_review",
+        required={"schema_version", "kind", "outcome", "rationale"},
+        optional={"split_proposals"},
+    )
+    outcome = _expect_non_empty_string(payload["outcome"], context="discuss_review.outcome")
+    if outcome not in DISCUSS_OUTCOME_VALUES:
+        rendered = ", ".join(sorted(DISCUSS_OUTCOME_VALUES))
+        raise AgentLoopError(f"discuss_review.outcome must be one of: {rendered}")
+    rationale = _expect_non_empty_string(payload["rationale"], context="discuss_review.rationale")
+    split_proposals = _expect_optional_string_list(
+        payload,
+        "split_proposals",
+        context="discuss_review.split_proposals",
+        item_context="discuss_review.split_proposals",
+    )
+    if outcome == "split" and not split_proposals:
+        raise AgentLoopError(
+            "discuss_review.split_proposals must be non-empty when outcome is `split`."
+        )
+    return ParsedDiscussReview(
+        outcome=outcome,
+        rationale=rationale,
+        split_proposals=split_proposals,
+        reviewer=reviewer,
+    )
+
+
+def validate_structured_discuss_review(text: str, *, reviewer: str) -> ParsedDiscussReview:
+    parsed = parse_structured_discuss_review(text, reviewer=reviewer)
+    if parsed is not None:
+        return parsed
+    raise AgentLoopError("Discuss review did not use the required structured format.")
