@@ -3390,6 +3390,13 @@ DISCUSS_CONSENSUS_MARKER_RE = re.compile(
 
 def _discuss_subject(issue_context: IssueContext) -> str:
     text = (issue_context.title or "") + "\n\n" + (issue_context.body or "")
+    non_consensus_bodies = [
+        c.body
+        for c in issue_context.comments
+        if c.body and not DISCUSS_CONSENSUS_MARKER_RE.search(c.body)
+    ]
+    if non_consensus_bodies:
+        text += "\n\n" + "\n\n".join(non_consensus_bodies)
     return hashlib.sha256(text.strip().encode("utf-8")).hexdigest()
 
 
