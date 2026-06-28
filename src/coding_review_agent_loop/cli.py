@@ -36,6 +36,7 @@ from .github import (
 )
 from .logging import agent_log_path, log
 from .orchestrator import (
+    run_discuss_loop,
     run_issue_loop,
     run_optional_tests,
     run_pr_loop,
@@ -432,6 +433,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_common(task)
 
+    discuss = subparsers.add_parser(
+        "discuss",
+        help="Run reviewers on an issue and post a consensus outcome comment.",
+    )
+    discuss.add_argument("issue_number", type=int)
+    add_common(discuss)
+
     return parser
 
 
@@ -497,6 +505,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 interactive=getattr(args, "interactive", False),
                 max_clarification_rounds=getattr(args, "max_clarification_rounds", 0),
             )
+        if args.command == "discuss":
+            return run_discuss_loop(runner, issue_number=args.issue_number, config=config)
         parser.error(f"unknown command: {args.command}")
     except QuotaResetExceededError as exc:
         print(f"agent-loop: {exc}", file=sys.stderr)

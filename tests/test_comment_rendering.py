@@ -13,7 +13,9 @@ from coding_review_agent_loop.comment_rendering import (
     _render_public_plan_revision_comment,
     _render_public_pr_review_comment,
     normalize_freeform_signature,
+    render_discuss_consensus_comment,
 )
+from coding_review_agent_loop.protocol import ParsedDiscussReview
 from coding_review_agent_loop.orchestrator import (
     HUMAN_REQUIREMENTS_ACK_ITEM_ID,
     ITEM_SUMMARY_LIMIT,
@@ -692,5 +694,116 @@ def test_render_public_review_comment_preserves_unknown_disposition_values():
         "Keep the parser and renderer aligned when new dispositions are added. "
         "-> deferred: tracked for a later parser update"
     ) in rendered
+
+
+# --- render_discuss_consensus_comment tests ---
+
+
+def _discuss_vote(
+    outcome: str = "implement",
+    rationale: str = "Good scope.",
+    proposals: tuple[str, ...] = (),
+    reviewer: str = "Gemini",
+) -> ParsedDiscussReview:
+    return ParsedDiscussReview(
+        outcome=outcome,
+        rationale=rationale,
+        split_proposals=proposals,
+        reviewer=reviewer,
+    )
+
+
+def test_render_discuss_consensus_comment_implement_heading(tmp_path):
+    config = make_config(tmp_path)
+    rendered = render_discuss_consensus_comment(
+        outcome="implement",
+        reviewer_votes=[_discuss_vote("implement")],
+        split_proposals=[],
+        subject="abc123",
+        config=config,
+    )
+    assert "## Consensus: Implement" in rendered
+
+
+def test_render_discuss_consensus_comment_do_not_implement_heading(tmp_path):
+    config = make_config(tmp_path)
+    rendered = render_discuss_consensus_comment(
+        outcome="do-not-implement",
+        reviewer_votes=[_discuss_vote("do-not-implement", rationale="Out of scope.")],
+        split_proposals=[],
+        subject="deadbeef",
+        config=config,
+    )
+    assert "## Consensus: Do Not Implement" in rendered
+
+
+def test_render_discuss_consensus_comment_needs_human_heading(tmp_path):
+    config = make_config(tmp_path)
+    rendered = render_discuss_consensus_comment(
+        outcome="needs-human",
+        reviewer_votes=[_discuss_vote("needs-human", rationale="Unclear requirements.")],
+        split_proposals=[],
+        subject="cafe1234",
+        config=config,
+    )
+    assert "## Consensus: Needs Human Review" in rendered
+
+
+def test_render_discuss_consensus_comment_split_heading_and_proposals(tmp_path):
+    config = make_config(tmp_path)
+    rendered = render_discuss_consensus_comment(
+        outcome="split",
+        reviewer_votes=[_discuss_vote("split", proposals=("Sub A", "Sub B"))],
+        split_proposals=["Sub A", "Sub B"],
+        subject="f00dbeef",
+        config=config,
+    )
+    assert "## Consensus: Split" in rendered
+    assert "### Proposed sub-issues" in rendered
+    assert "- Sub A" in rendered
+    assert "- Sub B" in rendered
+
+
+def test_render_discuss_consensus_comment_reviewer_table_row(tmp_path):
+    config = make_config(tmp_path)
+    rendered = render_discuss_consensus_comment(
+        outcome="implement",
+        reviewer_votes=[
+            _discuss_vote("implement", rationale="Well-scoped.", reviewer="Gemini"),
+            _discuss_vote("implement", rationale="Clear value.", reviewer="OpenAI Codex"),
+        ],
+        split_proposals=[],
+        subject="abc123",
+        config=config,
+    )
+    assert "| Gemini |" in rendered
+    assert "| OpenAI Codex |" in rendered
+    assert "Well-scoped." in rendered
+    assert "Clear value." in rendered
+
+
+def test_render_discuss_consensus_comment_orchestrator_footer(tmp_path):
+    config = make_config(tmp_path)
+    rendered = render_discuss_consensus_comment(
+        outcome="implement",
+        reviewer_votes=[_discuss_vote()],
+        split_proposals=[],
+        subject="abc123",
+        config=config,
+    )
+    assert "-- Orchestrator" in rendered
+
+
+def test_render_discuss_consensus_comment_marker_last_line(tmp_path):
+    config = make_config(tmp_path)
+    subject = "deadbeef1234"
+    rendered = render_discuss_consensus_comment(
+        outcome="implement",
+        reviewer_votes=[_discuss_vote()],
+        split_proposals=[],
+        subject=subject,
+        config=config,
+    )
+    assert rendered.endswith(f"<!-- AGENT_DISCUSS_CONSENSUS: {subject} -->")
 
 

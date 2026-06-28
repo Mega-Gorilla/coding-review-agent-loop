@@ -2130,3 +2130,50 @@ the AGENT_STATE footer. Your response must end with, in this exact order:
 <!-- AGENT_STATE: blocking -->
 -- {coder_signature}
 """
+
+
+def build_discuss_review_prompt(
+    issue_number: int,
+    config: AgentLoopConfig,
+    *,
+    reviewer: AgentName,
+    memory: AgentMemoryContext | None = None,
+    issue_context: IssueContext | None = None,
+) -> str:
+    reviewer_signature = agent_signature(reviewer, config)
+    return f"""Evaluate GitHub issue #{issue_number} in {config.repo} and vote on whether it should be implemented.
+
+Use this local checkout only to inspect context. Do not edit files, create a
+branch, commit, push, or open a pull request during this evaluation.
+{_issue_context_block(issue_context)}{_memory_block(memory)}
+
+Vote on one of these outcomes:
+- `implement` — the issue is well-defined and should be implemented as described.
+- `do-not-implement` — the issue should not be implemented (duplicate, out of scope, won't fix, etc.).
+- `needs-human` — the issue needs human clarification or decision before a technical verdict can be given.
+- `split` — the issue is too broad and should be split into smaller focused sub-issues.
+
+Respond using this mandatory structured JSON format:
+
+{{
+  "schema_version": 1,
+  "kind": "discuss_review",
+  "outcome": "implement",
+  "rationale": "The feature is clearly scoped and fills a documented user need.",
+  "split_proposals": []
+}}
+<!-- AGENT_PLAN_STATE: approved -->
+-- {reviewer_signature}
+
+Rules:
+- `outcome` must be exactly one of: `implement`, `do-not-implement`, `needs-human`, `split`.
+- `rationale` is required and must be non-empty.
+- `split_proposals` is required and must be non-empty when `outcome` is `split`; omit or use `[]` for other outcomes.
+- The footer must always be `<!-- AGENT_PLAN_STATE: approved -->` regardless of your outcome.
+- Do not include prose or code fences before the JSON object.
+- Do not place your signature before the `AGENT_PLAN_STATE` footer.
+- Your response must end with, in this exact order:
+
+<!-- AGENT_PLAN_STATE: approved -->
+-- {reviewer_signature}
+"""
