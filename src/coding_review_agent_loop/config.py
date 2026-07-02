@@ -97,6 +97,9 @@ class AgentLoopConfig:
     repair_backend: str = "antigravity"
     repair_models: tuple[str, ...] = DEFAULT_REPAIR_MODELS
     repair_timeout_seconds: int = 120
+    # Optional analyzer agent for discuss mode (#467). None keeps plain
+    # direct deliberation unchanged. May coincide with a reviewer.
+    discuss_analyzer: AgentName | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.reviewer, str):
@@ -170,10 +173,17 @@ def resolve_base_branch(
     )
 
 
+def required_agents(config: AgentLoopConfig) -> set[AgentName]:
+    required: set[AgentName] = {config.coder, *reviewers(config)}
+    if config.discuss_analyzer is not None:
+        required.add(config.discuss_analyzer)
+    return required
+
+
 def ensure_distinct_workdirs(config: AgentLoopConfig) -> None:
     if config.allow_shared_dir:
         return
-    required: set[AgentName] = {config.coder, *reviewers(config)}
+    required = required_agents(config)
     paths = {
         "claude": (config.claude_dir, "--claude-dir"),
         "codex": (config.codex_dir, "--codex-dir"),
@@ -571,7 +581,7 @@ def sync_checkout_to_pr(
 
 
 def ensure_agent_workdirs(config: AgentLoopConfig, runner: Runner) -> None:
-    required: set[AgentName] = {config.coder, *reviewers(config)}
+    required = required_agents(config)
     paths = {
         "claude": (config.claude_dir, "--claude-dir"),
         "codex": (config.codex_dir, "--codex-dir"),
@@ -619,8 +629,14 @@ def preflight_agent_commands(
         "gemini": (args.gemini_cmd, "--gemini-cmd"),
         "antigravity": (args.antigravity_cmd, "--antigravity-cmd"),
     }
+    discuss_analyzer = getattr(args, "discuss_analyzer", None)
     configured_agents = dict.fromkeys(
-        (args.coder, *configured_reviewers, getattr(args, "repair_backend", "antigravity"))
+        (
+            args.coder,
+            *configured_reviewers,
+            *((discuss_analyzer,) if discuss_analyzer is not None else ()),
+            getattr(args, "repair_backend", "antigravity"),
+        )
     )
     for agent in configured_agents:
         command, override_flag = command_options[agent]
@@ -746,6 +762,7 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
         repair_backend=getattr(args, "repair_backend", "antigravity"),
         repair_models=tuple(getattr(args, "repair_model", None) or DEFAULT_REPAIR_MODELS),
         repair_timeout_seconds=getattr(args, "repair_timeout_seconds", 120),
+        discuss_analyzer=getattr(args, "discuss_analyzer", None),
         test_command=test_command,
         pre_review_tests=args.pre_review_tests,
         ci_check_name=args.ci_check_name,

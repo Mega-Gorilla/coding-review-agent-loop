@@ -306,6 +306,26 @@ agent-loop discuss 123 --repo OWNER/REPO \
   --discuss-max-rounds 2
 ```
 
+Optionally, pass `--discuss-analyzer <agent>` to add an analyzer agent that
+summarizes each non-final round into a structured debate agenda (consensus
+points, each open disagreement with the debaters' positions and a question for
+the next round, and missing facts). With an analyzer, each debate round's
+prompt contains only that agenda plus the debater's own prior position —
+other debaters' full rationales and rebuttals are omitted — and debaters may
+flag `analyzer_framing: "misframed"` with a `framing_note` when the agenda
+misrepresents them. The analyzer is not authoritative: consensus is still
+detected purely from the votes, the agenda is rendered in the round summary
+for auditing, and the final summary keeps "analyzer-extracted consensus"
+distinct from the debater vote table. If the analyzer fails even after the
+repair pass, the round falls back to the plain mechanical agenda and the run
+continues. Omitting the flag keeps plain direct deliberation unchanged:
+
+```bash
+agent-loop discuss 123 --repo OWNER/REPO \
+  --reviewer codex --reviewer antigravity \
+  --discuss-analyzer claude
+```
+
 If reviewers still disagree after the configured debate rounds, the final
 round-summary comment is marked `deadlock`, uses the `needs-human` outcome, and
 summarizes each final position and the core disagreement. `split` proposals

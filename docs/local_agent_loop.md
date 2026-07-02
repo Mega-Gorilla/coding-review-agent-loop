@@ -371,6 +371,68 @@ agent-loop discuss 123 --repo OWNER/REPO \
   --discuss-max-rounds 2
 ```
 
+### Optional analyzer-guided debate agenda
+
+Pass `--discuss-analyzer <agent>` (`claude`, `codex`, `gemini`, or
+`antigravity`; it may coincide with a `--reviewer`) to add an analyzer agent
+borrowed from the analyzer/debater pattern:
+
+```bash
+agent-loop discuss 123 --repo OWNER/REPO \
+  --reviewer codex --reviewer antigravity \
+  --discuss-analyzer claude
+```
+
+After each non-final round, the analyzer receives the complete multi-round
+vote history (every completed round's outcomes, rationales, rebuttals, and any
+framing corrections, oldest first) plus its own previous agenda, and returns a
+structured `discuss_agenda` response:
+
+```json
+{
+  "schema_version": 1,
+  "kind": "discuss_agenda",
+  "consensus": ["The issue is well-motivated."],
+  "disagreements": [
+    {
+      "topic": "Scope of the change",
+      "positions": {"Codex": "Narrow enough.", "Antigravity": "Too broad; split it."},
+      "question_for_next_round": "Would splitting the API boundary resolve the scope objection?"
+    }
+  ],
+  "missing_facts": ["Whether the API boundary is already specified."]
+}
+```
+
+In analyzer mode, the next debate round's prompt is agenda-focused: it renders
+only the structured agenda plus the target debater's own prior position
+verbatim. Other debaters' full rationales and rebuttals are omitted and reach
+each debater only through the analyzer's summarized `positions`. Each debater
+must concede, defend with evidence, refine its position, or set
+`analyzer_framing: "misframed"` with a `framing_note` correcting the agenda;
+framing corrections are rendered in the debater's public comment.
+
+Guardrails — the analyzer is never authoritative:
+
+- Consensus detection stays vote-only; the analyzer never decides the outcome.
+  An agenda claiming consensus while the votes differ is forwarded, but the
+  votes rule and the divergence stays visible in the summary.
+- The agenda is rendered in the non-final round summary ("Agenda for round
+  N+1 (analyzer: ...)"), so it is auditable on the issue.
+- The final summary adds an "Analyzer-extracted consensus (not
+  debater-confirmed)" section kept distinct from the debater vote table.
+- If the analyzer invocation fails even after the malformed-response repair
+  pass, the orchestrator logs a warning and falls back to the plain mechanical
+  agenda for that round (and full prior positions in the next debate prompt)
+  instead of aborting the run.
+
+The raw agenda rides in the round summary's `AGENT_LOOP_META` metadata, so a
+resumed run restores the structured agenda for the next debate round. Legacy
+summaries without an analyzer payload resume in plain mode. With
+`--discuss-max-rounds 0` there is no non-final round, so the analyzer never
+runs (a note is logged). Omitting `--discuss-analyzer` keeps plain #465-style
+direct deliberation unchanged.
+
 If `--repo` is omitted, the tool runs `gh repo view` from the current working
 directory, or from `--codex-dir` when that flag is provided, and uses the
 detected `OWNER/REPO`. Pass `--repo` explicitly when running outside the target

@@ -29,6 +29,8 @@ def _discuss_review_text(
     split_proposals: list[str] | None = None,
     rebuttal: str | None = None,
     reviewer: str = "OpenAI Codex",
+    analyzer_framing: str | None = None,
+    framing_note: str | None = None,
 ) -> str:
     payload: dict = {
         "schema_version": 1,
@@ -40,7 +42,36 @@ def _discuss_review_text(
         payload["split_proposals"] = split_proposals
     if rebuttal is not None:
         payload["rebuttal"] = rebuttal
+    if analyzer_framing is not None:
+        payload["analyzer_framing"] = analyzer_framing
+    if framing_note is not None:
+        payload["framing_note"] = framing_note
     return json.dumps(payload) + f"\n<!-- AGENT_PLAN_STATE: approved -->\n-- {reviewer}"
+
+
+def _discuss_agenda_text(
+    *,
+    consensus: list[str] | None = None,
+    disagreements: list[dict] | None = None,
+    missing_facts: list[str] | None = None,
+    analyzer: str = "Anthropic Claude",
+) -> str:
+    payload: dict = {
+        "schema_version": 1,
+        "kind": "discuss_agenda",
+        "consensus": consensus if consensus is not None else ["The issue is well-motivated."],
+        "disagreements": disagreements
+        if disagreements is not None
+        else [
+            {
+                "topic": "Scope of the change",
+                "positions": {"Codex": "Narrow enough.", "Gemini": "Too broad."},
+                "question_for_next_round": "Would splitting resolve the scope objection?",
+            }
+        ],
+        "missing_facts": missing_facts if missing_facts is not None else [],
+    }
+    return json.dumps(payload) + f"\n<!-- AGENT_PLAN_STATE: approved -->\n-- {analyzer}"
 
 
 def _issue_subject(title: str = "Fix issue-mode context", body: str = "Original issue body.") -> str:
@@ -106,6 +137,7 @@ def _seed_summary_comment(
     round_history: list[list[ParsedDiscussReview]] | None = None,
     split_proposals: list[str] | None = None,
     agenda: tuple[str, ...] = (),
+    analyzer_response: str | None = None,
 ) -> dict:
     """Build an issue-comment payload matching what `_run_discuss_loop` posts for a round summary."""
     body = render_discuss_round_summary_comment(
@@ -129,6 +161,7 @@ def _seed_summary_comment(
             is_final=is_final,
             consensus_kind=consensus_kind,
             agenda=agenda,
+            analyzer_response=analyzer_response,
         ),
     )
     return {"author": {"login": "bot"}, "createdAt": "2026-01-01T00:00:00Z", "body": body}
@@ -720,3 +753,437 @@ def test_discuss_loop_raises_when_resumed_round_exceeds_max_rounds_with_no_compl
 
     with pytest.raises(AgentLoopError, match="discuss: resumed state expects round"):
         run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=0)
+
+
+# --- analyzer-guided discuss mode tests (#467) ---
+
+
+def _claude_commands(runner):
+    return [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+
+
+def test_discuss_loop_cli_parser_accepts_discuss_analyzer():
+    from coding_review_agent_loop.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["discuss", "56", "--repo", "OWNER/REPO", "--discuss-analyzer", "claude"]
+    )
+    assert args.discuss_analyzer == "claude"
+    plain = build_parser().parse_args(["discuss", "56", "--repo", "OWNER/REPO"])
+    assert plain.discuss_analyzer is None
+
+
+def test_discuss_loop_unanimous_round1_never_invokes_analyzer(tmp_path):
+    implement_text = _discuss_review_text(outcome="implement")
+    runner = FakeRunner(
+        codex_outputs=[implement_text],
+        gemini_outputs=[implement_text],
+        claude_outputs=[],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_analyzer="claude")
+
+    result = run_discuss_loop(runner, issue_number=56, config=config)
+
+    assert result == 0
+    assert len(runner.comments) == 3
+    assert "Consensus: Implement" in runner.comments[-1]
+    assert not _claude_commands(runner)
+    assert "Analyzer" not in runner.comments[-1]
+
+
+def test_discuss_loop_max_rounds_zero_never_invokes_analyzer(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[_discuss_review_text(outcome="implement")],
+        gemini_outputs=[_discuss_review_text(outcome="needs-human", rationale="Needs input.")],
+        claude_outputs=[],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_analyzer="claude")
+
+    result = run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=0)
+
+    assert result == 0
+    assert not _claude_commands(runner)
+    assert "Consensus kind: `deadlock` after round 1." in runner.comments[-1]
+
+
+def test_discuss_loop_analyzer_agenda_focuses_debate_and_final_summary_distinguishes(tmp_path):
+    agenda_text = _discuss_agenda_text(
+        missing_facts=["Whether the API boundary is specified."],
+    )
+    runner = FakeRunner(
+        codex_outputs=[
+            _discuss_review_text(outcome="implement", rationale="Codex round-one rationale."),
+            _discuss_review_text(
+                outcome="implement",
+                rationale="Still scoped.",
+                rebuttal="Defending: the boundary is specified.",
+                analyzer_framing="accurate",
+            ),
+        ],
+        gemini_outputs=[
+            _discuss_review_text(
+                outcome="do-not-implement", rationale="Gemini round-one rationale."
+            ),
+            _discuss_review_text(
+                outcome="do-not-implement",
+                rationale="Still out of scope.",
+                rebuttal="The scope objection stands.",
+                analyzer_framing="accurate",
+            ),
+        ],
+        claude_outputs=[agenda_text],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_analyzer="claude")
+
+    result = run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=1)
+
+    assert result == 0
+    # The analyzer ran exactly once, after the non-final round 1, with the
+    # full round history in its prompt.
+    analyzer_commands = [
+        cmd for cmd in _claude_commands(runner) if "Summarize debate round 1" in " ".join(cmd)
+    ]
+    assert len(analyzer_commands) == 1
+    analyzer_prompt = " ".join(analyzer_commands[0])
+    assert "Codex round-one rationale." in analyzer_prompt
+    assert "Gemini round-one rationale." in analyzer_prompt
+    # Round-1 summary shows the attributed analyzer agenda instead of the
+    # mechanical per-vote lines, including missing facts.
+    round1_summary = runner.comments[2]
+    assert "### Agenda for round 2 (analyzer: Claude)" in round1_summary
+    assert "Scope of the change" in round1_summary
+    assert "Missing facts:" in round1_summary
+    assert "Whether the API boundary is specified." in round1_summary
+    assert "- Codex held `implement`: Codex round-one rationale." not in round1_summary
+    # Round-2 debate prompts are agenda-focused: agenda + own prior position
+    # only; the other debater's rationale reaches them only via the analyzer's
+    # summarized positions.
+    debate_commands = [cmd for cmd, _cwd in runner.commands if "debate round 2" in " ".join(cmd)]
+    assert len(debate_commands) == 2
+    for command in debate_commands:
+        prompt = " ".join(command)
+        assert "Scope of the change" in prompt
+        assert "Would splitting resolve the scope objection?" in prompt
+        assert "Whether the API boundary is specified." in prompt
+        assert "The analyzer is not authoritative" in prompt
+        assert "Prior round reviewer positions:" not in prompt
+    codex_prompt = next(
+        p for p in (" ".join(c) for c in debate_commands) if "-- OpenAI Codex" in p
+    )
+    gemini_prompt = next(
+        p for p in (" ".join(c) for c in debate_commands) if "-- Google Gemini" in p
+    )
+    assert "Codex round-one rationale." in codex_prompt
+    assert "Gemini round-one rationale." not in codex_prompt
+    assert "Gemini round-one rationale." in gemini_prompt
+    assert "Codex round-one rationale." not in gemini_prompt
+    # The deadlock final summary keeps analyzer-extracted consensus distinct
+    # from the authoritative debater vote table.
+    final = runner.comments[-1]
+    assert "Consensus kind: `deadlock` after round 2." in final
+    assert (
+        "### Analyzer-extracted consensus (analyzer: Claude; not debater-confirmed)"
+        in final
+    )
+    assert "The debater vote table above is the authoritative consensus." in final
+    assert "The issue is well-motivated." in final
+
+
+def test_discuss_loop_debater_misframing_correction_is_rendered(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            _discuss_review_text(outcome="implement", rationale="Scoped."),
+            _discuss_review_text(
+                outcome="implement",
+                rationale="Still scoped.",
+                rebuttal="Defending scope.",
+                analyzer_framing="accurate",
+            ),
+        ],
+        gemini_outputs=[
+            _discuss_review_text(outcome="do-not-implement", rationale="Out of scope."),
+            _discuss_review_text(
+                outcome="do-not-implement",
+                rationale="Still out of scope.",
+                rebuttal="The agenda mischaracterized me.",
+                analyzer_framing="misframed",
+                framing_note="I never proposed splitting; I questioned the motivation.",
+            ),
+        ],
+        claude_outputs=[_discuss_agenda_text()],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_analyzer="claude")
+
+    result = run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=1)
+
+    assert result == 0
+    gemini_round2 = next(c for c in runner.comments if "Round 2: Gemini position" in c)
+    assert "### Analyzer framing correction" in gemini_round2
+    assert "I never proposed splitting; I questioned the motivation." in gemini_round2
+    codex_round2 = next(c for c in runner.comments if "Round 2: Codex position" in c)
+    assert "**Analyzer framing:** accurate" in codex_round2
+
+
+def test_discuss_loop_analyzer_failure_falls_back_to_mechanical_agenda(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            _discuss_review_text(outcome="implement", rationale="Codex round-one rationale."),
+            _discuss_review_text(
+                outcome="implement", rationale="Still scoped.", rebuttal="Scope holds."
+            ),
+        ],
+        gemini_outputs=[
+            _discuss_review_text(
+                outcome="do-not-implement", rationale="Gemini round-one rationale."
+            ),
+            _discuss_review_text(
+                outcome="do-not-implement",
+                rationale="Still out of scope.",
+                rebuttal="Objection stands.",
+            ),
+        ],
+        # The analyzer emits prose the strict parser rejects, and the repair
+        # backend output is also unusable, so the analyzer fails outright.
+        claude_outputs=["I could not produce a structured agenda, sorry."],
+        antigravity_outputs=[("still not a structured agenda", 0)],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_analyzer="claude")
+
+    result = run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=1)
+
+    assert result == 0
+    # The round-1 summary falls back to the mechanical agenda.
+    round1_summary = runner.comments[2]
+    assert "### Agenda for round 2" in round1_summary
+    assert "(analyzer:" not in round1_summary
+    assert "- Codex held `implement`: Codex round-one rationale." in round1_summary
+    # Round-2 debate prompts fall back to the full prior-round transcript.
+    debate_commands = [cmd for cmd, _cwd in runner.commands if "debate round 2" in " ".join(cmd)]
+    assert len(debate_commands) == 2
+    for command in debate_commands:
+        prompt = " ".join(command)
+        assert "Prior round reviewer positions:" in prompt
+        assert "Codex round-one rationale." in prompt
+        assert "Gemini round-one rationale." in prompt
+    # The run still completes with a final summary and no analyzer section.
+    final = runner.comments[-1]
+    assert "Consensus kind: `deadlock` after round 2." in final
+    assert "Analyzer-extracted consensus" not in final
+
+
+def test_discuss_loop_three_rounds_second_analyzer_prompt_includes_full_history(tmp_path):
+    agenda_round1 = _discuss_agenda_text(consensus=["Round-one agenda marker."])
+    agenda_round2 = _discuss_agenda_text(consensus=["Round-two agenda marker."])
+    runner = FakeRunner(
+        codex_outputs=[
+            _discuss_review_text(outcome="implement", rationale="Codex round-one rationale."),
+            _discuss_review_text(
+                outcome="implement",
+                rationale="Codex round-two rationale.",
+                rebuttal="Codex round-two rebuttal.",
+                analyzer_framing="accurate",
+            ),
+            _discuss_review_text(
+                outcome="implement",
+                rationale="Codex round-three rationale.",
+                rebuttal="Holding position.",
+                analyzer_framing="accurate",
+            ),
+        ],
+        gemini_outputs=[
+            _discuss_review_text(
+                outcome="do-not-implement", rationale="Gemini round-one rationale."
+            ),
+            _discuss_review_text(
+                outcome="do-not-implement",
+                rationale="Gemini round-two rationale.",
+                rebuttal="Gemini round-two rebuttal.",
+                analyzer_framing="accurate",
+            ),
+            _discuss_review_text(
+                outcome="implement",
+                rationale="Convinced now.",
+                rebuttal="Conceding the scope point.",
+                analyzer_framing="accurate",
+            ),
+        ],
+        claude_outputs=[agenda_round1, agenda_round2],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_analyzer="claude")
+
+    result = run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=2)
+
+    assert result == 0
+    round2_analyzer_commands = [
+        cmd for cmd in _claude_commands(runner) if "Summarize debate round 2" in " ".join(cmd)
+    ]
+    assert len(round2_analyzer_commands) == 1
+    prompt = " ".join(round2_analyzer_commands[0])
+    # The analyzer sees every completed round, oldest first, plus its own
+    # previous agenda.
+    assert "Round 1 debater positions:" in prompt
+    assert "Round 2 debater positions (latest round):" in prompt
+    assert "Codex round-one rationale." in prompt
+    assert "Gemini round-one rationale." in prompt
+    assert "Codex round-two rebuttal." in prompt
+    assert "Gemini round-two rebuttal." in prompt
+    assert "Your previous agenda" in prompt
+    assert "Round-one agenda marker." in prompt
+    final = runner.comments[-1]
+    assert "Consensus: Implement" in final
+    assert "Consensus kind: `converged` after round 3." in final
+    assert "Round-two agenda marker." in final
+
+
+def test_discuss_loop_resume_restores_analyzer_agenda_from_summary_metadata(tmp_path):
+    subject = _issue_subject()
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_analyzer="claude")
+    codex_vote_r1 = ParsedDiscussReview(
+        outcome="implement", rationale="Codex round-one rationale.", split_proposals=(), reviewer="Codex"
+    )
+    gemini_vote_r1 = ParsedDiscussReview(
+        outcome="do-not-implement",
+        rationale="Gemini round-one rationale.",
+        split_proposals=(),
+        reviewer="Gemini",
+    )
+    seeded = [
+        _seed_debater_comment(
+            reviewer="Codex", round_number=1, subject=subject,
+            outcome="implement", rationale="Codex round-one rationale.", config=config,
+        ),
+        _seed_debater_comment(
+            reviewer="Gemini", round_number=1, subject=subject,
+            outcome="do-not-implement", rationale="Gemini round-one rationale.", config=config,
+        ),
+        _seed_summary_comment(
+            round_number=1,
+            reviewer_votes=[codex_vote_r1, gemini_vote_r1],
+            is_final=False,
+            subject=subject,
+            agenda=(
+                "- Codex held `implement`: Codex round-one rationale.",
+                "- Gemini held `do-not-implement`: Gemini round-one rationale.",
+            ),
+            analyzer_response=_discuss_agenda_text(),
+        ),
+    ]
+    implement_text = _discuss_review_text(
+        outcome="implement", rationale="Agreed now.", rebuttal="Conceding.",
+    )
+    runner = FakeRunner(
+        issue_comments=seeded,
+        codex_outputs=[implement_text],
+        gemini_outputs=[implement_text],
+        claude_outputs=[],
+    )
+
+    result = run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=1)
+
+    assert result == 0
+    debate_commands = [cmd for cmd, _cwd in runner.commands if "debate round 2" in " ".join(cmd)]
+    assert len(debate_commands) == 2
+    for command in debate_commands:
+        prompt = " ".join(command)
+        # Resumed debate prompts are agenda-focused, not full-transcript.
+        assert "Scope of the change" in prompt
+        assert "Prior round reviewer positions:" not in prompt
+    codex_prompt = next(
+        p for p in (" ".join(c) for c in debate_commands) if "-- OpenAI Codex" in p
+    )
+    assert "Gemini round-one rationale." not in codex_prompt
+    # The restored agenda also feeds the final summary's analyzer section.
+    final = runner.comments[-1]
+    assert "Consensus: Implement" in final
+    assert "Analyzer-extracted consensus" in final
+
+
+def test_discuss_loop_resume_legacy_summary_metadata_falls_back_to_plain_mode(tmp_path):
+    subject = _issue_subject()
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_analyzer="claude")
+    codex_vote_r1 = ParsedDiscussReview(
+        outcome="implement", rationale="Codex round-one rationale.", split_proposals=(), reviewer="Codex"
+    )
+    gemini_vote_r1 = ParsedDiscussReview(
+        outcome="do-not-implement",
+        rationale="Gemini round-one rationale.",
+        split_proposals=(),
+        reviewer="Gemini",
+    )
+    seeded = [
+        _seed_debater_comment(
+            reviewer="Codex", round_number=1, subject=subject,
+            outcome="implement", rationale="Codex round-one rationale.", config=config,
+        ),
+        _seed_debater_comment(
+            reviewer="Gemini", round_number=1, subject=subject,
+            outcome="do-not-implement", rationale="Gemini round-one rationale.", config=config,
+        ),
+        _seed_summary_comment(
+            round_number=1,
+            reviewer_votes=[codex_vote_r1, gemini_vote_r1],
+            is_final=False,
+            subject=subject,
+            agenda=(
+                "- Codex held `implement`: Codex round-one rationale.",
+                "- Gemini held `do-not-implement`: Gemini round-one rationale.",
+            ),
+        ),
+    ]
+    implement_text = _discuss_review_text(
+        outcome="implement", rationale="Agreed now.", rebuttal="Conceding.",
+    )
+    runner = FakeRunner(
+        issue_comments=seeded,
+        codex_outputs=[implement_text],
+        gemini_outputs=[implement_text],
+        claude_outputs=[],
+    )
+
+    result = run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=1)
+
+    assert result == 0
+    debate_commands = [cmd for cmd, _cwd in runner.commands if "debate round 2" in " ".join(cmd)]
+    assert len(debate_commands) == 2
+    for command in debate_commands:
+        prompt = " ".join(command)
+        assert "Prior round reviewer positions:" in prompt
+        assert "Codex round-one rationale." in prompt
+        assert "Gemini round-one rationale." in prompt
+    assert "Analyzer-extracted consensus" not in runner.comments[-1]
+
+
+def test_discuss_loop_agenda_claiming_consensus_is_forwarded_but_votes_rule(tmp_path):
+    # The analyzer wrongly claims full consensus while the votes still differ:
+    # the agenda is forwarded, but vote-only consensus detection rules.
+    agenda_text = _discuss_agenda_text(
+        consensus=["Everyone agrees to implement."], disagreements=[]
+    )
+    runner = FakeRunner(
+        codex_outputs=[
+            _discuss_review_text(outcome="implement", rationale="Scoped."),
+            _discuss_review_text(
+                outcome="implement", rationale="Still scoped.", rebuttal="Holding."
+            ),
+        ],
+        gemini_outputs=[
+            _discuss_review_text(outcome="do-not-implement", rationale="Out of scope."),
+            _discuss_review_text(
+                outcome="do-not-implement", rationale="Still out of scope.", rebuttal="Holding."
+            ),
+        ],
+        claude_outputs=[agenda_text],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_analyzer="claude")
+
+    result = run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=1)
+
+    assert result == 0
+    round1_summary = runner.comments[2]
+    assert "Everyone agrees to implement." in round1_summary
+    final = runner.comments[-1]
+    # Votes rule: the run still ends in a deadlock, and the divergence stays
+    # visible next to the vote table.
+    assert "Consensus kind: `deadlock` after round 2." in final
+    assert "Everyone agrees to implement." in final
+    assert "The debater vote table above is the authoritative consensus." in final

@@ -942,3 +942,158 @@ def test_render_public_discuss_review_comment_includes_rebuttal_and_split_propos
     assert "### Proposed sub-issues" in rendered
     assert "- Auth flow" in rendered
 
+
+
+# --- analyzer agenda rendering tests (#467) ---
+
+from coding_review_agent_loop.protocol import (
+    DiscussAgendaDisagreement,
+    ParsedDiscussAgenda,
+)
+
+
+def _rendering_agenda(
+    *,
+    consensus: tuple[str, ...] = ("The issue is well-motivated.",),
+    missing_facts: tuple[str, ...] = ("Whether the API boundary is specified.",),
+) -> ParsedDiscussAgenda:
+    return ParsedDiscussAgenda(
+        consensus=consensus,
+        disagreements=(
+            DiscussAgendaDisagreement(
+                topic="Scope of the change",
+                positions=(("Codex", "Narrow enough."), ("Gemini", "Too broad; split it.")),
+                question_for_next_round="Would splitting resolve the scope objection?",
+            ),
+        ),
+        missing_facts=missing_facts,
+    )
+
+
+def test_render_discuss_summary_non_final_uses_analyzer_agenda_with_attribution():
+    rendered = render_discuss_round_summary_comment(
+        is_final=False,
+        subject="abc123",
+        round_number=1,
+        reviewer_votes=[
+            _discuss_vote("implement", rationale="Mechanical rationale.", reviewer="Codex"),
+            _discuss_vote("do-not-implement", rationale="Other rationale.", reviewer="Gemini"),
+        ],
+        analyzer_agenda=_rendering_agenda(),
+        analyzer_name="Anthropic Claude",
+    )
+    assert "### Agenda for round 2 (analyzer: Anthropic Claude)" in rendered
+    assert "Analyzer-extracted consensus so far (not debater-confirmed):" in rendered
+    assert "- The issue is well-motivated." in rendered
+    assert "**Scope of the change**" in rendered
+    assert "Codex: Narrow enough." in rendered
+    assert "Gemini: Too broad; split it." in rendered
+    assert "Question for next round: Would splitting resolve the scope objection?" in rendered
+    assert "Missing facts:" in rendered
+    assert "- Whether the API boundary is specified." in rendered
+    # The mechanical per-vote agenda lines are replaced by the analyzer agenda.
+    assert "- Codex held `implement`: Mechanical rationale." not in rendered
+
+
+def test_render_discuss_summary_non_final_without_agenda_keeps_mechanical_lines():
+    rendered = render_discuss_round_summary_comment(
+        is_final=False,
+        subject="abc123",
+        round_number=1,
+        reviewer_votes=[_discuss_vote("implement", rationale="Mechanical rationale.", reviewer="Codex")],
+    )
+    assert "### Agenda for round 2" in rendered
+    assert "analyzer" not in rendered
+    assert "- Codex held `implement`: Mechanical rationale." in rendered
+
+
+def test_render_discuss_summary_final_distinguishes_analyzer_consensus_from_votes():
+    rendered = render_discuss_round_summary_comment(
+        is_final=True,
+        outcome="needs-human",
+        consensus_kind="deadlock",
+        subject="abc123",
+        round_number=3,
+        reviewer_votes=[
+            _discuss_vote("implement", reviewer="Codex"),
+            _discuss_vote("do-not-implement", reviewer="Gemini"),
+        ],
+        split_proposals=[],
+        analyzer_agenda=_rendering_agenda(),
+        analyzer_name="Anthropic Claude",
+    )
+    assert (
+        "### Analyzer-extracted consensus (analyzer: Anthropic Claude; not debater-confirmed)"
+        in rendered
+    )
+    assert "The debater vote table above is the authoritative consensus." in rendered
+    assert "| Codex |" in rendered
+    assert "| Gemini |" in rendered
+    # The analyzer section comes after the authoritative vote table.
+    assert rendered.index("| Codex |") < rendered.index("Analyzer-extracted consensus")
+
+
+def test_render_discuss_summary_final_without_agenda_has_no_analyzer_section():
+    rendered = render_discuss_round_summary_comment(
+        is_final=True,
+        outcome="implement",
+        consensus_kind="unanimous",
+        subject="abc123",
+        reviewer_votes=[_discuss_vote("implement", reviewer="Codex")],
+        split_proposals=[],
+    )
+    assert "Analyzer-extracted consensus" not in rendered
+
+
+def test_render_discuss_summary_final_empty_agenda_renders_placeholder():
+    rendered = render_discuss_round_summary_comment(
+        is_final=True,
+        outcome="needs-human",
+        consensus_kind="deadlock",
+        subject="abc123",
+        reviewer_votes=[_discuss_vote("implement", reviewer="Codex")],
+        split_proposals=[],
+        analyzer_agenda=ParsedDiscussAgenda(consensus=(), disagreements=(), missing_facts=()),
+    )
+    assert "### Analyzer-extracted consensus (not debater-confirmed)" in rendered
+    assert "(the analyzer extracted no points)" in rendered
+
+
+def test_render_public_discuss_comment_renders_misframed_correction():
+    parsed = ParsedDiscussReview(
+        outcome="implement",
+        rationale="Still well-scoped.",
+        split_proposals=(),
+        reviewer="Codex",
+        rebuttal="Engages the agenda.",
+        analyzer_framing="misframed",
+        framing_note="The agenda claims I opposed the feature; I only questioned scope.",
+    )
+    rendered = _render_public_discuss_review_comment(parsed, reviewer="Codex", round_number=2)
+    assert "### Analyzer framing correction" in rendered
+    assert "The agenda claims I opposed the feature; I only questioned scope." in rendered
+
+
+def test_render_public_discuss_comment_renders_accurate_framing_line():
+    parsed = ParsedDiscussReview(
+        outcome="implement",
+        rationale="Still well-scoped.",
+        split_proposals=(),
+        reviewer="Codex",
+        rebuttal="Engages the agenda.",
+        analyzer_framing="accurate",
+    )
+    rendered = _render_public_discuss_review_comment(parsed, reviewer="Codex", round_number=2)
+    assert "**Analyzer framing:** accurate" in rendered
+    assert "### Analyzer framing correction" not in rendered
+
+
+def test_render_public_discuss_comment_without_framing_is_unchanged():
+    parsed = ParsedDiscussReview(
+        outcome="implement",
+        rationale="Well-scoped.",
+        split_proposals=(),
+        reviewer="Codex",
+    )
+    rendered = _render_public_discuss_review_comment(parsed, reviewer="Codex", round_number=1)
+    assert "Analyzer" not in rendered

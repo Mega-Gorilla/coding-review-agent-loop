@@ -444,6 +444,17 @@ def build_parser() -> argparse.ArgumentParser:
         default=2,
         help="Maximum debate rounds after the initial discuss round (default: 2).",
     )
+    discuss.add_argument(
+        "--discuss-analyzer",
+        type=normalize_agent_name,
+        choices=("claude", "codex", "gemini", "antigravity"),
+        default=None,
+        help=(
+            "Optional analyzer agent that summarizes each non-final debate round "
+            "into a structured agenda for the next round. May coincide with a "
+            "--reviewer. Omit for plain direct deliberation (default: none)."
+        ),
+    )
     add_common(discuss)
 
     return parser
