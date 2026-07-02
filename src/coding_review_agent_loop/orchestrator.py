@@ -54,12 +54,13 @@ from .github import (
     wait_for_ci,
 )
 from .logging import log, new_run_id, run_usage_summary_path
-from .memory import prepare_agent_memory
+from .memory import AgentMemoryContext, prepare_agent_memory
 from .migrations import validate_pr_migration_topology
 from .prompts import (
     CompactPlanTailContext,
     CompactPriorContext,
     CompactPrReviewTailContext,
+    build_discuss_agenda_prompt,
     build_discuss_review_prompt,
     build_followup_prompt,
     build_issue_implementation_prompt,
@@ -77,6 +78,7 @@ from .prompts import (
 )
 from .protocol import (
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
+    ParsedDiscussAgenda,
     ParsedDiscussReview,
     ParsedPlanReview,
     ParsedReview,
@@ -101,6 +103,7 @@ from .protocol import (
     validate_structured_coder_followup,
     validate_structured_plan_state,
     validate_structured_plan_revision,
+    validate_structured_discuss_agenda,
     validate_structured_discuss_review,
 )
 from .protocol import parse_review
@@ -3572,6 +3575,82 @@ def _detect_discuss_consensus(
     return outcome, split_proposals
 
 
+def _run_discuss_analyzer(
+    runner: Runner,
+    *,
+    issue_number: int,
+    config: AgentLoopConfig,
+    analyzer: AgentName,
+    memory: AgentMemoryContext | None,
+    issue_context: IssueContext,
+    round_number: int,
+    round_history: Sequence[Sequence[ParsedDiscussReview]],
+    prior_agenda: ParsedDiscussAgenda | None,
+    configured_reviewers: Sequence[AgentName],
+    usage_context: RunUsageContext,
+) -> tuple[ParsedDiscussAgenda | None, str | None]:
+    """Run the optional discuss analyzer after a non-final round.
+
+    Returns (parsed_agenda, raw_response). Any analyzer failure that survives
+    the repair pass falls back to (None, None) so the round closes with the
+    mechanical agenda and the next debate round sees the full prior positions;
+    only a quota-reset stop propagates because the whole run must pause.
+    """
+    analyzer_name = agent_display_name(analyzer)
+    log(
+        config,
+        f"discuss: invoking analyzer {analyzer_name} on issue #{issue_number} "
+        f"(after round {round_number})",
+    )
+    try:
+        response = _run_validated_agent(
+            runner,
+            agent=analyzer,
+            config=config,
+            prompt=build_discuss_agenda_prompt(
+                issue_number,
+                config,
+                analyzer=analyzer,
+                memory=memory,
+                issue_context=issue_context,
+                round_number=round_number,
+                round_history=round_history,
+                prior_agenda=prior_agenda,
+            ),
+            marker_description="<!-- AGENT_PLAN_STATE: approved -->",
+            validate=validate_structured_discuss_agenda,
+            usage_context=usage_context,
+            use_repair=True,
+            repair_expected_kind="discuss_agenda",
+            role="reviewer",
+        )
+    except QuotaResetExceededError:
+        raise
+    except AgentLoopError as exc:
+        log(
+            config,
+            f"discuss: analyzer {analyzer_name} failed ({exc}); falling back to the "
+            f"mechanical agenda for round {round_number + 1}",
+        )
+        return None, None
+    parsed = response.marker_value
+    assert isinstance(parsed, ParsedDiscussAgenda)
+    known_names = {agent_display_name(reviewer) for reviewer in configured_reviewers}
+    unknown_names = sorted(
+        {name for disagreement in parsed.disagreements for name, _position in disagreement.positions}
+        - known_names
+    )
+    if unknown_names:
+        # Non-authoritative analyzer output is forwarded as-is; debaters and the
+        # public summary can audit and correct it.
+        log(
+            config,
+            f"discuss: analyzer agenda names unknown debater(s): {', '.join(unknown_names)}; "
+            "forwarding as-is",
+        )
+    return parsed, response.text
+
+
 def _run_discuss_loop(
     runner: Runner,
     *,
@@ -3599,10 +3678,35 @@ def _run_discuss_loop(
         log(config, f"discuss: found matching round-summary comment for issue #{issue_number}; skipping")
         return 0
     memory = prepare_agent_memory(runner, config)
+    analyzer = config.discuss_analyzer
+    analyzer_name = agent_display_name(analyzer) if analyzer is not None else None
+    prompt_issue_context = issue_context
+    if analyzer is not None:
+        # Agenda-focused analyzer mode: prior rounds reach debaters only through
+        # the structured agenda (or the analyzer via round_history), so strip
+        # discuss-flow bot comments from the prompt-facing issue context. Plain
+        # mode keeps the full context unchanged.
+        prompt_issue_context = dataclasses_replace(
+            issue_context,
+            comments=tuple(
+                comment
+                for comment in (issue_context.comments or ())
+                if not (comment.body and _is_bot_authored_discuss_comment(comment.body))
+            ),
+        )
+    if analyzer is not None and discuss_max_rounds == 0:
+        log(
+            config,
+            "discuss: --discuss-analyzer is set but --discuss-max-rounds=0 leaves no "
+            "non-final round, so the analyzer will not run.",
+        )
     if resume_state is not None:
         round_history: list[list[ParsedDiscussReview]] = [list(votes) for votes in resume_state.round_history]
         start_round_number = resume_state.next_round_number
         prior_round_agenda: list[str] = list(resume_state.prior_round_agenda)
+        prior_analyzer_agenda: ParsedDiscussAgenda | None = (
+            resume_state.prior_analyzer_agenda if analyzer is not None else None
+        )
         in_progress_votes: dict[str, ParsedDiscussReview] = dict(resume_state.in_progress_votes)
         if round_history or in_progress_votes:
             log(config, f"discuss: resuming issue #{issue_number} at round {start_round_number}")
@@ -3610,6 +3714,7 @@ def _run_discuss_loop(
         round_history = []
         start_round_number = 1
         prior_round_agenda = []
+        prior_analyzer_agenda = None
         in_progress_votes = {}
     max_round_number = discuss_max_rounds + 1
     if start_round_number > max_round_number:
@@ -3638,6 +3743,8 @@ def _run_discuss_loop(
             consensus_kind="deadlock",
             round_history=round_history,
             split_proposals=[],
+            analyzer_agenda=prior_analyzer_agenda,
+            analyzer_name=analyzer_name,
         )
         post_issue_comment(
             runner,
@@ -3693,10 +3800,11 @@ def _run_discuss_loop(
                     config,
                     reviewer=reviewer,
                     memory=memory,
-                    issue_context=issue_context,
+                    issue_context=prompt_issue_context,
                     round_number=round_number,
                     prior_round_votes=prior_round_votes,
                     prior_round_agenda=prior_round_agenda,
+                    analyzer_agenda=prior_analyzer_agenda,
                 ),
                 marker_description="<!-- AGENT_PLAN_STATE: approved -->",
                 validate=lambda text, r=reviewer_name, rn=round_number: validate_structured_discuss_review(
@@ -3744,6 +3852,22 @@ def _run_discuss_loop(
         else:
             outcome, round_split_proposals = consensus
             consensus_kind = ("unanimous" if len(round_history) == 1 else "converged") if is_final else None
+        next_analyzer_agenda: ParsedDiscussAgenda | None = None
+        analyzer_response_raw: str | None = None
+        if not is_final and analyzer is not None:
+            next_analyzer_agenda, analyzer_response_raw = _run_discuss_analyzer(
+                runner,
+                issue_number=issue_number,
+                config=config,
+                analyzer=analyzer,
+                memory=memory,
+                issue_context=prompt_issue_context,
+                round_number=round_number,
+                round_history=round_history,
+                prior_agenda=prior_analyzer_agenda,
+                configured_reviewers=configured_reviewers,
+                usage_context=usage_context,
+            )
         summary_body = render_discuss_round_summary_comment(
             round_number=round_number,
             reviewer_votes=reviewer_votes,
@@ -3753,6 +3877,11 @@ def _run_discuss_loop(
             consensus_kind=consensus_kind,
             round_history=round_history if is_final else None,
             split_proposals=round_split_proposals,
+            # Final summaries surface the last non-final round's agenda so
+            # analyzer-extracted consensus stays auditable and distinct from
+            # the debater vote table; non-final summaries show the fresh one.
+            analyzer_agenda=prior_analyzer_agenda if is_final else next_analyzer_agenda,
+            analyzer_name=analyzer_name,
         )
         agenda = () if is_final else tuple(_render_discuss_agenda_lines(reviewer_votes))
         post_issue_comment(
@@ -3770,6 +3899,7 @@ def _run_discuss_loop(
                     is_final=is_final,
                     consensus_kind=consensus_kind,
                     agenda=agenda,
+                    analyzer_response=analyzer_response_raw,
                 ),
             ),
         )
@@ -3786,6 +3916,7 @@ def _run_discuss_loop(
             f"continuing to round {round_number + 1}",
         )
         prior_round_agenda = list(agenda)
+        prior_analyzer_agenda = next_analyzer_agenda
     return 0
 
 

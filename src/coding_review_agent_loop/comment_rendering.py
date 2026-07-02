@@ -16,6 +16,7 @@ from .protocol import (
     PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE,
     PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE,
     SIGNATURE_RE,
+    ParsedDiscussAgenda,
     ParsedDiscussReview,
     ParsedPlanReview,
     ParsedReview,
@@ -655,6 +656,14 @@ def _render_public_discuss_review_comment(
     ]
     if parsed.rebuttal:
         sections.append("### Rebuttal\n\n" + parsed.rebuttal.strip())
+    if parsed.analyzer_framing == "misframed":
+        note = (parsed.framing_note or "").strip()
+        sections.append("### Analyzer framing correction\n\n" + note)
+    elif parsed.analyzer_framing == "accurate":
+        framing_line = "**Analyzer framing:** accurate"
+        if parsed.framing_note:
+            framing_line += f" — {parsed.framing_note.strip()}"
+        sections.append(framing_line)
     if parsed.split_proposals:
         proposals = "\n".join(f"- {proposal}" for proposal in parsed.split_proposals)
         sections.append("### Proposed sub-issues\n\n" + proposals)
@@ -664,6 +673,30 @@ def _render_public_discuss_review_comment(
 
 def _render_discuss_agenda_lines(votes: Sequence[ParsedDiscussReview]) -> list[str]:
     return [f"- {vote.reviewer} held `{vote.outcome}`: {vote.rationale}" for vote in votes]
+
+
+def _render_analyzer_agenda_lines(agenda: ParsedDiscussAgenda) -> list[str]:
+    lines: list[str] = []
+    if agenda.consensus:
+        lines.append("Analyzer-extracted consensus so far (not debater-confirmed):")
+        lines.extend(f"- {point}" for point in agenda.consensus)
+    if agenda.disagreements:
+        if lines:
+            lines.append("")
+        lines.append("Open disagreements:")
+        for disagreement in agenda.disagreements:
+            lines.append(f"- **{disagreement.topic}**")
+            for name, position in disagreement.positions:
+                lines.append(f"  - {name}: {position}")
+            lines.append(
+                f"  - Question for next round: {disagreement.question_for_next_round}"
+            )
+    if agenda.missing_facts:
+        if lines:
+            lines.append("")
+        lines.append("Missing facts:")
+        lines.extend(f"- {fact}" for fact in agenda.missing_facts)
+    return lines
 
 
 def render_discuss_round_summary_comment(
@@ -676,13 +709,19 @@ def render_discuss_round_summary_comment(
     consensus_kind: str = "unanimous",
     round_history: Sequence[Sequence[ParsedDiscussReview]] | None = None,
     split_proposals: Sequence[str] | None = None,
+    analyzer_agenda: ParsedDiscussAgenda | None = None,
+    analyzer_name: str | None = None,
 ) -> str:
     """Render the orchestrator/analyzer round-summary comment.
 
     When `is_final` is False this closes out an inconclusive round with an
     agenda for the next round; when True it renders the same consensus/deadlock
     content previously produced by `render_discuss_consensus_comment`, plus the
-    marker that final-only idempotency and legacy detection rely on.
+    marker that final-only idempotency and legacy detection rely on. When an
+    analyzer agenda is supplied, the next-round agenda section shows the
+    analyzer's structured output (attributed and auditable) instead of the
+    mechanical per-vote lines, and final summaries add an analyzer-extracted
+    consensus section kept distinct from the debater vote table.
     """
     split_proposals = list(split_proposals or ())
     if not is_final:
@@ -702,9 +741,17 @@ def render_discuss_round_summary_comment(
             for proposal in split_proposals:
                 lines.append(f"- {proposal}")
         lines.append("")
-        lines.append(f"### Agenda for round {round_number + 1}")
-        lines.append("")
-        lines.extend(_render_discuss_agenda_lines(reviewer_votes))
+        if analyzer_agenda is not None:
+            heading = f"### Agenda for round {round_number + 1}"
+            if analyzer_name:
+                heading += f" (analyzer: {analyzer_name})"
+            lines.append(heading)
+            lines.append("")
+            lines.extend(_render_analyzer_agenda_lines(analyzer_agenda))
+        else:
+            lines.append(f"### Agenda for round {round_number + 1}")
+            lines.append("")
+            lines.extend(_render_discuss_agenda_lines(reviewer_votes))
         lines.append("")
         lines.append("-- Orchestrator")
         return "\n".join(lines)
@@ -750,6 +797,21 @@ def render_discuss_round_summary_comment(
         lines.append("")
         for proposal in split_proposals:
             lines.append(f"- {proposal}")
+    if analyzer_agenda is not None:
+        heading = "### Analyzer-extracted consensus (not debater-confirmed)"
+        if analyzer_name:
+            heading = f"### Analyzer-extracted consensus (analyzer: {analyzer_name}; not debater-confirmed)"
+        lines.append("")
+        lines.append(heading)
+        lines.append("")
+        lines.append(
+            "The debater vote table above is the authoritative consensus. The analyzer's "
+            "last agenda extracted the following; it may misclassify consensus or omit "
+            "minority arguments."
+        )
+        lines.append("")
+        agenda_lines = _render_analyzer_agenda_lines(analyzer_agenda)
+        lines.extend(agenda_lines if agenda_lines else ["(the analyzer extracted no points)"])
     if round_history:
         lines.append("")
         lines.append("### Round history")

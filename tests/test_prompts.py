@@ -1913,3 +1913,172 @@ def test_reviewer_prompt_includes_documentation_check(tmp_path):
 
     assert phrase in non_compact
     assert phrase in compact
+
+
+# --- discuss agenda / analyzer-mode prompt tests (#467) ---
+
+from coding_review_agent_loop.prompts import (
+    build_discuss_agenda_prompt,
+    build_discuss_review_prompt,
+)
+from coding_review_agent_loop.protocol import (
+    DiscussAgendaDisagreement,
+    ParsedDiscussAgenda,
+    ParsedDiscussReview,
+)
+
+
+def _discuss_prompt_vote(
+    reviewer: str,
+    outcome: str = "implement",
+    rationale: str = "Well-scoped.",
+    rebuttal: str | None = None,
+    split_proposals: tuple[str, ...] = (),
+    analyzer_framing: str | None = None,
+    framing_note: str | None = None,
+) -> ParsedDiscussReview:
+    return ParsedDiscussReview(
+        outcome=outcome,
+        rationale=rationale,
+        split_proposals=split_proposals,
+        reviewer=reviewer,
+        rebuttal=rebuttal,
+        analyzer_framing=analyzer_framing,
+        framing_note=framing_note,
+    )
+
+
+def _sample_agenda() -> ParsedDiscussAgenda:
+    return ParsedDiscussAgenda(
+        consensus=("The issue is well-motivated.",),
+        disagreements=(
+            DiscussAgendaDisagreement(
+                topic="Scope of the change",
+                positions=(("Codex", "Narrow enough."), ("Gemini", "Too broad; split it.")),
+                question_for_next_round="Would splitting resolve the scope objection?",
+            ),
+        ),
+        missing_facts=("Whether the API boundary is specified.",),
+    )
+
+
+def test_build_discuss_agenda_prompt_includes_every_round_of_history(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    round1 = [
+        _discuss_prompt_vote("Codex", rationale="R1 codex rationale."),
+        _discuss_prompt_vote("Gemini", outcome="do-not-implement", rationale="R1 gemini rationale."),
+    ]
+    round2 = [
+        _discuss_prompt_vote("Codex", rationale="R2 codex rationale.", rebuttal="R2 codex rebuttal."),
+        _discuss_prompt_vote(
+            "Gemini",
+            outcome="do-not-implement",
+            rationale="R2 gemini rationale.",
+            rebuttal="R2 gemini rebuttal.",
+            analyzer_framing="misframed",
+            framing_note="The agenda misstated my position.",
+        ),
+    ]
+    prompt = build_discuss_agenda_prompt(
+        56,
+        config,
+        analyzer="claude",
+        round_number=2,
+        round_history=[round1, round2],
+        prior_agenda=_sample_agenda(),
+    )
+    assert "Round 1 debater positions:" in prompt
+    assert "Round 2 debater positions (latest round):" in prompt
+    assert "R1 codex rationale." in prompt
+    assert "R1 gemini rationale." in prompt
+    assert "R2 codex rebuttal." in prompt
+    assert "R2 gemini rebuttal." in prompt
+    assert "Framing correction: The agenda misstated my position." in prompt
+    # Prior agenda is carried into the analyzer prompt.
+    assert "Your previous agenda" in prompt
+    assert "Would splitting resolve the scope objection?" in prompt
+    # Fidelity guardrails.
+    assert "Preserve minority arguments" in prompt
+    assert "never invent positions" in prompt
+    assert "Carry forward unresolved `missing_facts`" in prompt
+    assert '"kind": "discuss_agenda"' in prompt
+
+
+def test_build_discuss_agenda_prompt_without_prior_agenda(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    prompt = build_discuss_agenda_prompt(
+        56,
+        config,
+        analyzer="claude",
+        round_number=1,
+        round_history=[[_discuss_prompt_vote("Codex")]],
+    )
+    assert "Your previous agenda" not in prompt
+    assert "Round 1 debater positions (latest round):" in prompt
+
+
+def test_build_discuss_review_prompt_analyzer_mode_omits_other_debaters_text(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    prior_votes = [
+        _discuss_prompt_vote("Codex", rationale="Codex private rationale text."),
+        _discuss_prompt_vote(
+            "Gemini",
+            outcome="do-not-implement",
+            rationale="Gemini private rationale text.",
+            rebuttal="Gemini private rebuttal text.",
+        ),
+    ]
+    prompt = build_discuss_review_prompt(
+        56,
+        config,
+        reviewer="codex",
+        round_number=2,
+        prior_round_votes=prior_votes,
+        prior_round_agenda=("- Gemini held `do-not-implement`: Gemini private rationale text.",),
+        analyzer_agenda=_sample_agenda(),
+    )
+    # The structured agenda is present.
+    assert "Scope of the change" in prompt
+    assert "Too broad; split it." in prompt
+    assert "Would splitting resolve the scope objection?" in prompt
+    assert "Whether the API boundary is specified." in prompt
+    # The target debater's own prior position is present verbatim.
+    assert "Your own prior-round position (verbatim):" in prompt
+    assert "Codex private rationale text." in prompt
+    # Other debaters' full rationale/rebuttal text is omitted; their views reach
+    # the debater only through the analyzer's summarized positions.
+    assert "Gemini private rationale text." not in prompt
+    assert "Gemini private rebuttal text." not in prompt
+    assert "Prior round reviewer positions:" not in prompt
+    # Misframing instructions and rules.
+    assert "analyzer_framing" in prompt
+    assert "misframed" in prompt
+    assert "The analyzer is not authoritative" in prompt
+
+
+def test_build_discuss_review_prompt_plain_mode_unchanged_without_agenda(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    prior_votes = [
+        _discuss_prompt_vote("Codex", rationale="Codex rationale."),
+        _discuss_prompt_vote("Gemini", outcome="do-not-implement", rationale="Gemini rationale."),
+    ]
+    kwargs = dict(
+        reviewer="codex",
+        round_number=2,
+        prior_round_votes=prior_votes,
+        prior_round_agenda=("- Gemini held `do-not-implement`: Gemini rationale.",),
+    )
+    plain = build_discuss_review_prompt(56, config, **kwargs)
+    explicit_none = build_discuss_review_prompt(56, config, analyzer_agenda=None, **kwargs)
+    assert plain == explicit_none
+    assert "Prior round reviewer positions:" in plain
+    assert "Gemini rationale." in plain
+    assert "analyzer_framing" not in plain
+    assert "Analyzer" not in plain
+
+
+def test_build_discuss_review_prompt_round1_has_no_analyzer_rules(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    prompt = build_discuss_review_prompt(56, config, reviewer="codex", round_number=1)
+    assert "analyzer_framing" not in prompt
+    assert "This is round 1." in prompt

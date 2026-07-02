@@ -3166,3 +3166,46 @@ def test_run_validated_agent_plan_revision_unknown_prior_disposition_fails_when_
     repair_mock.assert_not_called()
     assert "item-15" in str(exc_info.value)
     assert "item-18" in str(exc_info.value)
+
+
+# --- discuss_agenda repair support tests (#467) ---
+
+
+def _agenda_json() -> str:
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "discuss_agenda",
+            "consensus": ["The issue is well-motivated."],
+            "disagreements": [
+                {
+                    "topic": "Scope",
+                    "positions": {"Codex": "Narrow enough.", "Gemini": "Too broad."},
+                    "question_for_next_round": "Would splitting resolve the objection?",
+                }
+            ],
+            "missing_facts": [],
+        }
+    )
+
+
+def test_envelope_normalization_discuss_agenda_reversed_footer_and_signature():
+    raw = _agenda_json() + "\n-- Anthropic Claude\n<!-- AGENT_PLAN_STATE: approved -->"
+
+    normalized = attempt_envelope_normalization(raw, expected_kind="discuss_agenda")
+
+    assert normalized is not None
+    from coding_review_agent_loop.protocol import parse_structured_discuss_agenda
+
+    parsed = parse_structured_discuss_agenda(normalized)
+    assert parsed is not None
+    assert parsed.disagreements[0].topic == "Scope"
+
+
+def test_build_repair_prompt_accepts_discuss_agenda_expected_kind():
+    from coding_review_agent_loop.repair import _build_repair_prompt
+
+    prompt = _build_repair_prompt("garbage", expected_kind="discuss_agenda")
+    assert "You MUST repair this response as `discuss_agenda`." in prompt
+    assert "Valid Format F — Discuss Agenda" in prompt
+    assert "question_for_next_round" in prompt

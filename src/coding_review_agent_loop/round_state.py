@@ -15,9 +15,11 @@ from .errors import AgentLoopError
 from .protocol import (
     HTML_COMMENT_RE,
     SIGNATURE_RE,
+    ParsedDiscussAgenda,
     ParsedDiscussReview,
     ReviewItemDisposition,
     UnresolvedReviewItem,
+    parse_structured_discuss_agenda,
     parse_structured_discuss_review,
 )
 from .unresolved_items import _apply_unresolved_item_dispositions
@@ -44,6 +46,9 @@ class PostedRoundMetadata:
     consensus_kind: str | None = None
     is_final: bool = False
     agenda: tuple[str, ...] = ()
+    # Raw structured discuss-agenda response from the optional analyzer (#467).
+    # None on final summaries, plain-mode rounds, and legacy comments.
+    analyzer_response: str | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +143,7 @@ def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
         "consensus_kind": metadata.consensus_kind,
         "is_final": metadata.is_final,
         "agenda": list(metadata.agenda),
+        "analyzer_response": metadata.analyzer_response,
     }
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -179,6 +185,11 @@ def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
             consensus_kind=str(payload["consensus_kind"]) if payload.get("consensus_kind") is not None else None,
             is_final=bool(payload.get("is_final", False)),
             agenda=tuple(str(item) for item in payload.get("agenda", [])),
+            analyzer_response=(
+                str(payload["analyzer_response"])
+                if payload.get("analyzer_response") is not None
+                else None
+            ),
         )
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         raise AgentLoopError("Invalid AGENT_LOOP_META payload.") from exc
@@ -558,11 +569,22 @@ class ResumedDiscussState:
     round_history: tuple[tuple[ParsedDiscussReview, ...], ...]
     next_round_number: int
     prior_round_agenda: tuple[str, ...] = ()
+    prior_analyzer_agenda: ParsedDiscussAgenda | None = None
     in_progress_votes: dict[str, ParsedDiscussReview] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.in_progress_votes is None:
             object.__setattr__(self, "in_progress_votes", {})
+
+
+def _decode_analyzer_agenda(raw: str | None) -> ParsedDiscussAgenda | None:
+    """Reparse a persisted analyzer agenda; corrupt/legacy payloads resume in plain mode."""
+    if not raw:
+        return None
+    try:
+        return parse_structured_discuss_agenda(raw)
+    except AgentLoopError:
+        return None
 
 
 def _decode_discuss_vote(record: PostedRoundRecord, *, round_number: int) -> ParsedDiscussReview:
@@ -594,6 +616,7 @@ def _resume_discuss_round(
 
     round_history: list[tuple[ParsedDiscussReview, ...]] = []
     prior_round_agenda: tuple[str, ...] = ()
+    prior_analyzer_agenda: ParsedDiscussAgenda | None = None
     next_round_number = 1
     in_progress_votes: dict[str, ParsedDiscussReview] = {}
     for round_number in sorted(rounds):
@@ -619,12 +642,14 @@ def _resume_discuss_round(
             )
             round_history.append(votes)
             prior_round_agenda = summary_record.metadata.agenda
+            prior_analyzer_agenda = _decode_analyzer_agenda(summary_record.metadata.analyzer_response)
             if summary_record.metadata.is_final:
                 return ResumedDiscussState(
                     done=True,
                     round_history=tuple(round_history),
                     next_round_number=round_number,
                     prior_round_agenda=prior_round_agenda,
+                    prior_analyzer_agenda=prior_analyzer_agenda,
                 )
             next_round_number = round_number + 1
         else:
@@ -637,5 +662,6 @@ def _resume_discuss_round(
         round_history=tuple(round_history),
         next_round_number=next_round_number,
         prior_round_agenda=prior_round_agenda,
+        prior_analyzer_agenda=prior_analyzer_agenda,
         in_progress_votes=in_progress_votes,
     )

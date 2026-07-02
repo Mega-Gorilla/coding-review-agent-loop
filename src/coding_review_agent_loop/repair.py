@@ -85,7 +85,7 @@ def strip_unknown_prior_item_dispositions(
 
 def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> str | None:
     """Trim envelope-only trailing material without changing structured JSON."""
-    if expected_kind not in {"pr_review", "plan_review", "plan_revision", "coder_followup", "discuss_review"}:
+    if expected_kind not in {"pr_review", "plan_review", "plan_revision", "coder_followup", "discuss_review", "discuss_agenda"}:
         return None
 
     stripped = raw.lstrip()
@@ -100,7 +100,7 @@ def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> st
 
     json_text = stripped[:json_end].rstrip()
     trailing = stripped[json_end:]
-    state_re = PLAN_STATE_RE if expected_kind in {"plan_review", "plan_revision", "discuss_review"} else STATE_RE
+    state_re = PLAN_STATE_RE if expected_kind in {"plan_review", "plan_revision", "discuss_review", "discuss_agenda"} else STATE_RE
     state_match = state_re.search(trailing)
     if state_match is None:
         return None
@@ -196,7 +196,7 @@ def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> st
 # Uses str.replace("{raw_response}", raw, 1) for substitution because the prompt
 # itself contains literal { } characters in the JSON examples.
 _REPAIR_PROMPT = """\
-You are a format-repair assistant. An AI agent produced a code review, plan review, plan revision, coder follow-up, or discuss review that failed strict schema validation. Extract its intent and reformat it into one of these valid formats.
+You are a format-repair assistant. An AI agent produced a code review, plan review, plan revision, coder follow-up, discuss review, or discuss agenda that failed strict schema validation. Extract its intent and reformat it into one of these valid formats.
 
 {expected_kind_instruction}
 
@@ -280,6 +280,31 @@ Notes:
 - rationale is required and must be non-empty.
 - split_proposals is required and must be non-empty when outcome is "split"; omit or use [] otherwise.
 - rebuttal is optional in the initial discuss round and required in debate rounds.
+- analyzer_framing (optional) must be "accurate" or "misframed"; framing_note is required when analyzer_framing is "misframed".
+- footer must always be <!-- AGENT_PLAN_STATE: approved --> (never blocking).
+
+## Valid Format F — Discuss Agenda:
+
+{
+  "schema_version": 1,
+  "kind": "discuss_agenda",
+  "consensus": ["<point every debater already agrees on>"],
+  "disagreements": [
+    {
+      "topic": "<short topic>",
+      "positions": {"<Debater Name>": "<its stated position>"},
+      "question_for_next_round": "<one specific question>"
+    }
+  ],
+  "missing_facts": ["<missing fact or assumption>"]
+}
+<!-- AGENT_PLAN_STATE: approved -->
+-- <Analyzer Name>
+
+Notes:
+- consensus, disagreements, and missing_facts may be empty arrays.
+- each disagreement requires non-empty topic, positions, and question_for_next_round.
+- positions maps debater display names to short position statements and must not be empty.
 - footer must always be <!-- AGENT_PLAN_STATE: approved --> (never blocking).
 
 ## Valid Format D — Plan Revision:
@@ -367,6 +392,7 @@ the `### Human requirements` section from Format D.
 - If an expected response kind is provided above, use ONLY that format. Do not infer a different kind from keywords in the malformed response.
 - Use Format C if the original contains "coder_followup" or "addressed_items" or "remaining_items".
 - Use Format D if the original contains "plan_revision" or "plan_steps".
+- Use Format F if the original contains "discuss_agenda" or "question_for_next_round".
 - Use Format B if the original contains AGENT_PLAN_STATE / blocking_plan_issues / same_plan_followups / prior_plan_item_dispositions.
 - Otherwise use Format A.
 
@@ -718,6 +744,51 @@ Notes:
 - Footer state must always be "approved" for discuss_review; never "blocking".
 - split_proposals is only required when outcome is "split"; omit or use [] for other outcomes.
 
+## WORKED EXAMPLE 15 — discuss_agenda with fences and a malformed disagreement:
+
+Original (malformed): discuss_agenda JSON wrapped in ```json fences, with positions
+given as an array of strings instead of a name-to-position object.
+
+```json
+{
+  "schema_version": 1,
+  "kind": "discuss_agenda",
+  "consensus": ["The issue is well-motivated."],
+  "disagreements": [
+    {
+      "topic": "Scope of the change",
+      "positions": ["Codex: narrow enough", "Gemini: too broad, split it"],
+      "question_for_next_round": "Would splitting the API boundary into its own issue resolve the scope objection?"
+    }
+  ],
+  "missing_facts": []
+}
+```
+
+<!-- AGENT_PLAN_STATE: approved -->
+-- Anthropic Claude
+
+CORRECT repair — strip fences, convert positions to an object keyed by debater name:
+{
+  "schema_version": 1,
+  "kind": "discuss_agenda",
+  "consensus": ["The issue is well-motivated."],
+  "disagreements": [
+    {
+      "topic": "Scope of the change",
+      "positions": {"Codex": "Narrow enough.", "Gemini": "Too broad; split it."},
+      "question_for_next_round": "Would splitting the API boundary into its own issue resolve the scope objection?"
+    }
+  ],
+  "missing_facts": []
+}
+<!-- AGENT_PLAN_STATE: approved -->
+-- Anthropic Claude
+
+Notes:
+- discuss_agenda uses AGENT_PLAN_STATE and the footer state must always be "approved".
+- Preserve every disagreement and every debater position; never invent or drop positions.
+
 ## FORMAT:
 1. Start DIRECTLY with { — no prose, no markdown fences.
 2. After }: For approved `pr_review` or `plan_review` that now includes `<!-- HUMAN_REQUIREMENTS_RESOLVED -->`,
@@ -733,7 +804,7 @@ Output ONLY the repaired response. No explanations.
 {raw_response}"""
 
 _REPAIR_MODEL = "gemini-3.1-flash-lite"
-_SUPPORTED_EXPECTED_KINDS = {"pr_review", "plan_review", "coder_followup", "plan_revision", "discuss_review"}
+_SUPPORTED_EXPECTED_KINDS = {"pr_review", "plan_review", "coder_followup", "plan_revision", "discuss_review", "discuss_agenda"}
 RepairOutcome = Literal[
     "succeeded", "nonzero_exit", "empty_output", "timeout", "spawn_error", "invalid_output"
 ]

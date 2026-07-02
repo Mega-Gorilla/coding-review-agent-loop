@@ -225,6 +225,8 @@ class StructuredDiscussReview:
     rationale: str
     split_proposals: tuple[str, ...]
     rebuttal: str | None = None
+    analyzer_framing: str | None = None
+    framing_note: str | None = None
 
 
 @dataclass(frozen=True)
@@ -234,9 +236,26 @@ class ParsedDiscussReview:
     split_proposals: tuple[str, ...]
     reviewer: str
     rebuttal: str | None = None
+    analyzer_framing: str | None = None
+    framing_note: str | None = None
 
 
 DISCUSS_OUTCOME_VALUES = frozenset({"implement", "do-not-implement", "needs-human", "split"})
+DISCUSS_ANALYZER_FRAMING_VALUES = frozenset({"accurate", "misframed"})
+
+
+@dataclass(frozen=True)
+class DiscussAgendaDisagreement:
+    topic: str
+    positions: tuple[tuple[str, str], ...]
+    question_for_next_round: str
+
+
+@dataclass(frozen=True)
+class ParsedDiscussAgenda:
+    consensus: tuple[str, ...]
+    disagreements: tuple[DiscussAgendaDisagreement, ...]
+    missing_facts: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -842,6 +861,31 @@ def _extract_structured_discuss_review_payload(text: str) -> dict[str, object] |
         if footer_state != "approved":
             raise AgentLoopError(
                 f"Structured discuss review footer AGENT_PLAN_STATE must be `approved`; got `{footer_state}`."
+            )
+    return result
+
+
+def _extract_structured_discuss_agenda_payload(text: str) -> dict[str, object] | None:
+    text, _status = normalize_response_file_structured_text(text)
+    extracted = _extract_json_object_prefix(text)
+    if extracted is None:
+        return None
+    payload, trailing = extracted
+    result = _consume_structured_footer_and_signature(
+        payload=payload,
+        trailing=trailing,
+        state_re=PLAN_STATE_RE,
+        state_marker_name="AGENT_PLAN_STATE",
+        context_label="Structured discuss agenda",
+    )
+    if result is None:
+        return None
+    footer_match = PLAN_STATE_RE.search(trailing)
+    if footer_match is not None:
+        footer_state = footer_match.group(1).lower()
+        if footer_state != "approved":
+            raise AgentLoopError(
+                f"Structured discuss agenda footer AGENT_PLAN_STATE must be `approved`; got `{footer_state}`."
             )
     return result
 
@@ -1792,7 +1836,7 @@ def parse_structured_discuss_review(
         payload,
         context="discuss_review",
         required={"schema_version", "kind", "outcome", "rationale"},
-        optional={"split_proposals", "rebuttal"},
+        optional={"split_proposals", "rebuttal", "analyzer_framing", "framing_note"},
     )
     outcome = _expect_non_empty_string(payload["outcome"], context="discuss_review.outcome")
     if outcome not in DISCUSS_OUTCOME_VALUES:
@@ -1814,12 +1858,35 @@ def parse_structured_discuss_review(
         rebuttal = _expect_non_empty_string(payload["rebuttal"], context="discuss_review.rebuttal")
     if round_number > 1 and rebuttal is None:
         raise AgentLoopError("discuss_review.rebuttal is required for debate rounds.")
+    analyzer_framing = None
+    if "analyzer_framing" in payload:
+        analyzer_framing = _expect_non_empty_string(
+            payload["analyzer_framing"], context="discuss_review.analyzer_framing"
+        )
+        if analyzer_framing not in DISCUSS_ANALYZER_FRAMING_VALUES:
+            rendered = ", ".join(sorted(DISCUSS_ANALYZER_FRAMING_VALUES))
+            raise AgentLoopError(f"discuss_review.analyzer_framing must be one of: {rendered}")
+    framing_note = None
+    if "framing_note" in payload:
+        framing_note = _expect_non_empty_string(
+            payload["framing_note"], context="discuss_review.framing_note"
+        )
+    if analyzer_framing == "misframed" and framing_note is None:
+        raise AgentLoopError(
+            "discuss_review.framing_note is required when analyzer_framing is `misframed`."
+        )
+    if framing_note is not None and analyzer_framing is None:
+        raise AgentLoopError(
+            "discuss_review.framing_note requires analyzer_framing to be set."
+        )
     return ParsedDiscussReview(
         outcome=outcome,
         rationale=rationale,
         split_proposals=split_proposals,
         reviewer=reviewer,
         rebuttal=rebuttal,
+        analyzer_framing=analyzer_framing,
+        framing_note=framing_note,
     )
 
 
@@ -1830,3 +1897,80 @@ def validate_structured_discuss_review(
     if parsed is not None:
         return parsed
     raise AgentLoopError("Discuss review did not use the required structured format.")
+
+
+def _parse_discuss_agenda_disagreement(
+    value: object, *, context: str
+) -> DiscussAgendaDisagreement:
+    payload = _expect_object(value, context=context)
+    _expect_exact_keys(
+        payload,
+        context=context,
+        required={"topic", "positions", "question_for_next_round"},
+    )
+    positions_payload = _expect_object(payload["positions"], context=f"{context}.positions")
+    if not positions_payload:
+        raise AgentLoopError(f"{context}.positions must not be empty.")
+    positions = tuple(
+        (
+            _expect_non_empty_string(name, context=f"{context}.positions key"),
+            _expect_non_empty_string(position, context=f"{context}.positions[{name!r}]"),
+        )
+        for name, position in positions_payload.items()
+    )
+    return DiscussAgendaDisagreement(
+        topic=_expect_non_empty_string(payload["topic"], context=f"{context}.topic"),
+        positions=positions,
+        question_for_next_round=_expect_non_empty_string(
+            payload["question_for_next_round"],
+            context=f"{context}.question_for_next_round",
+        ),
+    )
+
+
+def parse_structured_discuss_agenda(text: str) -> ParsedDiscussAgenda | None:
+    payload = _extract_structured_discuss_agenda_payload(text)
+    if payload is None:
+        return None
+    _require_supported_schema_version(payload)
+    kind = payload.get("kind")
+    if isinstance(kind, str) and kind != "discuss_agenda":
+        raise AgentLoopError("Structured response kind mismatch: expected `discuss_agenda`.")
+    _expect_exact_keys(
+        payload,
+        context="discuss_agenda",
+        required={"schema_version", "kind", "consensus", "disagreements"},
+        optional={"missing_facts"},
+    )
+    consensus = _expect_string_list(
+        payload["consensus"],
+        context="discuss_agenda.consensus",
+        item_context="discuss_agenda.consensus",
+    )
+    disagreements_value = payload["disagreements"]
+    if not isinstance(disagreements_value, list):
+        raise AgentLoopError("discuss_agenda.disagreements must be a JSON array.")
+    disagreements = tuple(
+        _parse_discuss_agenda_disagreement(
+            item, context=f"discuss_agenda.disagreements at index {index}"
+        )
+        for index, item in enumerate(disagreements_value)
+    )
+    missing_facts = _expect_optional_string_list(
+        payload,
+        "missing_facts",
+        context="discuss_agenda.missing_facts",
+        item_context="discuss_agenda.missing_facts",
+    )
+    return ParsedDiscussAgenda(
+        consensus=consensus,
+        disagreements=disagreements,
+        missing_facts=missing_facts,
+    )
+
+
+def validate_structured_discuss_agenda(text: str) -> ParsedDiscussAgenda:
+    parsed = parse_structured_discuss_agenda(text)
+    if parsed is not None:
+        return parsed
+    raise AgentLoopError("Discuss agenda did not use the required structured format.")

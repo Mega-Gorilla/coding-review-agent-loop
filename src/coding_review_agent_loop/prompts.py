@@ -18,6 +18,7 @@ from .memory import AgentMemoryContext, format_agent_memory_context
 from .protocol import (
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
     HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK,
+    ParsedDiscussAgenda,
     ParsedDiscussReview,
     UnresolvedReviewItem,
 )
@@ -2158,6 +2159,124 @@ the AGENT_STATE footer. Your response must end with, in this exact order:
 """
 
 
+def _render_discuss_agenda_prompt_block(agenda: ParsedDiscussAgenda) -> list[str]:
+    lines: list[str] = []
+    if agenda.consensus:
+        lines.append("Analyzer-extracted consensus so far (not debater-confirmed):")
+        lines.extend(f"- {point}" for point in agenda.consensus)
+        lines.append("")
+    if agenda.disagreements:
+        lines.append("Open disagreements to address this round:")
+        for disagreement in agenda.disagreements:
+            lines.append(f"- Topic: {disagreement.topic}")
+            for name, position in disagreement.positions:
+                lines.append(f"  - {name}: {position}")
+            lines.append(
+                f"  - Question for this round: {disagreement.question_for_next_round}"
+            )
+        lines.append("")
+    if agenda.missing_facts:
+        lines.append("Missing facts or assumptions flagged by the analyzer:")
+        lines.extend(f"- {fact}" for fact in agenda.missing_facts)
+        lines.append("")
+    return lines
+
+
+def build_discuss_agenda_prompt(
+    issue_number: int,
+    config: AgentLoopConfig,
+    *,
+    analyzer: AgentName,
+    memory: AgentMemoryContext | None = None,
+    issue_context: IssueContext | None = None,
+    round_number: int = 1,
+    round_history: Sequence[Sequence[ParsedDiscussReview]] | None = None,
+    prior_agenda: ParsedDiscussAgenda | None = None,
+) -> str:
+    analyzer_signature = agent_signature(analyzer, config)
+    round_history = tuple(tuple(votes) for votes in (round_history or ()))
+    history_lines: list[str] = []
+    for index, votes in enumerate(round_history, start=1):
+        label = f"Round {index} debater positions"
+        if index == len(round_history):
+            label = f"{label} (latest round)"
+        history_lines.append(f"{label}:")
+        for vote in votes:
+            history_lines.append(f"- {vote.reviewer}: `{vote.outcome}`")
+            history_lines.append(f"  Rationale: {vote.rationale}")
+            if vote.rebuttal:
+                history_lines.append(f"  Rebuttal: {vote.rebuttal}")
+            if vote.analyzer_framing == "misframed" and vote.framing_note:
+                history_lines.append(f"  Framing correction: {vote.framing_note}")
+            if vote.split_proposals:
+                history_lines.append("  Split proposals:")
+                for proposal in vote.split_proposals:
+                    history_lines.append(f"  - {proposal}")
+        history_lines.append("")
+    prior_agenda_block = ""
+    if prior_agenda is not None:
+        prior_agenda_lines = [
+            "Your previous agenda (carry forward points that remain unresolved):",
+            *_render_discuss_agenda_prompt_block(prior_agenda),
+        ]
+        prior_agenda_block = "\n".join(prior_agenda_lines) + "\n"
+    history_block = "\n".join(history_lines)
+    return f"""Summarize debate round {round_number} for GitHub issue #{issue_number} in {config.repo} into a structured agenda for the next round.
+
+You are the analyzer, not a debater. Do not vote on the issue and do not edit
+files, create a branch, commit, push, or open a pull request.
+{_issue_context_block(issue_context)}{_memory_block(memory)}
+Complete debate transcript so far, oldest round first:
+
+{history_block}
+{prior_agenda_block}
+Extract from the transcript:
+- `consensus`: points every debater already agrees on.
+- `disagreements`: each unresolved disagreement, with every named debater's
+  stated position and one specific question the next round must answer.
+- `missing_facts`: facts or assumptions that are missing and block resolution.
+
+Fidelity guardrails:
+- Represent each debater's stated position faithfully; quote or closely
+  paraphrase the transcript, and never invent positions.
+- Preserve minority arguments; do not declare consensus unless every debater's
+  latest position supports it.
+- Distinguish persistent disagreements (repeated across rounds) from points a
+  debater has already conceded or refined.
+- Carry forward unresolved `missing_facts` from your previous agenda.
+
+Respond using this mandatory structured JSON format:
+
+{{
+  "schema_version": 1,
+  "kind": "discuss_agenda",
+  "consensus": ["The issue is well-motivated."],
+  "disagreements": [
+    {{
+      "topic": "Scope of the change",
+      "positions": {{"Codex": "Narrow enough to implement.", "Gemini": "Too broad; split it."}},
+      "question_for_next_round": "Would splitting the API boundary into its own issue resolve the scope objection?"
+    }}
+  ],
+  "missing_facts": ["Whether the API boundary is already specified."]
+}}
+<!-- AGENT_PLAN_STATE: approved -->
+-- {analyzer_signature}
+
+Rules:
+- `consensus`, `disagreements`, and `missing_facts` may be empty arrays.
+- Each disagreement requires non-empty `topic`, `positions`, and `question_for_next_round`.
+- `positions` maps each debater's display name to a short statement of its position.
+- The footer must always be `<!-- AGENT_PLAN_STATE: approved -->`.
+- Do not include prose or code fences before the JSON object.
+- Do not place your signature before the `AGENT_PLAN_STATE` footer.
+- Your response must end with, in this exact order:
+
+<!-- AGENT_PLAN_STATE: approved -->
+-- {analyzer_signature}
+"""
+
+
 def build_discuss_review_prompt(
     issue_number: int,
     config: AgentLoopConfig,
@@ -2168,16 +2287,61 @@ def build_discuss_review_prompt(
     round_number: int = 1,
     prior_round_votes: Sequence[ParsedDiscussReview] | None = None,
     prior_round_agenda: Sequence[str] | None = None,
+    analyzer_agenda: ParsedDiscussAgenda | None = None,
 ) -> str:
     reviewer_signature = agent_signature(reviewer, config)
     prior_round_votes = tuple(prior_round_votes or ())
     prior_round_agenda = tuple(prior_round_agenda or ())
+    analyzer_rules = ""
     if round_number <= 1:
         round_context = (
             "This is round 1. Evaluate independently; do not assume other reviewers agree."
         )
         rebuttal_rule = "- `rebuttal` may be omitted in round 1."
         rebuttal_example = ""
+    elif analyzer_agenda is not None:
+        reviewer_name = agent_display_name(reviewer)
+        own_votes = [vote for vote in prior_round_votes if vote.reviewer == reviewer_name]
+        prior_lines = [
+            f"This is debate round {round_number}. An analyzer agent summarized the prior "
+            "round into the agenda below. The analyzer is not authoritative: it can "
+            "misclassify consensus, omit minority arguments, or misframe your position.",
+            "",
+        ]
+        prior_lines.extend(_render_discuss_agenda_prompt_block(analyzer_agenda))
+        if own_votes:
+            prior_lines.append("Your own prior-round position (verbatim):")
+            for vote in own_votes:
+                prior_lines.append(f"- Outcome: `{vote.outcome}`")
+                prior_lines.append(f"  Rationale: {vote.rationale}")
+                if vote.rebuttal:
+                    prior_lines.append(f"  Rebuttal: {vote.rebuttal}")
+                if vote.split_proposals:
+                    prior_lines.append("  Split proposals:")
+                    for proposal in vote.split_proposals:
+                        prior_lines.append(f"  - {proposal}")
+            prior_lines.append("")
+        prior_lines.append(
+            "For each disagreement that names your position, either concede, defend it "
+            "with evidence, or refine it. If the agenda misrepresents your prior "
+            "position, say so explicitly via `analyzer_framing` and `framing_note`."
+        )
+        round_context = "\n".join(prior_lines)
+        rebuttal_rule = (
+            "- `rebuttal` is required in debate rounds and must directly engage the "
+            "analyzer agenda's disagreements and questions."
+        )
+        rebuttal_example = (
+            ',\n  "rebuttal": "I considered the scope objection, but the issue is narrow'
+            ' enough because the API boundary is already specified.",'
+            '\n  "analyzer_framing": "accurate"'
+        )
+        analyzer_rules = (
+            "\n- `analyzer_framing` must be `accurate` or `misframed`; set `misframed` "
+            "when the analyzer agenda misrepresents your prior position."
+            "\n- `framing_note` is required when `analyzer_framing` is `misframed` and "
+            "must state what the analyzer got wrong."
+        )
     else:
         prior_lines: list[str] = [
             f"This is debate round {round_number}. Review the complete prior round below, "
@@ -2233,7 +2397,7 @@ Rules:
 - `outcome` must be exactly one of: `implement`, `do-not-implement`, `needs-human`, `split`.
 - `rationale` is required and must be non-empty.
 - `split_proposals` is required and must be non-empty when `outcome` is `split`; omit or use `[]` for other outcomes.
-{rebuttal_rule}
+{rebuttal_rule}{analyzer_rules}
 - The footer must always be `<!-- AGENT_PLAN_STATE: approved -->` regardless of your outcome.
 - Do not include prose or code fences before the JSON object.
 - Do not place your signature before the `AGENT_PLAN_STATE` footer.

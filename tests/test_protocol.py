@@ -21,7 +21,10 @@ from coding_review_agent_loop.orchestrator import (
 )
 from coding_review_agent_loop.protocol import (
     ApprovedFollowup,
+    DISCUSS_ANALYZER_FRAMING_VALUES,
     DISCUSS_OUTCOME_VALUES,
+    DiscussAgendaDisagreement,
+    ParsedDiscussAgenda,
     ParsedDiscussReview,
     _expect_string_list,
     _extract_structured_coder_followup_payload,
@@ -36,6 +39,7 @@ from coding_review_agent_loop.protocol import (
     parse_plan_review,
     parse_plan_review_items,
     parse_plan_state,
+    parse_structured_discuss_agenda,
     parse_structured_discuss_review,
     parse_structured_plan_review,
     parse_structured_pr_review,
@@ -47,6 +51,7 @@ from coding_review_agent_loop.protocol import (
     UnresolvedReviewItem,
     validate_human_requirements_acknowledgement,
     validate_structured_coder_followup,
+    validate_structured_discuss_agenda,
     validate_structured_discuss_review,
     validate_structured_human_requirements_acknowledgement,
     validate_structured_plan_state,
@@ -2805,3 +2810,194 @@ def test_detect_discuss_consensus_all_split_merges_proposals():
 def test_detect_discuss_consensus_mixed_returns_none():
     votes = [_vote("implement"), _vote("split", proposals=("X",))]
     assert _detect_discuss_consensus(votes) is None
+
+
+# --- discuss_agenda protocol tests ---
+
+
+def _discuss_agenda(
+    *,
+    consensus: list[str] | None = None,
+    disagreements: list[dict] | None = None,
+    missing_facts: list[str] | None = None,
+    kind: str = "discuss_agenda",
+    footer: str = "approved",
+    analyzer: str = "Anthropic Claude",
+    include_missing_facts: bool = True,
+) -> str:
+    payload: dict = {
+        "schema_version": 1,
+        "kind": kind,
+        "consensus": consensus if consensus is not None else ["The issue is well-motivated."],
+        "disagreements": disagreements
+        if disagreements is not None
+        else [
+            {
+                "topic": "Scope of the change",
+                "positions": {"Codex": "Narrow enough.", "Gemini": "Too broad; split it."},
+                "question_for_next_round": "Would splitting resolve the scope objection?",
+            }
+        ],
+    }
+    if include_missing_facts:
+        payload["missing_facts"] = (
+            missing_facts if missing_facts is not None else ["Whether the API boundary is specified."]
+        )
+    return json.dumps(payload) + f"\n<!-- AGENT_PLAN_STATE: {footer} -->\n-- {analyzer}"
+
+
+def test_parse_structured_discuss_agenda_round_trip():
+    result = parse_structured_discuss_agenda(_discuss_agenda())
+    assert result is not None
+    assert result.consensus == ("The issue is well-motivated.",)
+    assert result.missing_facts == ("Whether the API boundary is specified.",)
+    assert result.disagreements == (
+        DiscussAgendaDisagreement(
+            topic="Scope of the change",
+            positions=(("Codex", "Narrow enough."), ("Gemini", "Too broad; split it.")),
+            question_for_next_round="Would splitting resolve the scope objection?",
+        ),
+    )
+
+
+def test_parse_structured_discuss_agenda_accepts_empty_lists():
+    text = _discuss_agenda(consensus=[], disagreements=[], missing_facts=[])
+    result = parse_structured_discuss_agenda(text)
+    assert result == ParsedDiscussAgenda(consensus=(), disagreements=(), missing_facts=())
+
+
+def test_parse_structured_discuss_agenda_missing_facts_is_optional():
+    result = parse_structured_discuss_agenda(_discuss_agenda(include_missing_facts=False))
+    assert result is not None
+    assert result.missing_facts == ()
+
+
+def test_parse_structured_discuss_agenda_rejects_kind_mismatch():
+    with pytest.raises(AgentLoopError, match="kind mismatch"):
+        parse_structured_discuss_agenda(_discuss_agenda(kind="discuss_review"))
+
+
+def test_parse_structured_discuss_agenda_rejects_blocking_footer():
+    with pytest.raises(AgentLoopError, match="must be `approved`"):
+        parse_structured_discuss_agenda(_discuss_agenda(footer="blocking"))
+
+
+def test_parse_structured_discuss_agenda_rejects_empty_topic():
+    disagreements = [
+        {
+            "topic": "",
+            "positions": {"Codex": "Narrow enough."},
+            "question_for_next_round": "Q?",
+        }
+    ]
+    with pytest.raises(AgentLoopError, match="topic"):
+        parse_structured_discuss_agenda(_discuss_agenda(disagreements=disagreements))
+
+
+def test_parse_structured_discuss_agenda_rejects_empty_positions():
+    disagreements = [
+        {"topic": "Scope", "positions": {}, "question_for_next_round": "Q?"}
+    ]
+    with pytest.raises(AgentLoopError, match="positions must not be empty"):
+        parse_structured_discuss_agenda(_discuss_agenda(disagreements=disagreements))
+
+
+def test_parse_structured_discuss_agenda_rejects_missing_question():
+    disagreements = [{"topic": "Scope", "positions": {"Codex": "Fine."}}]
+    with pytest.raises(AgentLoopError):
+        parse_structured_discuss_agenda(_discuss_agenda(disagreements=disagreements))
+
+
+def test_parse_structured_discuss_agenda_accepts_unknown_position_names():
+    # The analyzer is non-authoritative; unknown debater names must not hard-fail.
+    disagreements = [
+        {
+            "topic": "Scope",
+            "positions": {"Some Unknown Agent": "Position."},
+            "question_for_next_round": "Q?",
+        }
+    ]
+    result = parse_structured_discuss_agenda(_discuss_agenda(disagreements=disagreements))
+    assert result is not None
+    assert result.disagreements[0].positions == (("Some Unknown Agent", "Position."),)
+
+
+def test_validate_structured_discuss_agenda_raises_when_no_marker():
+    with pytest.raises(AgentLoopError, match="required structured format"):
+        validate_structured_discuss_agenda("The analyzer wrote free-form prose instead.")
+
+
+def test_validate_structured_discuss_agenda_returns_parsed_agenda():
+    result = validate_structured_discuss_agenda(_discuss_agenda())
+    assert isinstance(result, ParsedDiscussAgenda)
+
+
+# --- discuss_review analyzer-framing field tests ---
+
+
+def _discuss_review_with_framing(
+    *,
+    analyzer_framing: str | None = None,
+    framing_note: str | None = None,
+    rebuttal: str = "Engages the agenda.",
+) -> str:
+    payload: dict = {
+        "schema_version": 1,
+        "kind": "discuss_review",
+        "outcome": "implement",
+        "rationale": "Well-scoped.",
+        "rebuttal": rebuttal,
+    }
+    if analyzer_framing is not None:
+        payload["analyzer_framing"] = analyzer_framing
+    if framing_note is not None:
+        payload["framing_note"] = framing_note
+    return json.dumps(payload) + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- Gemini"
+
+
+def test_parse_structured_discuss_review_defaults_framing_fields_to_none():
+    result = parse_structured_discuss_review(_discuss_review(), reviewer="Gemini")
+    assert result is not None
+    assert result.analyzer_framing is None
+    assert result.framing_note is None
+
+
+def test_parse_structured_discuss_review_accepts_accurate_framing():
+    text = _discuss_review_with_framing(analyzer_framing="accurate")
+    result = parse_structured_discuss_review(text, reviewer="Gemini", round_number=2)
+    assert result is not None
+    assert result.analyzer_framing == "accurate"
+    assert result.framing_note is None
+
+
+def test_parse_structured_discuss_review_accepts_misframed_with_note():
+    text = _discuss_review_with_framing(
+        analyzer_framing="misframed",
+        framing_note="The agenda claims I opposed the feature; I only questioned scope.",
+    )
+    result = parse_structured_discuss_review(text, reviewer="Gemini", round_number=2)
+    assert result is not None
+    assert result.analyzer_framing == "misframed"
+    assert result.framing_note.startswith("The agenda claims")
+
+
+def test_parse_structured_discuss_review_rejects_unknown_framing_value():
+    text = _discuss_review_with_framing(analyzer_framing="wrong")
+    with pytest.raises(AgentLoopError, match="analyzer_framing must be one of"):
+        parse_structured_discuss_review(text, reviewer="Gemini", round_number=2)
+
+
+def test_parse_structured_discuss_review_rejects_misframed_without_note():
+    text = _discuss_review_with_framing(analyzer_framing="misframed")
+    with pytest.raises(AgentLoopError, match="framing_note is required"):
+        parse_structured_discuss_review(text, reviewer="Gemini", round_number=2)
+
+
+def test_parse_structured_discuss_review_rejects_note_without_framing():
+    text = _discuss_review_with_framing(framing_note="Orphan note.")
+    with pytest.raises(AgentLoopError, match="framing_note requires analyzer_framing"):
+        parse_structured_discuss_review(text, reviewer="Gemini", round_number=2)
+
+
+def test_discuss_analyzer_framing_values():
+    assert DISCUSS_ANALYZER_FRAMING_VALUES == {"accurate", "misframed"}
