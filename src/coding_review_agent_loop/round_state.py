@@ -49,6 +49,9 @@ class PostedRoundMetadata:
     # Raw structured discuss-agenda response from the optional analyzer (#467).
     # None on final summaries, plain-mode rounds, and legacy comments.
     analyzer_response: str | None = None
+    # Discuss research policy in effect when the comment was posted (#477).
+    # None on non-discuss flows and legacy comments.
+    research_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -144,6 +147,7 @@ def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
         "is_final": metadata.is_final,
         "agenda": list(metadata.agenda),
         "analyzer_response": metadata.analyzer_response,
+        "research_mode": metadata.research_mode,
     }
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -188,6 +192,11 @@ def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
             analyzer_response=(
                 str(payload["analyzer_response"])
                 if payload.get("analyzer_response") is not None
+                else None
+            ),
+            research_mode=(
+                str(payload["research_mode"])
+                if payload.get("research_mode") is not None
                 else None
             ),
         )

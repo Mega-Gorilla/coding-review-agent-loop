@@ -3616,6 +3616,7 @@ def _run_discuss_analyzer(
                 round_number=round_number,
                 round_history=round_history,
                 prior_agenda=prior_agenda,
+                research_mode=config.discuss_research,
             ),
             marker_description="<!-- AGENT_PLAN_STATE: approved -->",
             validate=validate_structured_discuss_agenda,
@@ -3745,6 +3746,7 @@ def _run_discuss_loop(
             split_proposals=[],
             analyzer_agenda=prior_analyzer_agenda,
             analyzer_name=analyzer_name,
+            research_mode=config.discuss_research,
         )
         post_issue_comment(
             runner,
@@ -3761,6 +3763,7 @@ def _run_discuss_loop(
                     is_final=True,
                     consensus_kind="deadlock",
                     agenda=(),
+                    research_mode=config.discuss_research,
                 ),
             ),
         )
@@ -3805,10 +3808,11 @@ def _run_discuss_loop(
                     prior_round_votes=prior_round_votes,
                     prior_round_agenda=prior_round_agenda,
                     analyzer_agenda=prior_analyzer_agenda,
+                    research_mode=config.discuss_research,
                 ),
                 marker_description="<!-- AGENT_PLAN_STATE: approved -->",
                 validate=lambda text, r=reviewer_name, rn=round_number: validate_structured_discuss_review(
-                    text, reviewer=r, round_number=rn
+                    text, reviewer=r, round_number=rn, research_mode=config.discuss_research
                 ),
                 usage_context=usage_context,
                 use_repair=True,
@@ -3838,6 +3842,7 @@ def _run_discuss_loop(
                         subject=subject,
                         raw_structured_coder_response=response.text,
                         model_used=response.model_used,
+                        research_mode=config.discuss_research,
                     ),
                 ),
             )
@@ -3882,6 +3887,7 @@ def _run_discuss_loop(
             # the debater vote table; non-final summaries show the fresh one.
             analyzer_agenda=prior_analyzer_agenda if is_final else next_analyzer_agenda,
             analyzer_name=analyzer_name,
+            research_mode=config.discuss_research,
         )
         agenda = () if is_final else tuple(_render_discuss_agenda_lines(reviewer_votes))
         post_issue_comment(
@@ -3900,6 +3906,7 @@ def _run_discuss_loop(
                     consensus_kind=consensus_kind,
                     agenda=agenda,
                     analyzer_response=analyzer_response_raw,
+                    research_mode=config.discuss_research,
                 ),
             ),
         )

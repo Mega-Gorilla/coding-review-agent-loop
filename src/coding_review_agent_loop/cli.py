@@ -455,6 +455,19 @@ def build_parser() -> argparse.ArgumentParser:
             "--reviewer. Omit for plain direct deliberation (default: none)."
         ),
     )
+    discuss.add_argument(
+        "--discuss-research",
+        choices=("none", "required", "auto"),
+        default="none",
+        help=(
+            "Research policy for debaters (default: none). 'none' forbids online "
+            "research; 'required' makes every debater research and cite sources; "
+            "'auto' lets debaters (and the analyzer, if configured) decide using "
+            "conservative triggers such as current vendor behavior, pricing, "
+            "quotas, model availability, policies/laws, dependency behavior, or "
+            "tool comparisons."
+        ),
+    )
     add_common(discuss)
 
     return parser

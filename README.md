@@ -326,6 +326,42 @@ agent-loop discuss 123 --repo OWNER/REPO \
   --discuss-analyzer claude
 ```
 
+Discuss mode also takes a research policy via `--discuss-research
+none|required|auto` (default: `none`) for questions that depend on current
+external facts:
+
+- `none`: debaters use only repo/issue context; prompts explicitly forbid
+  online research, so plain discuss mode and analyzer mode stay usable without
+  network-dependent behavior. Best for internal design questions.
+- `required`: every debater must do online research before answering, cite a
+  source for each external fact, and keep sourced facts separate from its own
+  judgment. Responses must carry a `research` object whose `status` is
+  `sourced`, `unavailable`, or `inconclusive` (never `not-needed`), with
+  `sourced_facts` entries of `{fact, source}` pairs when `sourced`. Use this to
+  force research instead of relying on automatic detection.
+- `auto`: debaters (and the analyzer, if configured) decide whether research is
+  needed using conservative triggers — current vendor/product behavior,
+  pricing, quotas, model availability, laws/policies, dependency behavior, or
+  market/tool comparisons — and set `status` to `not-needed` when no trigger
+  applies.
+
+With `--discuss-analyzer` and a non-`none` research policy, the analyzer also
+emits `research_required` and `research_questions` in its agenda; the
+orchestrator forwards those questions to the next round's debaters as a shared
+research brief so parallel turns do not duplicate work. Debater comments show
+each reviewer's research status and cited sourced facts, and the final summary
+includes a Research section that keeps debater-cited facts distinct from agent
+judgment and states explicitly when research was deemed unnecessary, was not
+reported, or came back unavailable or inconclusive — instead of presenting
+stale assumptions as fact:
+
+```bash
+agent-loop discuss 123 --repo OWNER/REPO \
+  --reviewer codex --reviewer antigravity \
+  --discuss-analyzer claude \
+  --discuss-research auto
+```
+
 If reviewers still disagree after the configured debate rounds, the final
 round-summary comment is marked `deadlock`, uses the `needs-human` outcome, and
 summarizes each final position and the core disagreement. `split` proposals

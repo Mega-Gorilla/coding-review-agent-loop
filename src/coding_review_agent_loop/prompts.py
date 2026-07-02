@@ -2179,7 +2179,50 @@ def _render_discuss_agenda_prompt_block(agenda: ParsedDiscussAgenda) -> list[str
         lines.append("Missing facts or assumptions flagged by the analyzer:")
         lines.extend(f"- {fact}" for fact in agenda.missing_facts)
         lines.append("")
+    if agenda.research_required and agenda.research_questions:
+        lines.append(
+            "Shared research brief — answer these with cited sources before "
+            "restating positions, so parallel debater turns do not duplicate work:"
+        )
+        lines.extend(f"- {question}" for question in agenda.research_questions)
+        lines.append("")
     return lines
+
+
+# Conservative triggers for `auto` research mode (#477). Shared verbatim between
+# the debater and analyzer prompts and documented in README/docs so the policy
+# cannot drift.
+DISCUSS_RESEARCH_AUTO_TRIGGERS = (
+    "current vendor/product behavior, pricing, quotas, model availability, "
+    "laws/policies, dependency behavior, or market/tool comparisons"
+)
+
+
+def _discuss_research_policy_block(research_mode: str) -> str:
+    if research_mode == "required":
+        return (
+            "Research policy: `required`. Before answering, do online research on the\n"
+            "external facts this question depends on. Cite a source (URL or equivalent\n"
+            "reference) for every external fact via `research.sourced_facts`, and keep\n"
+            "sourced facts separate from your own judgment. If research is unavailable\n"
+            "or inconclusive, say so via `research.status` instead of presenting stale\n"
+            "assumptions as fact."
+        )
+    if research_mode == "auto":
+        return (
+            "Research policy: `auto`. Do online research only if the question materially\n"
+            f"depends on current external facts — conservative triggers: {DISCUSS_RESEARCH_AUTO_TRIGGERS}.\n"
+            "If no trigger applies, set `research.status` to `not-needed` and use only\n"
+            "repo/issue context. If you do research, cite a source (URL or equivalent\n"
+            "reference) for every external fact via `research.sourced_facts`, and keep\n"
+            "sourced facts separate from your own judgment. If research is unavailable\n"
+            "or inconclusive, say so via `research.status` instead of presenting stale\n"
+            "assumptions as fact."
+        )
+    return (
+        "Research policy: `none`. Use only the repository and issue context; do not\n"
+        "perform online research."
+    )
 
 
 def build_discuss_agenda_prompt(
@@ -2192,6 +2235,7 @@ def build_discuss_agenda_prompt(
     round_number: int = 1,
     round_history: Sequence[Sequence[ParsedDiscussReview]] | None = None,
     prior_agenda: ParsedDiscussAgenda | None = None,
+    research_mode: str = "none",
 ) -> str:
     analyzer_signature = agent_signature(analyzer, config)
     round_history = tuple(tuple(votes) for votes in (round_history or ()))
@@ -2221,6 +2265,39 @@ def build_discuss_agenda_prompt(
         ]
         prior_agenda_block = "\n".join(prior_agenda_lines) + "\n"
     history_block = "\n".join(history_lines)
+    research_extract = ""
+    research_guardrail = ""
+    research_example = ""
+    research_rules = ""
+    if research_mode in {"required", "auto"}:
+        research_extract = (
+            "\n- `research_required` / `research_questions`: whether the next round "
+            "depends on current external facts, and the specific questions debaters "
+            "should research (a shared brief so parallel turns do not duplicate work)."
+        )
+        if research_mode == "auto":
+            research_guardrail = (
+                "\n- The research policy is `auto`: set `research_required` to true "
+                "only when resolution depends on current external facts — "
+                f"conservative triggers: {DISCUSS_RESEARCH_AUTO_TRIGGERS}. Prefer "
+                "false when repo/issue context suffices. Carry forward unresolved "
+                "research questions from your previous agenda."
+            )
+        else:
+            research_guardrail = (
+                "\n- The research policy is `required`: debaters must research "
+                "regardless, so use `research_questions` to focus that research on "
+                "the unresolved external facts. Carry forward unresolved research "
+                "questions from your previous agenda."
+            )
+        research_example = (
+            ',\n  "research_required": true,\n'
+            '  "research_questions": ["Is Gemini CLI still available for enterprise users?"]'
+        )
+        research_rules = (
+            "\n- `research_questions` must be non-empty when `research_required` is "
+            "true, and empty or omitted when it is false."
+        )
     return f"""Summarize debate round {round_number} for GitHub issue #{issue_number} in {config.repo} into a structured agenda for the next round.
 
 You are the analyzer, not a debater. Do not vote on the issue and do not edit
@@ -2234,7 +2311,7 @@ Extract from the transcript:
 - `consensus`: points every debater already agrees on.
 - `disagreements`: each unresolved disagreement, with every named debater's
   stated position and one specific question the next round must answer.
-- `missing_facts`: facts or assumptions that are missing and block resolution.
+- `missing_facts`: facts or assumptions that are missing and block resolution.{research_extract}
 
 Fidelity guardrails:
 - Represent each debater's stated position faithfully; quote or closely
@@ -2243,7 +2320,7 @@ Fidelity guardrails:
   latest position supports it.
 - Distinguish persistent disagreements (repeated across rounds) from points a
   debater has already conceded or refined.
-- Carry forward unresolved `missing_facts` from your previous agenda.
+- Carry forward unresolved `missing_facts` from your previous agenda.{research_guardrail}
 
 Respond using this mandatory structured JSON format:
 
@@ -2258,7 +2335,7 @@ Respond using this mandatory structured JSON format:
       "question_for_next_round": "Would splitting the API boundary into its own issue resolve the scope objection?"
     }}
   ],
-  "missing_facts": ["Whether the API boundary is already specified."]
+  "missing_facts": ["Whether the API boundary is already specified."]{research_example}
 }}
 <!-- AGENT_PLAN_STATE: approved -->
 -- {analyzer_signature}
@@ -2266,7 +2343,7 @@ Respond using this mandatory structured JSON format:
 Rules:
 - `consensus`, `disagreements`, and `missing_facts` may be empty arrays.
 - Each disagreement requires non-empty `topic`, `positions`, and `question_for_next_round`.
-- `positions` maps each debater's display name to a short statement of its position.
+- `positions` maps each debater's display name to a short statement of its position.{research_rules}
 - The footer must always be `<!-- AGENT_PLAN_STATE: approved -->`.
 - Do not include prose or code fences before the JSON object.
 - Do not place your signature before the `AGENT_PLAN_STATE` footer.
@@ -2288,6 +2365,7 @@ def build_discuss_review_prompt(
     prior_round_votes: Sequence[ParsedDiscussReview] | None = None,
     prior_round_agenda: Sequence[str] | None = None,
     analyzer_agenda: ParsedDiscussAgenda | None = None,
+    research_mode: str = "none",
 ) -> str:
     reviewer_signature = agent_signature(reviewer, config)
     prior_round_votes = tuple(prior_round_votes or ())
@@ -2368,12 +2446,42 @@ def build_discuss_review_prompt(
             "round disagreement."
         )
         rebuttal_example = ',\n  "rebuttal": "I considered the scope objection, but the issue is narrow enough because the API boundary is already specified."'
+    research_example = ""
+    research_rules = ""
+    if research_mode in {"required", "auto"}:
+        example_status = "sourced" if research_mode == "required" else "not-needed"
+        example_facts = (
+            '[\n      {"fact": "Gemini CLI remains available for enterprise users as of'
+            ' this week.", "source": "https://example.com/gemini-cli-notice"}\n    ]'
+            if example_status == "sourced"
+            else "[]"
+        )
+        research_example = (
+            ',\n  "research": {\n'
+            f'    "status": "{example_status}",\n'
+            f'    "sourced_facts": {example_facts}\n'
+            "  }"
+        )
+        research_rules = (
+            "\n- The `research` object is required. `research.status` must be one of: "
+            "`sourced`, `not-needed`, `unavailable`, `inconclusive`."
+            "\n- `research.sourced_facts` must be non-empty when `research.status` is "
+            "`sourced`; each entry needs a non-empty `fact` and `source`. Omit or use "
+            "`[]` for other statuses."
+        )
+        if research_mode == "required":
+            research_rules += (
+                "\n- The research policy is `required`, so `research.status` must not "
+                "be `not-needed`."
+            )
     return f"""Evaluate GitHub issue #{issue_number} in {config.repo} and vote on whether it should be implemented.
 
 Use this local checkout only to inspect context. Do not edit files, create a
 branch, commit, push, or open a pull request during this evaluation.
 {_issue_context_block(issue_context)}{_memory_block(memory)}
 {round_context}
+
+{_discuss_research_policy_block(research_mode)}
 
 Vote on one of these outcomes:
 - `implement` — the issue is well-defined and should be implemented as described.
@@ -2388,7 +2496,7 @@ Respond using this mandatory structured JSON format:
   "kind": "discuss_review",
   "outcome": "implement",
   "rationale": "The feature is clearly scoped and fills a documented user need.",
-  "split_proposals": []{rebuttal_example}
+  "split_proposals": []{rebuttal_example}{research_example}
 }}
 <!-- AGENT_PLAN_STATE: approved -->
 -- {reviewer_signature}
@@ -2397,7 +2505,7 @@ Rules:
 - `outcome` must be exactly one of: `implement`, `do-not-implement`, `needs-human`, `split`.
 - `rationale` is required and must be non-empty.
 - `split_proposals` is required and must be non-empty when `outcome` is `split`; omit or use `[]` for other outcomes.
-{rebuttal_rule}{analyzer_rules}
+{rebuttal_rule}{analyzer_rules}{research_rules}
 - The footer must always be `<!-- AGENT_PLAN_STATE: approved -->` regardless of your outcome.
 - Do not include prose or code fences before the JSON object.
 - Do not place your signature before the `AGENT_PLAN_STATE` footer.

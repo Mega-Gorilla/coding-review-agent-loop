@@ -433,6 +433,65 @@ summaries without an analyzer payload resume in plain mode. With
 runs (a note is logged). Omitting `--discuss-analyzer` keeps plain #465-style
 direct deliberation unchanged.
 
+### Discuss research policy
+
+`--discuss-research none|required|auto` (default: `none`) controls whether
+debaters may use current external facts:
+
+```bash
+agent-loop discuss 123 --repo OWNER/REPO \
+  --reviewer codex --reviewer antigravity \
+  --discuss-analyzer claude \
+  --discuss-research auto
+```
+
+- `none`: prompts explicitly forbid online research; plain discuss mode and
+  analyzer mode remain usable without network-dependent behavior. Best for
+  internal design questions.
+- `required`: every debater must research before answering. The structured
+  `discuss_review` must include a `research` object; its `status` must be
+  `sourced`, `unavailable`, or `inconclusive` (`not-needed` is rejected), and a
+  `sourced` status requires non-empty `sourced_facts` of `{"fact", "source"}`
+  pairs. Validation enforces this (with the malformed-response repair pass as
+  fallback), so the user can force research instead of relying on automatic
+  detection.
+- `auto`: debaters self-decide using conservative triggers — current
+  vendor/product behavior, pricing, quotas, model availability, laws/policies,
+  dependency behavior, or market/tool comparisons — and report
+  `status: "not-needed"` when no trigger applies.
+
+With an analyzer and a non-`none` policy, the analyzer's `discuss_agenda` may
+add a shared research brief:
+
+```json
+{
+  "research_required": true,
+  "research_questions": ["Is Gemini CLI still available for enterprise users?"]
+}
+```
+
+The orchestrator forwards those questions to the next round's debater prompts
+("Shared research brief") so parallel or repeated debater turns do not
+duplicate work, and carries unresolved questions forward between rounds. In
+`auto` mode the analyzer is told to set `research_required: true` only when a
+conservative trigger applies, so it can decide research is unnecessary.
+
+Rendering keeps sourced facts distinct from judgment:
+
+- Each debater comment shows a `Research:` status line and a "Sourced facts"
+  list (`fact — source`).
+- The final summary adds a "Research" section with the policy, each debater's
+  research status, and all cited sourced facts. Gap cases are explicit: it
+  states when all debaters deemed research unnecessary, when a debater
+  reported research `unavailable`/`inconclusive`, and when a debater reported
+  no research status — in each case telling the reader to treat the related
+  claims as judgment, not sourced fact.
+- The research policy in effect also rides in each posted comment's
+  `AGENT_LOOP_META` metadata. Resume decoding of already-posted votes is
+  lenient, so rerunning a transcript that was started under a different
+  research policy never fails on old comments; enforcement applies only to
+  newly invoked debaters.
+
 If `--repo` is omitted, the tool runs `gh repo view` from the current working
 directory, or from `--codex-dir` when that flag is provided, and uses the
 detected `OWNER/REPO`. Pass `--repo` explicitly when running outside the target

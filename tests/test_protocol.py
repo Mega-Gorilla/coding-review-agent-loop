@@ -23,7 +23,9 @@ from coding_review_agent_loop.protocol import (
     ApprovedFollowup,
     DISCUSS_ANALYZER_FRAMING_VALUES,
     DISCUSS_OUTCOME_VALUES,
+    DISCUSS_RESEARCH_STATUS_VALUES,
     DiscussAgendaDisagreement,
+    DiscussSourcedFact,
     ParsedDiscussAgenda,
     ParsedDiscussReview,
     _expect_string_list,
@@ -2658,6 +2660,19 @@ def _discuss_review(
     return json.dumps(payload) + f"\n<!-- AGENT_PLAN_STATE: {footer} -->\n-- {reviewer}"
 
 
+def _discuss_review_with_research(*, research: dict, rebuttal: str | None = None) -> str:
+    payload: dict = {
+        "schema_version": 1,
+        "kind": "discuss_review",
+        "outcome": "implement",
+        "rationale": "The feature is well-scoped.",
+        "research": research,
+    }
+    if rebuttal is not None:
+        payload["rebuttal"] = rebuttal
+    return json.dumps(payload) + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- Gemini"
+
+
 def test_parse_structured_discuss_review_accepts_implement():
     text = _discuss_review(outcome="implement")
     result = parse_structured_discuss_review(text, reviewer="Gemini")
@@ -3001,3 +3016,195 @@ def test_parse_structured_discuss_review_rejects_note_without_framing():
 
 def test_discuss_analyzer_framing_values():
     assert DISCUSS_ANALYZER_FRAMING_VALUES == {"accurate", "misframed"}
+
+
+# --- discuss_review research policy tests (#477) ---
+
+
+def test_discuss_research_status_values():
+    assert DISCUSS_RESEARCH_STATUS_VALUES == {
+        "sourced",
+        "not-needed",
+        "unavailable",
+        "inconclusive",
+    }
+
+
+def test_parse_structured_discuss_review_defaults_research_fields():
+    result = parse_structured_discuss_review(_discuss_review(), reviewer="Gemini")
+    assert result is not None
+    assert result.research_status is None
+    assert result.sourced_facts == ()
+
+
+def test_parse_structured_discuss_review_research_sourced_round_trip():
+    text = _discuss_review_with_research(
+        research={
+            "status": "sourced",
+            "sourced_facts": [
+                {
+                    "fact": "Gemini CLI remains available for enterprise users.",
+                    "source": "https://example.com/gemini-cli-notice",
+                }
+            ],
+        }
+    )
+    result = parse_structured_discuss_review(text, reviewer="Gemini")
+    assert result is not None
+    assert result.research_status == "sourced"
+    assert result.sourced_facts == (
+        DiscussSourcedFact(
+            fact="Gemini CLI remains available for enterprise users.",
+            source="https://example.com/gemini-cli-notice",
+        ),
+    )
+
+
+def test_parse_structured_discuss_review_research_accepts_not_needed_without_facts():
+    text = _discuss_review_with_research(research={"status": "not-needed"})
+    result = parse_structured_discuss_review(text, reviewer="Gemini")
+    assert result is not None
+    assert result.research_status == "not-needed"
+    assert result.sourced_facts == ()
+
+
+def test_parse_structured_discuss_review_research_rejects_unknown_status():
+    text = _discuss_review_with_research(research={"status": "done"})
+    with pytest.raises(AgentLoopError, match="research.status must be one of"):
+        parse_structured_discuss_review(text, reviewer="Gemini")
+
+
+def test_parse_structured_discuss_review_research_rejects_sourced_without_facts():
+    text = _discuss_review_with_research(research={"status": "sourced", "sourced_facts": []})
+    with pytest.raises(AgentLoopError, match="sourced_facts must be non-empty"):
+        parse_structured_discuss_review(text, reviewer="Gemini")
+
+
+def test_parse_structured_discuss_review_research_rejects_fact_without_source():
+    text = _discuss_review_with_research(
+        research={"status": "sourced", "sourced_facts": [{"fact": "A fact."}]}
+    )
+    with pytest.raises(AgentLoopError, match="missing required field"):
+        parse_structured_discuss_review(text, reviewer="Gemini")
+
+
+def test_parse_structured_discuss_review_research_rejects_empty_source():
+    text = _discuss_review_with_research(
+        research={"status": "sourced", "sourced_facts": [{"fact": "A fact.", "source": ""}]}
+    )
+    with pytest.raises(AgentLoopError, match="source"):
+        parse_structured_discuss_review(text, reviewer="Gemini")
+
+
+def test_parse_structured_discuss_review_research_rejects_facts_without_sourced_status():
+    text = _discuss_review_with_research(
+        research={
+            "status": "unavailable",
+            "sourced_facts": [{"fact": "A fact.", "source": "https://example.com"}],
+        }
+    )
+    with pytest.raises(AgentLoopError, match="requires status `sourced`"):
+        parse_structured_discuss_review(text, reviewer="Gemini")
+
+
+def test_validate_structured_discuss_review_required_mode_rejects_missing_research():
+    with pytest.raises(AgentLoopError, match="research is required"):
+        validate_structured_discuss_review(
+            _discuss_review(), reviewer="Gemini", research_mode="required"
+        )
+
+
+def test_validate_structured_discuss_review_required_mode_rejects_not_needed():
+    text = _discuss_review_with_research(research={"status": "not-needed"})
+    with pytest.raises(AgentLoopError, match="must not be `not-needed`"):
+        validate_structured_discuss_review(text, reviewer="Gemini", research_mode="required")
+
+
+def test_validate_structured_discuss_review_required_mode_accepts_unavailable():
+    text = _discuss_review_with_research(research={"status": "unavailable"})
+    result = validate_structured_discuss_review(
+        text, reviewer="Gemini", research_mode="required"
+    )
+    assert result.research_status == "unavailable"
+
+
+def test_validate_structured_discuss_review_lenient_without_research_mode():
+    # Resume decoding and repair use the lenient default so transcripts started
+    # under a different research policy never fail on already-posted votes.
+    result = validate_structured_discuss_review(_discuss_review(), reviewer="Gemini")
+    assert result.research_status is None
+
+
+def test_validate_structured_discuss_review_auto_mode_accepts_missing_research():
+    result = validate_structured_discuss_review(
+        _discuss_review(), reviewer="Gemini", research_mode="auto"
+    )
+    assert result.research_status is None
+
+
+# --- discuss_agenda research brief tests (#477) ---
+
+
+def _discuss_agenda_with_research(
+    *, research_required: bool | None, research_questions: list[str] | None
+) -> str:
+    payload: dict = {
+        "schema_version": 1,
+        "kind": "discuss_agenda",
+        "consensus": [],
+        "disagreements": [],
+        "missing_facts": [],
+    }
+    if research_required is not None:
+        payload["research_required"] = research_required
+    if research_questions is not None:
+        payload["research_questions"] = research_questions
+    return json.dumps(payload) + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- Anthropic Claude"
+
+
+def test_parse_structured_discuss_agenda_defaults_research_fields():
+    result = parse_structured_discuss_agenda(_discuss_agenda())
+    assert result is not None
+    assert result.research_required is False
+    assert result.research_questions == ()
+
+
+def test_parse_structured_discuss_agenda_research_round_trip():
+    text = _discuss_agenda_with_research(
+        research_required=True,
+        research_questions=["Is Gemini CLI still available for enterprise users?"],
+    )
+    result = parse_structured_discuss_agenda(text)
+    assert result is not None
+    assert result.research_required is True
+    assert result.research_questions == (
+        "Is Gemini CLI still available for enterprise users?",
+    )
+
+
+def test_parse_structured_discuss_agenda_accepts_explicit_no_research():
+    text = _discuss_agenda_with_research(research_required=False, research_questions=[])
+    result = parse_structured_discuss_agenda(text)
+    assert result is not None
+    assert result.research_required is False
+    assert result.research_questions == ()
+
+
+def test_parse_structured_discuss_agenda_rejects_required_without_questions():
+    text = _discuss_agenda_with_research(research_required=True, research_questions=[])
+    with pytest.raises(AgentLoopError, match="research_questions must be non-empty"):
+        parse_structured_discuss_agenda(text)
+
+
+def test_parse_structured_discuss_agenda_rejects_questions_without_required():
+    text = _discuss_agenda_with_research(
+        research_required=None, research_questions=["A question?"]
+    )
+    with pytest.raises(AgentLoopError, match="requires research_required"):
+        parse_structured_discuss_agenda(text)
+
+
+def test_parse_structured_discuss_agenda_rejects_non_bool_research_required():
+    text = _discuss_agenda_with_research(research_required="yes", research_questions=["Q?"])
+    with pytest.raises(AgentLoopError, match="must be a boolean"):
+        parse_structured_discuss_agenda(text)
