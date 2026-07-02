@@ -230,6 +230,12 @@ class StructuredDiscussReview:
 
 
 @dataclass(frozen=True)
+class DiscussSourcedFact:
+    fact: str
+    source: str
+
+
+@dataclass(frozen=True)
 class ParsedDiscussReview:
     outcome: str
     rationale: str
@@ -238,10 +244,15 @@ class ParsedDiscussReview:
     rebuttal: str | None = None
     analyzer_framing: str | None = None
     framing_note: str | None = None
+    # Research policy fields (#477). None means the response carried no
+    # `research` object (legacy transcripts and `none`-mode responses).
+    research_status: str | None = None
+    sourced_facts: tuple[DiscussSourcedFact, ...] = ()
 
 
 DISCUSS_OUTCOME_VALUES = frozenset({"implement", "do-not-implement", "needs-human", "split"})
 DISCUSS_ANALYZER_FRAMING_VALUES = frozenset({"accurate", "misframed"})
+DISCUSS_RESEARCH_STATUS_VALUES = frozenset({"sourced", "not-needed", "unavailable", "inconclusive"})
 
 
 @dataclass(frozen=True)
@@ -256,6 +267,11 @@ class ParsedDiscussAgenda:
     consensus: tuple[str, ...]
     disagreements: tuple[DiscussAgendaDisagreement, ...]
     missing_facts: tuple[str, ...]
+    # Shared research brief (#477). Emitted by the analyzer when a research
+    # policy is active; forwarded to the next round's debaters so parallel
+    # turns do not duplicate work.
+    research_required: bool = False
+    research_questions: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1822,8 +1838,47 @@ def parse_non_blocking_followups(text: str, *, reviewer: str) -> list[ApprovedFo
     return list(parse_approved_followups(text, reviewer=reviewer).future)
 
 
+def _parse_discuss_research(value: object) -> tuple[str, tuple[DiscussSourcedFact, ...]]:
+    payload = _expect_object(value, context="discuss_review.research")
+    _expect_exact_keys(
+        payload,
+        context="discuss_review.research",
+        required={"status"},
+        optional={"sourced_facts"},
+    )
+    status = _expect_non_empty_string(payload["status"], context="discuss_review.research.status")
+    if status not in DISCUSS_RESEARCH_STATUS_VALUES:
+        rendered = ", ".join(sorted(DISCUSS_RESEARCH_STATUS_VALUES))
+        raise AgentLoopError(f"discuss_review.research.status must be one of: {rendered}")
+    facts_value = payload.get("sourced_facts", [])
+    if not isinstance(facts_value, list):
+        raise AgentLoopError("discuss_review.research.sourced_facts must be a JSON array.")
+    sourced_facts: list[DiscussSourcedFact] = []
+    for index, item in enumerate(facts_value):
+        context = f"discuss_review.research.sourced_facts at index {index}"
+        fact_payload = _expect_object(item, context=context)
+        _expect_exact_keys(fact_payload, context=context, required={"fact", "source"})
+        sourced_facts.append(
+            DiscussSourcedFact(
+                fact=_expect_non_empty_string(fact_payload["fact"], context=f"{context}.fact"),
+                source=_expect_non_empty_string(
+                    fact_payload["source"], context=f"{context}.source"
+                ),
+            )
+        )
+    if status == "sourced" and not sourced_facts:
+        raise AgentLoopError(
+            "discuss_review.research.sourced_facts must be non-empty when status is `sourced`."
+        )
+    if status != "sourced" and sourced_facts:
+        raise AgentLoopError(
+            "discuss_review.research.sourced_facts requires status `sourced`."
+        )
+    return status, tuple(sourced_facts)
+
+
 def parse_structured_discuss_review(
-    text: str, *, reviewer: str, round_number: int = 1
+    text: str, *, reviewer: str, round_number: int = 1, research_mode: str | None = None
 ) -> ParsedDiscussReview | None:
     payload = _extract_structured_discuss_review_payload(text)
     if payload is None:
@@ -1836,7 +1891,7 @@ def parse_structured_discuss_review(
         payload,
         context="discuss_review",
         required={"schema_version", "kind", "outcome", "rationale"},
-        optional={"split_proposals", "rebuttal", "analyzer_framing", "framing_note"},
+        optional={"split_proposals", "rebuttal", "analyzer_framing", "framing_note", "research"},
     )
     outcome = _expect_non_empty_string(payload["outcome"], context="discuss_review.outcome")
     if outcome not in DISCUSS_OUTCOME_VALUES:
@@ -1879,6 +1934,21 @@ def parse_structured_discuss_review(
         raise AgentLoopError(
             "discuss_review.framing_note requires analyzer_framing to be set."
         )
+    research_status: str | None = None
+    sourced_facts: tuple[DiscussSourcedFact, ...] = ()
+    if "research" in payload:
+        research_status, sourced_facts = _parse_discuss_research(payload["research"])
+    if research_mode == "required":
+        if research_status is None:
+            raise AgentLoopError(
+                "discuss_review.research is required when the research policy is `required`."
+            )
+        if research_status == "not-needed":
+            raise AgentLoopError(
+                "discuss_review.research.status must not be `not-needed` when the "
+                "research policy is `required`; use `sourced`, `unavailable`, or "
+                "`inconclusive`."
+            )
     return ParsedDiscussReview(
         outcome=outcome,
         rationale=rationale,
@@ -1887,13 +1957,17 @@ def parse_structured_discuss_review(
         rebuttal=rebuttal,
         analyzer_framing=analyzer_framing,
         framing_note=framing_note,
+        research_status=research_status,
+        sourced_facts=sourced_facts,
     )
 
 
 def validate_structured_discuss_review(
-    text: str, *, reviewer: str, round_number: int = 1
+    text: str, *, reviewer: str, round_number: int = 1, research_mode: str | None = None
 ) -> ParsedDiscussReview:
-    parsed = parse_structured_discuss_review(text, reviewer=reviewer, round_number=round_number)
+    parsed = parse_structured_discuss_review(
+        text, reviewer=reviewer, round_number=round_number, research_mode=research_mode
+    )
     if parsed is not None:
         return parsed
     raise AgentLoopError("Discuss review did not use the required structured format.")
@@ -1940,7 +2014,7 @@ def parse_structured_discuss_agenda(text: str) -> ParsedDiscussAgenda | None:
         payload,
         context="discuss_agenda",
         required={"schema_version", "kind", "consensus", "disagreements"},
-        optional={"missing_facts"},
+        optional={"missing_facts", "research_required", "research_questions"},
     )
     consensus = _expect_string_list(
         payload["consensus"],
@@ -1962,10 +2036,32 @@ def parse_structured_discuss_agenda(text: str) -> ParsedDiscussAgenda | None:
         context="discuss_agenda.missing_facts",
         item_context="discuss_agenda.missing_facts",
     )
+    research_required = False
+    if "research_required" in payload:
+        research_required = _expect_bool(
+            payload["research_required"], context="discuss_agenda.research_required"
+        )
+    research_questions = _expect_optional_string_list(
+        payload,
+        "research_questions",
+        context="discuss_agenda.research_questions",
+        item_context="discuss_agenda.research_questions",
+    )
+    if research_required and not research_questions:
+        raise AgentLoopError(
+            "discuss_agenda.research_questions must be non-empty when "
+            "research_required is true."
+        )
+    if research_questions and not research_required:
+        raise AgentLoopError(
+            "discuss_agenda.research_questions requires research_required to be true."
+        )
     return ParsedDiscussAgenda(
         consensus=consensus,
         disagreements=disagreements,
         missing_facts=missing_facts,
+        research_required=research_required,
+        research_questions=research_questions,
     )
 
 

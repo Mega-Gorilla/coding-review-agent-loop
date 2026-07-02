@@ -31,6 +31,7 @@ def _discuss_review_text(
     reviewer: str = "OpenAI Codex",
     analyzer_framing: str | None = None,
     framing_note: str | None = None,
+    research: dict | None = None,
 ) -> str:
     payload: dict = {
         "schema_version": 1,
@@ -46,6 +47,8 @@ def _discuss_review_text(
         payload["analyzer_framing"] = analyzer_framing
     if framing_note is not None:
         payload["framing_note"] = framing_note
+    if research is not None:
+        payload["research"] = research
     return json.dumps(payload) + f"\n<!-- AGENT_PLAN_STATE: approved -->\n-- {reviewer}"
 
 
@@ -55,6 +58,8 @@ def _discuss_agenda_text(
     disagreements: list[dict] | None = None,
     missing_facts: list[str] | None = None,
     analyzer: str = "Anthropic Claude",
+    research_required: bool | None = None,
+    research_questions: list[str] | None = None,
 ) -> str:
     payload: dict = {
         "schema_version": 1,
@@ -71,6 +76,10 @@ def _discuss_agenda_text(
         ],
         "missing_facts": missing_facts if missing_facts is not None else [],
     }
+    if research_required is not None:
+        payload["research_required"] = research_required
+    if research_questions is not None:
+        payload["research_questions"] = research_questions
     return json.dumps(payload) + f"\n<!-- AGENT_PLAN_STATE: approved -->\n-- {analyzer}"
 
 
@@ -1187,3 +1196,319 @@ def test_discuss_loop_agenda_claiming_consensus_is_forwarded_but_votes_rule(tmp_
     assert "Consensus kind: `deadlock` after round 2." in final
     assert "Everyone agrees to implement." in final
     assert "The debater vote table above is the authoritative consensus." in final
+
+
+# --- discuss research policy tests (#477) ---
+
+
+_SOURCED_RESEARCH = {
+    "status": "sourced",
+    "sourced_facts": [
+        {
+            "fact": "Gemini CLI remains available for enterprise users.",
+            "source": "https://example.com/gemini-cli-notice",
+        }
+    ],
+}
+
+
+def test_discuss_loop_cli_parser_accepts_discuss_research():
+    from coding_review_agent_loop.cli import build_parser
+
+    args = build_parser().parse_args(
+        ["discuss", "56", "--repo", "OWNER/REPO", "--discuss-research", "auto"]
+    )
+    assert args.discuss_research == "auto"
+    plain = build_parser().parse_args(["discuss", "56", "--repo", "OWNER/REPO"])
+    assert plain.discuss_research == "none"
+    with pytest.raises(SystemExit):
+        build_parser().parse_args(
+            ["discuss", "56", "--repo", "OWNER/REPO", "--discuss-research", "always"]
+        )
+
+
+def test_discuss_loop_config_rejects_unknown_research_mode(tmp_path):
+    with pytest.raises(AgentLoopError, match="--discuss-research must be one of"):
+        make_config(tmp_path, reviewer=("codex", "gemini"), discuss_research="always")
+
+
+def test_discuss_loop_none_mode_prompts_forbid_research(tmp_path):
+    implement_text = _discuss_review_text(outcome="implement")
+    runner = FakeRunner(
+        codex_outputs=[implement_text],
+        gemini_outputs=[implement_text],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+
+    result = run_discuss_loop(runner, issue_number=56, config=config)
+
+    assert result == 0
+    review_commands = [
+        cmd for cmd, _cwd in runner.commands if "vote on whether" in " ".join(cmd)
+    ]
+    assert len(review_commands) == 2
+    for command in review_commands:
+        prompt = " ".join(command)
+        assert "Research policy: `none`" in prompt
+        assert "sourced_facts" not in prompt
+    final = runner.comments[-1]
+    assert "Research policy: `none`." in final
+    assert "Online research was disabled; all positions are agent judgment." in final
+
+
+def test_discuss_loop_required_research_renders_sourced_facts(tmp_path):
+    implement_text = _discuss_review_text(outcome="implement", research=_SOURCED_RESEARCH)
+    runner = FakeRunner(
+        codex_outputs=[implement_text],
+        gemini_outputs=[implement_text],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_research="required")
+
+    result = run_discuss_loop(runner, issue_number=56, config=config)
+
+    assert result == 0
+    review_commands = [
+        cmd for cmd, _cwd in runner.commands if "vote on whether" in " ".join(cmd)
+    ]
+    assert len(review_commands) == 2
+    for command in review_commands:
+        prompt = " ".join(command)
+        assert "Research policy: `required`" in prompt
+        assert "must not be `not-needed`" in prompt
+    debater_comment = runner.comments[0]
+    assert "### Sourced facts" in debater_comment
+    assert "https://example.com/gemini-cli-notice" in debater_comment
+    final = runner.comments[-1]
+    assert "### Research" in final
+    assert "Research policy: `required`." in final
+    assert "Sourced facts cited by debaters" in final
+    assert "Gemini CLI remains available for enterprise users." in final
+
+
+def test_discuss_loop_required_research_missing_research_repaired(tmp_path):
+    # The debater omits the research object; the repair pass restores it, so
+    # `required` mode is enforced by validation with repair as fallback.
+    from unittest.mock import patch
+
+    repaired = _discuss_review_text(outcome="implement", research=_SOURCED_RESEARCH)
+    runner = FakeRunner(
+        codex_outputs=[_discuss_review_text(outcome="implement")],
+        gemini_outputs=[repaired],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_research="required")
+
+    with patch(
+        "coding_review_agent_loop.orchestrator.attempt_repair", return_value=repaired
+    ):
+        result = run_discuss_loop(runner, issue_number=56, config=config)
+
+    assert result == 0
+    assert "### Sourced facts" in runner.comments[0]
+
+
+def test_discuss_loop_required_research_fails_when_repair_cannot_restore(tmp_path):
+    # conftest neuters the repair pass, so the missing research object survives
+    # repair and the debater invocation fails instead of being silently accepted.
+    runner = FakeRunner(
+        codex_outputs=[_discuss_review_text(outcome="implement")],
+        gemini_outputs=[],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_research="required")
+
+    with pytest.raises(AgentLoopError, match="research is required"):
+        run_discuss_loop(runner, issue_number=56, config=config)
+
+
+def test_discuss_loop_auto_mode_analyzer_brief_propagates_to_next_round(tmp_path):
+    agenda_text = _discuss_agenda_text(
+        research_required=True,
+        research_questions=["Is Gemini CLI still available for enterprise users?"],
+    )
+    runner = FakeRunner(
+        codex_outputs=[
+            _discuss_review_text(
+                outcome="implement", rationale="Scoped.", research={"status": "not-needed"}
+            ),
+            _discuss_review_text(
+                outcome="implement",
+                rationale="Still scoped.",
+                rebuttal="Holding.",
+                analyzer_framing="accurate",
+                research=_SOURCED_RESEARCH,
+            ),
+        ],
+        gemini_outputs=[
+            _discuss_review_text(
+                outcome="do-not-implement",
+                rationale="Out of scope.",
+                research={"status": "not-needed"},
+            ),
+            _discuss_review_text(
+                outcome="do-not-implement",
+                rationale="Still out of scope.",
+                rebuttal="Holding.",
+                analyzer_framing="accurate",
+                research={"status": "unavailable"},
+            ),
+        ],
+        claude_outputs=[agenda_text],
+    )
+    config = make_config(
+        tmp_path,
+        reviewer=("codex", "gemini"),
+        discuss_analyzer="claude",
+        discuss_research="auto",
+    )
+
+    result = run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=1)
+
+    assert result == 0
+    # The analyzer was asked for a research brief.
+    analyzer_prompt = " ".join(
+        next(cmd for cmd in _claude_commands(runner) if "Summarize debate round 1" in " ".join(cmd))
+    )
+    assert "research_required" in analyzer_prompt
+    # The brief propagates into round-2 debate prompts as shared context.
+    debate_commands = [cmd for cmd, _cwd in runner.commands if "debate round 2" in " ".join(cmd)]
+    assert len(debate_commands) == 2
+    for command in debate_commands:
+        prompt = " ".join(command)
+        assert "Shared research brief" in prompt
+        assert "Is Gemini CLI still available for enterprise users?" in prompt
+    # The round-1 summary shows the research brief for auditability.
+    round1_summary = runner.comments[2]
+    assert "Research brief for the next round (answer with cited sources):" in round1_summary
+    # The final deadlock summary distinguishes sourced facts from judgment and
+    # is explicit about unavailable research.
+    final = runner.comments[-1]
+    assert "Research policy: `auto`." in final
+    assert "Gemini CLI remains available for enterprise users." in final
+    assert "Research was unavailable or inconclusive for Gemini" in final
+
+
+def test_discuss_loop_auto_mode_analyzer_can_decide_no_research(tmp_path):
+    agenda_text = _discuss_agenda_text(research_required=False, research_questions=[])
+    runner = FakeRunner(
+        codex_outputs=[
+            _discuss_review_text(
+                outcome="implement", rationale="Scoped.", research={"status": "not-needed"}
+            ),
+            _discuss_review_text(
+                outcome="implement",
+                rationale="Still scoped.",
+                rebuttal="Holding.",
+                analyzer_framing="accurate",
+                research={"status": "not-needed"},
+            ),
+        ],
+        gemini_outputs=[
+            _discuss_review_text(
+                outcome="do-not-implement",
+                rationale="Out of scope.",
+                research={"status": "not-needed"},
+            ),
+            _discuss_review_text(
+                outcome="implement",
+                rationale="Convinced.",
+                rebuttal="Conceding.",
+                analyzer_framing="accurate",
+                research={"status": "not-needed"},
+            ),
+        ],
+        claude_outputs=[agenda_text],
+    )
+    config = make_config(
+        tmp_path,
+        reviewer=("codex", "gemini"),
+        discuss_analyzer="claude",
+        discuss_research="auto",
+    )
+
+    result = run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=1)
+
+    assert result == 0
+    debate_commands = [cmd for cmd, _cwd in runner.commands if "debate round 2" in " ".join(cmd)]
+    assert len(debate_commands) == 2
+    for command in debate_commands:
+        assert "Shared research brief" not in " ".join(command)
+    final = runner.comments[-1]
+    assert "Consensus: Implement" in final
+    assert "Research policy: `auto`." in final
+    assert (
+        "All debaters determined external research was unnecessary for this question."
+        in final
+    )
+
+
+def test_discuss_loop_research_mode_recorded_in_round_metadata(tmp_path):
+    implement_text = _discuss_review_text(outcome="implement", research=_SOURCED_RESEARCH)
+    runner = FakeRunner(
+        codex_outputs=[implement_text],
+        gemini_outputs=[implement_text],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_research="required")
+
+    result = run_discuss_loop(runner, issue_number=56, config=config)
+
+    assert result == 0
+    # runner.comments strips AGENT_LOOP_META; the raw posted bodies keep it.
+    assert len(runner.issue_comments) == 3
+    for comment in runner.issue_comments:
+        match = ROUND_RESUME_MARKER_RE.search(comment["body"])
+        assert match is not None
+        metadata = _decode_round_metadata(match.group("payload"))
+        assert metadata.research_mode == "required"
+
+
+def test_discuss_loop_resume_is_lenient_about_prior_votes_without_research(tmp_path):
+    # A transcript started without a research policy resumes cleanly under
+    # `required`: enforcement applies only to newly invoked debaters.
+    subject = _issue_subject()
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_research="required")
+    codex_vote_r1 = ParsedDiscussReview(
+        outcome="implement", rationale="Codex round-one rationale.", split_proposals=(), reviewer="Codex"
+    )
+    gemini_vote_r1 = ParsedDiscussReview(
+        outcome="do-not-implement",
+        rationale="Gemini round-one rationale.",
+        split_proposals=(),
+        reviewer="Gemini",
+    )
+    seeded = [
+        _seed_debater_comment(
+            reviewer="Codex", round_number=1, subject=subject,
+            outcome="implement", rationale="Codex round-one rationale.", config=config,
+        ),
+        _seed_debater_comment(
+            reviewer="Gemini", round_number=1, subject=subject,
+            outcome="do-not-implement", rationale="Gemini round-one rationale.", config=config,
+        ),
+        _seed_summary_comment(
+            round_number=1,
+            reviewer_votes=[codex_vote_r1, gemini_vote_r1],
+            is_final=False,
+            subject=subject,
+            agenda=(
+                "- Codex held `implement`: Codex round-one rationale.",
+                "- Gemini held `do-not-implement`: Gemini round-one rationale.",
+            ),
+        ),
+    ]
+    implement_text = _discuss_review_text(
+        outcome="implement",
+        rationale="Agreed now.",
+        rebuttal="Conceding.",
+        research=_SOURCED_RESEARCH,
+    )
+    runner = FakeRunner(
+        issue_comments=seeded,
+        codex_outputs=[implement_text],
+        gemini_outputs=[implement_text],
+    )
+
+    result = run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=1)
+
+    assert result == 0
+    final = runner.comments[-1]
+    assert "Consensus: Implement" in final
+    assert "Research policy: `required`." in final

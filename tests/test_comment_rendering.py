@@ -1097,3 +1097,213 @@ def test_render_public_discuss_comment_without_framing_is_unchanged():
     )
     rendered = _render_public_discuss_review_comment(parsed, reviewer="Codex", round_number=1)
     assert "Analyzer" not in rendered
+
+
+# --- discuss research policy rendering tests (#477) ---
+
+from coding_review_agent_loop.protocol import DiscussSourcedFact
+
+
+def _discuss_research_vote(
+    *,
+    reviewer: str,
+    outcome: str = "implement",
+    research_status: str | None = None,
+    sourced_facts: tuple[DiscussSourcedFact, ...] = (),
+) -> ParsedDiscussReview:
+    return ParsedDiscussReview(
+        outcome=outcome,
+        rationale="Good scope.",
+        split_proposals=(),
+        reviewer=reviewer,
+        research_status=research_status,
+        sourced_facts=sourced_facts,
+    )
+
+
+def test_render_public_discuss_comment_renders_sourced_facts():
+    parsed = _discuss_research_vote(
+        reviewer="Codex",
+        research_status="sourced",
+        sourced_facts=(
+            DiscussSourcedFact(
+                fact="Gemini CLI remains available for enterprise users.",
+                source="https://example.com/gemini-cli-notice",
+            ),
+        ),
+    )
+    rendered = _render_public_discuss_review_comment(parsed, reviewer="Codex", round_number=1)
+    assert "**Research:** done, sourced facts cited below (`sourced`)" in rendered
+    assert "### Sourced facts" in rendered
+    assert (
+        "- Gemini CLI remains available for enterprise users. — source: "
+        "https://example.com/gemini-cli-notice" in rendered
+    )
+
+
+def test_render_public_discuss_comment_renders_unavailable_status_without_facts():
+    parsed = _discuss_research_vote(reviewer="Codex", research_status="unavailable")
+    rendered = _render_public_discuss_review_comment(parsed, reviewer="Codex", round_number=1)
+    assert "**Research:**" in rendered
+    assert "`unavailable`" in rendered
+    assert "### Sourced facts" not in rendered
+
+
+def test_render_public_discuss_comment_without_research_is_unchanged():
+    parsed = _discuss_research_vote(reviewer="Codex")
+    rendered = _render_public_discuss_review_comment(parsed, reviewer="Codex", round_number=1)
+    assert "Research" not in rendered
+    assert "Sourced facts" not in rendered
+
+
+def test_render_discuss_summary_final_default_has_no_research_section():
+    rendered = render_discuss_round_summary_comment(
+        is_final=True,
+        outcome="implement",
+        consensus_kind="unanimous",
+        subject="abc123",
+        reviewer_votes=[_discuss_vote("implement", reviewer="Codex")],
+        split_proposals=[],
+    )
+    assert "### Research" not in rendered
+
+
+def test_render_discuss_summary_final_research_none_notes_disabled():
+    rendered = render_discuss_round_summary_comment(
+        is_final=True,
+        outcome="implement",
+        consensus_kind="unanimous",
+        subject="abc123",
+        reviewer_votes=[_discuss_vote("implement", reviewer="Codex")],
+        split_proposals=[],
+        research_mode="none",
+    )
+    assert "### Research" in rendered
+    assert "Research policy: `none`." in rendered
+    assert "Online research was disabled; all positions are agent judgment." in rendered
+
+
+def test_render_discuss_summary_final_research_distinguishes_facts_from_judgment():
+    rendered = render_discuss_round_summary_comment(
+        is_final=True,
+        outcome="implement",
+        consensus_kind="unanimous",
+        subject="abc123",
+        reviewer_votes=[
+            _discuss_research_vote(
+                reviewer="Codex",
+                research_status="sourced",
+                sourced_facts=(
+                    DiscussSourcedFact(
+                        fact="Gemini CLI remains available.",
+                        source="https://example.com/notice",
+                    ),
+                ),
+            ),
+            _discuss_research_vote(reviewer="Gemini", research_status="unavailable"),
+        ],
+        split_proposals=[],
+        research_mode="required",
+    )
+    assert "### Research" in rendered
+    assert "Research policy: `required`." in rendered
+    assert "- Codex: done, sourced facts cited below (`sourced`)" in rendered
+    assert "- Gemini: unavailable — related claims are judgment, not sourced fact (`unavailable`)" in rendered
+    assert (
+        "Sourced facts cited by debaters (everything else above is agent judgment):"
+        in rendered
+    )
+    assert "- Codex: Gemini CLI remains available. — source: https://example.com/notice" in rendered
+    assert (
+        "Research was unavailable or inconclusive for Gemini; treat their related "
+        "claims as judgment, not sourced fact." in rendered
+    )
+
+
+def test_render_discuss_summary_final_research_auto_all_not_needed_is_explicit():
+    rendered = render_discuss_round_summary_comment(
+        is_final=True,
+        outcome="implement",
+        consensus_kind="unanimous",
+        subject="abc123",
+        reviewer_votes=[
+            _discuss_research_vote(reviewer="Codex", research_status="not-needed"),
+            _discuss_research_vote(reviewer="Gemini", research_status="not-needed"),
+        ],
+        split_proposals=[],
+        research_mode="auto",
+    )
+    assert "Research policy: `auto`." in rendered
+    assert (
+        "All debaters determined external research was unnecessary for this question."
+        in rendered
+    )
+
+
+def test_render_discuss_summary_final_research_unreported_status_is_explicit():
+    rendered = render_discuss_round_summary_comment(
+        is_final=True,
+        outcome="implement",
+        consensus_kind="unanimous",
+        subject="abc123",
+        reviewer_votes=[
+            _discuss_research_vote(reviewer="Codex", research_status="not-needed"),
+            _discuss_research_vote(reviewer="Gemini"),
+        ],
+        split_proposals=[],
+        research_mode="auto",
+    )
+    assert "- Gemini: no research status reported" in rendered
+    assert (
+        "No research status was reported by Gemini; treat their claims as judgment, "
+        "not sourced fact." in rendered
+    )
+    assert "All debaters determined external research was unnecessary" not in rendered
+
+
+def test_render_discuss_summary_final_research_aggregates_facts_across_rounds():
+    round1_codex = _discuss_research_vote(
+        reviewer="Codex",
+        research_status="sourced",
+        sourced_facts=(
+            DiscussSourcedFact(fact="Round-one fact.", source="https://example.com/r1"),
+        ),
+    )
+    round2_codex = _discuss_research_vote(reviewer="Codex", research_status="not-needed")
+    rendered = render_discuss_round_summary_comment(
+        is_final=True,
+        outcome="implement",
+        consensus_kind="converged",
+        subject="abc123",
+        round_number=2,
+        reviewer_votes=[round2_codex],
+        round_history=[[round1_codex], [round2_codex]],
+        split_proposals=[],
+        research_mode="required",
+    )
+    # Facts cited in earlier rounds stay visible in the final summary.
+    assert "- Codex: Round-one fact. — source: https://example.com/r1" in rendered
+
+
+def test_render_discuss_summary_non_final_agenda_includes_research_brief():
+    agenda = ParsedDiscussAgenda(
+        consensus=(),
+        disagreements=(),
+        missing_facts=(),
+        research_required=True,
+        research_questions=("Is Gemini CLI still available for enterprise users?",),
+    )
+    rendered = render_discuss_round_summary_comment(
+        is_final=False,
+        subject="abc123",
+        round_number=1,
+        reviewer_votes=[
+            _discuss_vote("implement", reviewer="Codex"),
+            _discuss_vote("do-not-implement", reviewer="Gemini"),
+        ],
+        analyzer_agenda=agenda,
+        analyzer_name="Anthropic Claude",
+        research_mode="auto",
+    )
+    assert "Research brief for the next round (answer with cited sources):" in rendered
+    assert "- Is Gemini CLI still available for enterprise users?" in rendered

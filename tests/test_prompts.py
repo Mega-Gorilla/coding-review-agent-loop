@@ -2082,3 +2082,127 @@ def test_build_discuss_review_prompt_round1_has_no_analyzer_rules(tmp_path):
     prompt = build_discuss_review_prompt(56, config, reviewer="codex", round_number=1)
     assert "analyzer_framing" not in prompt
     assert "This is round 1." in prompt
+
+
+# --- discuss research policy prompt tests (#477) ---
+
+
+def test_build_discuss_review_prompt_research_none_forbids_research(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    default = build_discuss_review_prompt(56, config, reviewer="codex", round_number=1)
+    explicit = build_discuss_review_prompt(
+        56, config, reviewer="codex", round_number=1, research_mode="none"
+    )
+    assert default == explicit
+    assert "Research policy: `none`" in default
+    assert "do not\nperform online research" in default
+    assert '"research"' not in default
+    assert "sourced_facts" not in default
+
+
+def test_build_discuss_review_prompt_research_required_enforces_sources(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    prompt = build_discuss_review_prompt(
+        56, config, reviewer="codex", round_number=1, research_mode="required"
+    )
+    assert "Research policy: `required`" in prompt
+    assert "Cite a source" in prompt
+    assert '"research"' in prompt
+    assert '"status": "sourced"' in prompt
+    assert "sourced_facts" in prompt
+    assert "must not be `not-needed`" in prompt
+    assert "instead of presenting stale\nassumptions as fact" in prompt
+
+
+def test_build_discuss_review_prompt_research_auto_documents_triggers(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    prompt = build_discuss_review_prompt(
+        56, config, reviewer="codex", round_number=1, research_mode="auto"
+    )
+    assert "Research policy: `auto`" in prompt
+    assert "conservative triggers" in prompt
+    assert "pricing, quotas, model availability" in prompt
+    assert "`not-needed`" in prompt
+    assert '"status": "not-needed"' in prompt
+    assert "must not be `not-needed`" not in prompt
+
+
+def test_build_discuss_review_prompt_renders_shared_research_brief(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    agenda = ParsedDiscussAgenda(
+        consensus=(),
+        disagreements=(
+            DiscussAgendaDisagreement(
+                topic="Scope of the change",
+                positions=(("Codex", "Narrow enough."),),
+                question_for_next_round="Would splitting resolve it?",
+            ),
+        ),
+        missing_facts=(),
+        research_required=True,
+        research_questions=("Is Gemini CLI still available for enterprise users?",),
+    )
+    prompt = build_discuss_review_prompt(
+        56,
+        config,
+        reviewer="codex",
+        round_number=2,
+        prior_round_votes=[_discuss_prompt_vote("Codex")],
+        analyzer_agenda=agenda,
+        research_mode="auto",
+    )
+    assert "Shared research brief" in prompt
+    assert "Is Gemini CLI still available for enterprise users?" in prompt
+    assert "do not duplicate work" in prompt
+
+
+def test_build_discuss_agenda_prompt_research_auto_requests_brief(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    prompt = build_discuss_agenda_prompt(
+        56,
+        config,
+        analyzer="claude",
+        round_number=1,
+        round_history=[[_discuss_prompt_vote("Codex")]],
+        research_mode="auto",
+    )
+    assert "`research_required` / `research_questions`" in prompt
+    assert "conservative\ntriggers" in prompt or "conservative triggers" in prompt
+    assert '"research_required": true' in prompt
+    assert "must be non-empty when `research_required` is" in prompt
+
+
+def test_build_discuss_agenda_prompt_research_none_omits_research_fields(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    default = build_discuss_agenda_prompt(
+        56,
+        config,
+        analyzer="claude",
+        round_number=1,
+        round_history=[[_discuss_prompt_vote("Codex")]],
+    )
+    explicit = build_discuss_agenda_prompt(
+        56,
+        config,
+        analyzer="claude",
+        round_number=1,
+        round_history=[[_discuss_prompt_vote("Codex")]],
+        research_mode="none",
+    )
+    assert default == explicit
+    assert "research_required" not in default
+    assert "research_questions" not in default
+
+
+def test_build_discuss_agenda_prompt_research_required_focuses_questions(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"))
+    prompt = build_discuss_agenda_prompt(
+        56,
+        config,
+        analyzer="claude",
+        round_number=1,
+        round_history=[[_discuss_prompt_vote("Codex")]],
+        research_mode="required",
+    )
+    assert "debaters must research" in prompt
+    assert "`research_required` / `research_questions`" in prompt

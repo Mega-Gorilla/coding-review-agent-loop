@@ -39,6 +39,10 @@ DEFAULT_ANTIGRAVITY_MODELS: tuple[str, ...] = (
 )
 DEFAULT_REPAIR_MODELS: tuple[str, ...] = ("Gemini 3 Flash",)
 
+# Discuss-mode research policy values (#477). The CLI flag choices, the config
+# validation, and the prompt builders all derive from this set.
+DISCUSS_RESEARCH_MODES: frozenset[str] = frozenset({"none", "required", "auto"})
+
 
 @dataclass(frozen=True)
 class AgentLoopConfig:
@@ -100,6 +104,10 @@ class AgentLoopConfig:
     # Optional analyzer agent for discuss mode (#467). None keeps plain
     # direct deliberation unchanged. May coincide with a reviewer.
     discuss_analyzer: AgentName | None = None
+    # Discuss-mode research policy (#477): "none" forbids online research,
+    # "required" enforces sourced external facts from every debater, "auto"
+    # lets debaters/analyzer decide using conservative triggers.
+    discuss_research: str = "none"
 
     def __post_init__(self) -> None:
         if isinstance(self.reviewer, str):
@@ -123,6 +131,9 @@ class AgentLoopConfig:
             raise AgentLoopError("--planning-context-mode must be either 'full' or 'compact'.")
         if self.pr_review_context_mode not in {"full", "compact"}:
             raise AgentLoopError("--pr-review-context-mode must be either 'full' or 'compact'.")
+        if self.discuss_research not in DISCUSS_RESEARCH_MODES:
+            rendered = ", ".join(f"'{mode}'" for mode in sorted(DISCUSS_RESEARCH_MODES))
+            raise AgentLoopError(f"--discuss-research must be one of: {rendered}.")
 
 
 def reviewers(config: AgentLoopConfig) -> tuple[AgentName, ...]:
@@ -763,6 +774,7 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
         repair_models=tuple(getattr(args, "repair_model", None) or DEFAULT_REPAIR_MODELS),
         repair_timeout_seconds=getattr(args, "repair_timeout_seconds", 120),
         discuss_analyzer=getattr(args, "discuss_analyzer", None),
+        discuss_research=getattr(args, "discuss_research", "none") or "none",
         test_command=test_command,
         pre_review_tests=args.pre_review_tests,
         ci_check_name=args.ci_check_name,

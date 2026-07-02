@@ -639,6 +639,13 @@ _DISCUSS_OUTCOME_LABELS = {
     "split": "Split",
 }
 
+_DISCUSS_RESEARCH_STATUS_LABELS = {
+    "sourced": "done, sourced facts cited below",
+    "not-needed": "not needed (no external-fact trigger applies)",
+    "unavailable": "unavailable — related claims are judgment, not sourced fact",
+    "inconclusive": "inconclusive — related claims are judgment, not sourced fact",
+}
+
 
 def _render_public_discuss_review_comment(
     parsed: ParsedDiscussReview,
@@ -667,6 +674,14 @@ def _render_public_discuss_review_comment(
     if parsed.split_proposals:
         proposals = "\n".join(f"- {proposal}" for proposal in parsed.split_proposals)
         sections.append("### Proposed sub-issues\n\n" + proposals)
+    if parsed.research_status is not None:
+        label = _DISCUSS_RESEARCH_STATUS_LABELS.get(parsed.research_status, parsed.research_status)
+        sections.append(f"**Research:** {label} (`{parsed.research_status}`)")
+    if parsed.sourced_facts:
+        facts = "\n".join(
+            f"- {fact.fact} — source: {fact.source}" for fact in parsed.sourced_facts
+        )
+        sections.append("### Sourced facts\n\n" + facts)
     sections.append(f"-- {_comment_signature(reviewer, config, model_used)}")
     return "\n\n".join(section for section in sections if section)
 
@@ -696,6 +711,80 @@ def _render_analyzer_agenda_lines(agenda: ParsedDiscussAgenda) -> list[str]:
             lines.append("")
         lines.append("Missing facts:")
         lines.extend(f"- {fact}" for fact in agenda.missing_facts)
+    if agenda.research_required and agenda.research_questions:
+        if lines:
+            lines.append("")
+        lines.append("Research brief for the next round (answer with cited sources):")
+        lines.extend(f"- {question}" for question in agenda.research_questions)
+    return lines
+
+
+def _render_discuss_research_section(
+    *,
+    research_mode: str,
+    reviewer_votes: Sequence[ParsedDiscussReview],
+    round_history: Sequence[Sequence[ParsedDiscussReview]] | None,
+) -> list[str]:
+    """Render the final-summary research section (#477).
+
+    Keeps debater-cited external facts distinct from agent judgment, and makes
+    missing, unavailable, or inconclusive research explicit instead of letting
+    stale assumptions read as fact.
+    """
+    lines = ["### Research", "", f"Research policy: `{research_mode}`."]
+    if research_mode == "none":
+        lines.append("")
+        lines.append("Online research was disabled; all positions are agent judgment.")
+        return lines
+    lines.append("")
+    for vote in reviewer_votes:
+        if vote.research_status is None:
+            lines.append(f"- {vote.reviewer}: no research status reported")
+        else:
+            label = _DISCUSS_RESEARCH_STATUS_LABELS.get(
+                vote.research_status, vote.research_status
+            )
+            lines.append(f"- {vote.reviewer}: {label} (`{vote.research_status}`)")
+    fact_rounds = round_history if round_history else [reviewer_votes]
+    sourced: list[str] = []
+    seen: set[tuple[str, str, str]] = set()
+    for votes in fact_rounds:
+        for vote in votes:
+            for fact in vote.sourced_facts:
+                key = (vote.reviewer, fact.fact, fact.source)
+                if key not in seen:
+                    seen.add(key)
+                    sourced.append(f"- {vote.reviewer}: {fact.fact} — source: {fact.source}")
+    if sourced:
+        lines.append("")
+        lines.append(
+            "Sourced facts cited by debaters (everything else above is agent judgment):"
+        )
+        lines.extend(sourced)
+    statuses = [vote.research_status for vote in reviewer_votes]
+    if statuses and all(status == "not-needed" for status in statuses):
+        lines.append("")
+        lines.append(
+            "All debaters determined external research was unnecessary for this question."
+        )
+    gap_reviewers = [
+        vote.reviewer
+        for vote in reviewer_votes
+        if vote.research_status in {"unavailable", "inconclusive"}
+    ]
+    if gap_reviewers:
+        lines.append("")
+        lines.append(
+            f"Research was unavailable or inconclusive for {', '.join(gap_reviewers)}; "
+            "treat their related claims as judgment, not sourced fact."
+        )
+    unreported = [vote.reviewer for vote in reviewer_votes if vote.research_status is None]
+    if unreported:
+        lines.append("")
+        lines.append(
+            f"No research status was reported by {', '.join(unreported)}; treat their "
+            "claims as judgment, not sourced fact."
+        )
     return lines
 
 
@@ -711,6 +800,7 @@ def render_discuss_round_summary_comment(
     split_proposals: Sequence[str] | None = None,
     analyzer_agenda: ParsedDiscussAgenda | None = None,
     analyzer_name: str | None = None,
+    research_mode: str | None = None,
 ) -> str:
     """Render the orchestrator/analyzer round-summary comment.
 
@@ -812,6 +902,15 @@ def render_discuss_round_summary_comment(
         lines.append("")
         agenda_lines = _render_analyzer_agenda_lines(analyzer_agenda)
         lines.extend(agenda_lines if agenda_lines else ["(the analyzer extracted no points)"])
+    if research_mode is not None:
+        lines.append("")
+        lines.extend(
+            _render_discuss_research_section(
+                research_mode=research_mode,
+                reviewer_votes=reviewer_votes,
+                round_history=round_history,
+            )
+        )
     if round_history:
         lines.append("")
         lines.append("### Round history")
