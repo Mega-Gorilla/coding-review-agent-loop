@@ -69,14 +69,33 @@ def _pending_ci_stop_message(pr_number: int, state: str, details: list[str]) -> 
     lines = [
         headline,
         "",
-        "This is an external wait, not actionable coder feedback, so no new follow-up "
-        "round was started. Rerun once GitHub checks complete (or check status can be "
-        "confirmed) to finish approval.",
+        _pending_ci_stop_guidance(state),
         "",
     ]
     lines.extend(f"- {detail}" for detail in details)
     lines.extend(["", "-- coding-review-agent-loop"])
     return "\n".join(lines)
+
+
+def _pending_ci_status_summary(state: str) -> str:
+    return {
+        "pending": "GitHub checks are still pending",
+        "unavailable": "GitHub check status is unavailable",
+    }[state]
+
+
+def _pending_ci_stop_guidance(state: str) -> str:
+    wait = {
+        "pending": "Wait for CI.",
+        "unavailable": "Wait for GitHub check status to become available.",
+    }[state]
+    return (
+        "This run cannot confirm the PR is merge-ready yet because "
+        f"{_pending_ci_status_summary(state)}. "
+        f"{wait} If checks pass, you can merge manually; no rerun is required. "
+        "Rerun only if you want agent-loop to re-check or automate the final step. "
+        "If checks fail, inspect/fix the failure or rerun so the loop can drive a fix."
+    )
 
 
 def _pr_check_details(pr_checks: PullRequestChecks) -> list[str]:

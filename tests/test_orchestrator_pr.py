@@ -58,6 +58,17 @@ from agent_loop_helpers import (
 )
 
 
+def _assert_pending_ci_stop_guidance(text):
+    assert "If checks pass, you can merge manually; no rerun is required." in text
+    assert (
+        "Rerun only if you want agent-loop to re-check or automate the final step."
+        in text
+    )
+    assert "If checks fail, inspect/fix the failure or rerun so the loop can drive a fix." in text
+    assert "Rerun after CI completes." not in text
+    assert "Rerun once GitHub checks complete" not in text
+
+
 def test_pr_loop_runs_tests_and_merge_only_after_codex_approval(tmp_path):
     runner = FakeRunner(codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"])
     config = make_config(
@@ -787,6 +798,8 @@ def test_pr_loop_downgrades_pending_ci_only_blocking_review_without_auto_merge(t
     assert "### Blocking issues" not in review_comment
     stop_comment = runner.comments[-1]
     assert stop_comment.startswith("Reviewers approved PR #77, but GitHub checks are still pending.")
+    _assert_pending_ci_stop_guidance(stop_comment)
+    assert "Required checks not yet reporting: test" in stop_comment
 
 def test_pr_loop_downgrades_pending_ci_only_blocking_review_with_auto_merge(tmp_path):
     runner = FakeRunner(
@@ -848,7 +861,7 @@ def test_pr_loop_keeps_blocking_review_when_mixed_with_real_finding(tmp_path):
     followup_prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"])
     assert "Missing null check in models.py" in followup_prompt
 
-def test_pr_loop_stops_gracefully_when_github_checks_pending_without_auto_merge(tmp_path):
+def test_pr_loop_stops_gracefully_when_github_checks_pending_without_auto_merge(tmp_path, capsys):
     runner = FakeRunner(
         codex_outputs=["Looks good locally.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
         pr_check_runs_payload={"check_runs": []},
@@ -865,8 +878,16 @@ def test_pr_loop_stops_gracefully_when_github_checks_pending_without_auto_merge(
     )
     stop_comment = runner.comments[-1]
     assert stop_comment.startswith("Reviewers approved PR #77, but GitHub checks are still pending.")
-    assert "external wait" in stop_comment
+    _assert_pending_ci_stop_guidance(stop_comment)
     assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+    captured = capsys.readouterr()
+    assert (
+        "PR #77 was approved by Codex, but GitHub checks are still pending. "
+        "This run cannot confirm the PR is merge-ready yet because GitHub checks "
+        "are still pending."
+        in captured.out
+    )
+    _assert_pending_ci_stop_guidance(captured.out)
 
 def test_pr_loop_summarizes_approved_followups_before_pending_check_stop(tmp_path):
     runner = FakeRunner(
@@ -888,6 +909,7 @@ def test_pr_loop_summarizes_approved_followups_before_pending_check_stop(tmp_pat
     assert "<!-- AGENT_APPROVED_FOLLOWUPS: pr=77 head=abc123 mode=summarize -->" in runner.comments[1]
     assert runner.comments[2].startswith("GitHub PR checks are still pending for PR #77.")
     assert runner.comments[3].startswith("Reviewers approved PR #77, but GitHub checks are still pending.")
+    _assert_pending_ci_stop_guidance(runner.comments[3])
 
 def test_pr_loop_summary_marker_has_single_blank_line_before_footer_marker(tmp_path):
     runner = FakeRunner(
@@ -934,6 +956,9 @@ def test_pr_loop_creates_approved_followup_issues_before_unavailable_check_stop(
     assert runner.comments[3].startswith(
         "Reviewers approved PR #77, but GitHub check status is unavailable."
     )
+    assert "because GitHub check status is unavailable" in runner.comments[3]
+    assert "Wait for GitHub check status to become available." in runner.comments[3]
+    _assert_pending_ci_stop_guidance(runner.comments[3])
 
 def test_pr_loop_skips_duplicate_approved_followup_issue_creation_when_marker_exists(tmp_path):
     runner = FakeRunner(
@@ -3685,4 +3710,3 @@ def test_pr_loop_dispute_note_is_visible_to_reviewer_in_next_round(tmp_path):
     )
     assert disputed_item is not None
     assert any(CODER_DISPUTE_NOTE_PREFIX in note for note in disputed_item.notes)
-

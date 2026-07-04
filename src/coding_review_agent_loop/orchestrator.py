@@ -165,6 +165,8 @@ from .workdir_guard import (
 )
 from .checks import (
     _format_pr_checks_comment,
+    _pending_ci_status_summary,
+    _pending_ci_stop_guidance,
     _pending_ci_stop_message,
     _pr_check_blocking_review,
     _pr_check_details,
@@ -4216,9 +4218,10 @@ def run_pr_loop(
                                 "coder follow-up round",
                             )
                             print(
-                                f"PR #{pr_number} approved by "
-                                f"{format_agent_list(configured_reviewers)}; GitHub checks are "
-                                f"{pr_checks.state}. Rerun after CI completes."
+                                f"PR #{pr_number} was approved by "
+                                f"{format_agent_list(configured_reviewers)}, but "
+                                f"{_pending_ci_status_summary(pr_checks.state)}. "
+                                f"{_pending_ci_stop_guidance(pr_checks.state)}"
                             )
                             return 0
                         # --auto-merge: post the informational comment, then fall
