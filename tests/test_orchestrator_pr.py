@@ -59,6 +59,7 @@ from agent_loop_helpers import (
 
 
 def _assert_pending_ci_stop_guidance(text):
+    assert "This run cannot confirm the PR is merge-ready yet." in text
     assert "If checks pass, you can merge manually; no rerun is required." in text
     assert (
         "Rerun only if you want agent-loop to re-check or automate the final step."
@@ -67,6 +68,8 @@ def _assert_pending_ci_stop_guidance(text):
     assert "If checks fail, inspect/fix the failure or rerun so the loop can drive a fix." in text
     assert "Rerun after CI completes." not in text
     assert "Rerun once GitHub checks complete" not in text
+    assert "because GitHub checks are still pending" not in text
+    assert "because GitHub check status is unavailable" not in text
 
 
 def test_pr_loop_runs_tests_and_merge_only_after_codex_approval(tmp_path):
@@ -883,8 +886,7 @@ def test_pr_loop_stops_gracefully_when_github_checks_pending_without_auto_merge(
     captured = capsys.readouterr()
     assert (
         "PR #77 was approved by Codex, but GitHub checks are still pending. "
-        "This run cannot confirm the PR is merge-ready yet because GitHub checks "
-        "are still pending."
+        "This run cannot confirm the PR is merge-ready yet."
         in captured.out
     )
     _assert_pending_ci_stop_guidance(captured.out)
@@ -956,7 +958,6 @@ def test_pr_loop_creates_approved_followup_issues_before_unavailable_check_stop(
     assert runner.comments[3].startswith(
         "Reviewers approved PR #77, but GitHub check status is unavailable."
     )
-    assert "because GitHub check status is unavailable" in runner.comments[3]
     assert "Wait for GitHub check status to become available." in runner.comments[3]
     _assert_pending_ci_stop_guidance(runner.comments[3])
 

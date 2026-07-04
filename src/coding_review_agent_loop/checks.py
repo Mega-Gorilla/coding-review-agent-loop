@@ -90,8 +90,7 @@ def _pending_ci_stop_guidance(state: str) -> str:
         "unavailable": "Wait for GitHub check status to become available.",
     }[state]
     return (
-        "This run cannot confirm the PR is merge-ready yet because "
-        f"{_pending_ci_status_summary(state)}. "
+        "This run cannot confirm the PR is merge-ready yet. "
         f"{wait} If checks pass, you can merge manually; no rerun is required. "
         "Rerun only if you want agent-loop to re-check or automate the final step. "
         "If checks fail, inspect/fix the failure or rerun so the loop can drive a fix."
