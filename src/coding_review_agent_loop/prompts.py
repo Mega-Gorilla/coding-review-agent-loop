@@ -54,6 +54,20 @@ class CompactPrReviewTailContext:
     action: str | None = None
 
 
+@dataclass(frozen=True)
+class StagedImplementationTarget:
+    """Implementation handoff onto one stage of a split/staged issue (#476).
+
+    `child_issue` is the resolved child issue this PR should close, when a
+    prior discuss split already materialized child issues for every proposal.
+    It is None when stages remain only as declared `deferred_stages` that
+    have not (yet) been filed as GitHub issues.
+    """
+
+    parent_issue: int
+    child_issue: int | None = None
+
+
 def format_agent_list(agents: Sequence[AgentName]) -> str:
     names = [agent_display_name(agent) for agent in agents]
     if len(names) == 1:
@@ -717,6 +731,19 @@ object.
 """
 
 
+def _deferred_stages_field_guidance() -> str:
+    return (
+        "If the revised plan intentionally narrows scope and defers stages of the issue to "
+        "separate follow-up issues, declare every deferred stage in the optional "
+        '`deferred_stages` field: `"deferred_stages": [{"title": "Stage name", '
+        '"summary": "What the deferred stage covers."}]`. Declared stages are '
+        "tracked mechanically at plan approval (filed as child issues, or explicitly "
+        "warned about if `--materialize-split-issues` is not set); scope narrowing described "
+        "only in prose leaves follow-up stages untracked and can let a PR close the parent "
+        "issue while real scope remains unimplemented.\n"
+    )
+
+
 def _plan_revision_schema_and_rules() -> str:
     return """Plan revision response protocol
 
@@ -762,7 +789,8 @@ after the JSON object and before the `AGENT_PLAN_STATE` footer. Otherwise, put
 the `AGENT_PLAN_STATE` footer immediately after the JSON. Make the footer state
 match the JSON state, and include only your standalone signature after the
 footer.
-"""
+
+""" + _deferred_stages_field_guidance()
 
 
 def _compact_plan_stable_prefix(
@@ -835,6 +863,24 @@ def _issue_pr_reference_guidance(issue_number: int) -> str:
     return (
         f"In the pull request body, include `Fixes #{issue_number}` or another direct "
         f"reference to issue #{issue_number} so GitHub links the PR back to the issue.\n"
+    )
+
+
+def _staged_issue_pr_reference_guidance(target: StagedImplementationTarget) -> str:
+    if target.child_issue is not None:
+        return (
+            f"This issue has follow-up stages tracked separately from the one you are "
+            f"implementing. In the pull request body, include `Closes #{target.child_issue}` "
+            f"(the stage you are implementing) and `Refs #{target.parent_issue}`. Do NOT use "
+            f"`Fixes`/`Closes`/`Resolves` against #{target.parent_issue} itself — other stages "
+            "of it remain unimplemented and must not be auto-closed by this PR.\n"
+        )
+    return (
+        f"This issue has follow-up stages that are tracked separately (declared as deferred "
+        f"stages, not yet filed as GitHub issues). In the pull request body, include "
+        f"`Refs #{target.parent_issue}`. Do NOT use `Fixes`/`Closes`/`Resolves` against "
+        f"#{target.parent_issue} — other stages of it remain unimplemented and must not be "
+        "auto-closed by this PR.\n"
     )
 
 
@@ -1424,6 +1470,7 @@ def build_issue_implementation_prompt(
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
     salvage_summary: str | None = None,
+    staged_target: StagedImplementationTarget | None = None,
 ) -> str:
     reviewer_name = format_agent_list(reviewers(config))
     coder_signature = agent_signature(config.coder, config)
@@ -1431,6 +1478,11 @@ def build_issue_implementation_prompt(
         issue_context,
         requirement_scope="implementation requirements",
         full_omission_fallback="Fetch the issue discussion directly before implementing.",
+    )
+    reference_guidance = (
+        _staged_issue_pr_reference_guidance(staged_target)
+        if staged_target is not None
+        else _issue_pr_reference_guidance(issue_number)
     )
     return f"""Implement the approved plan for GitHub issue #{issue_number} in {config.repo}.
 
@@ -1440,7 +1492,7 @@ approved plan, run relevant tests, commit, push, and open a pull request against
 {_coder_workdir_guidance(config)}
 {_scratch_file_guidance()}
 {_coder_test_reporting_guidance()}{_coder_documentation_guidance()}
-{_issue_pr_reference_guidance(issue_number)}
+{reference_guidance}
 {human_requirements_context.block}{_coder_human_requirements_guidance(
     human_requirements_context,
     requirement_label="implementation requirements",

@@ -553,6 +553,59 @@ Two companion flags apply in both sequential and parallel discuss runs:
     vote can never match real outcomes — so a partial final round ends in a
     `needs-human` deadlock, with the failures noted in the summary.
 
+### Materializing split follow-ups
+
+When a discuss consensus is `split`, or an approved plan intentionally
+narrows scope and declares `deferred_stages`, the proposed follow-up work
+otherwise survives only as prose in a comment. `--materialize-split-issues`
+files each remaining stage as its own child GitHub issue instead:
+
+```bash
+agent-loop discuss 123 --repo OWNER/REPO --materialize-split-issues
+agent-loop issue 123 --repo OWNER/REPO --plan-first --implement-after-approval \
+  --materialize-split-issues
+```
+
+- Default is off. Without the flag, the final discuss summary and the
+  plan-approval summary both post an explicit warning that split follow-ups
+  remain **unfiled**, so the #467/#474 scenario (a first-stage PR landing
+  while later stages are only described in comments) can't happen silently.
+- Each child issue gets a deterministic title `[#<parent> stage] <title>`, a
+  `Part of #<parent>` reference, the split rationale, sibling links, and a
+  durable `<!-- AGENT_SPLIT_CHILD: parent=<N> key=<hash> -->` body marker.
+  The parent records everything in a single `<!-- AGENT_DISCUSS_SPLIT: ... -->`
+  comment marker.
+- **Idempotent reruns**: a rerun first looks for the parent's
+  `AGENT_DISCUSS_SPLIT` marker (matched by parent issue number, not subject —
+  so materializing follow-up comments on the parent don't themselves cause a
+  subject-hash rerun of the whole debate). If no parent marker is found yet,
+  it searches `gh issue list --search` for children matching the deterministic
+  title/marker before creating anything, so a crash between creating a child
+  issue and posting the parent marker never produces a duplicate. Proposals
+  whose normalized text already matches an existing child are treated as
+  already filed.
+- **Only remaining stages are ever materialized.** A discuss run implements
+  nothing, so every merged proposal is filed. A plan-first run only files the
+  plan's declared `deferred_stages` — the stage the plan itself implements is
+  never filed as a child of itself.
+- **`deferred_stages`**: when a plan revision or plan-state response narrows
+  scope, the coder declares every deferred stage in a structured
+  `deferred_stages` field (`{"title": ..., "summary": ...}`), which the
+  orchestrator renders into a `### Deferred stages (not in this plan)` section
+  of the canonical plan. This is a purely additive, optional field — plans
+  without it behave exactly as before.
+- **Selected-stage handoff**: once a parent's split proposals are fully
+  materialized, an `implement-one-shot` run must resolve which child issue
+  the approved plan implements. If exactly one child was ever materialized,
+  it's chosen automatically; otherwise pass `--split-stage <child-issue>`
+  explicitly. The resolution is recorded in an
+  `<!-- AGENT_SPLIT_STAGE_HANDOFF: ... -->` parent comment so reruns don't
+  re-resolve it, and the coder is instructed to write `Closes #<child>` plus
+  `Refs #<parent>` in the PR body — never a closing keyword against the
+  parent, since other stages of it remain unimplemented. The orchestrator
+  enforces this: a PR body that uses `Fixes`/`Closes`/`Resolves` against the
+  parent while stages remain is rejected until the description is edited.
+
 If `--repo` is omitted, the tool runs `gh repo view` from the current working
 directory, or from `--codex-dir` when that flag is provided, and uses the
 detected `OWNER/REPO`. Pass `--repo` explicitly when running outside the target

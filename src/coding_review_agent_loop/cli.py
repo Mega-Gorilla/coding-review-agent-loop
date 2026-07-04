@@ -398,6 +398,27 @@ def build_parser() -> argparse.ArgumentParser:
             "Defaults to plan-only unless --implement-after-approval is used."
         ),
     )
+    issue.add_argument(
+        "--materialize-split-issues",
+        action="store_true",
+        help=(
+            "File split follow-up stages (from a prior discuss split consensus or the "
+            "approved plan's declared deferred stages) as child GitHub issues before "
+            "implementation. Default off: unfiled stages are surfaced as explicit "
+            "warnings instead."
+        ),
+    )
+    issue.add_argument(
+        "--split-stage",
+        type=int,
+        default=None,
+        metavar="CHILD_ISSUE",
+        help=(
+            "With --plan-first implementation on a parent whose split children were "
+            "already materialized, declare which child issue the approved plan "
+            "implements instead of relying on title matching."
+        ),
+    )
     add_common(issue)
 
     pr = subparsers.add_parser("pr", help="Run the reviewer/coder loop on an existing PR.")
@@ -476,6 +497,16 @@ def build_parser() -> argparse.ArgumentParser:
             "analyzer and summary still run only after every debater finishes "
             "(or the failure policy fires). Requires a distinct workdir per "
             "debater, even with --allow-shared-dir."
+        ),
+    )
+    discuss.add_argument(
+        "--materialize-split-issues",
+        action="store_true",
+        help=(
+            "When the discuss consensus is `split`, create one child GitHub issue per "
+            "proposed sub-issue and record them on the parent. Default off: the final "
+            "summary warns that split follow-ups remain unfiled. Rerunning on an issue "
+            "that already reached a split consensus materializes idempotently."
         ),
     )
     discuss.add_argument(

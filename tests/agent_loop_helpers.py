@@ -233,6 +233,7 @@ class FakeRunner(Runner):
         issue_urls=None,
         public_response_outputs=None,
         advance_git_head_on_pr=True,
+        search_issues_results=None,
     ):
         super().__init__(dry_run=False)
         self.claude_outputs = list(claude_outputs or [])
@@ -309,6 +310,7 @@ class FakeRunner(Runner):
         self.post_agent_git_diff_check_returncode = post_agent_git_diff_check_returncode
         self.post_agent_git_diff_check_stderr = post_agent_git_diff_check_stderr
         self.issue_urls = list(issue_urls) if issue_urls is not None else None
+        self.search_issues_results = list(search_issues_results or [])
         self.public_response_outputs = list(public_response_outputs or [])
         self.advance_git_head_on_pr = advance_git_head_on_pr
         self._agent_pr_counter = 0
@@ -665,6 +667,9 @@ class FakeRunner(Runner):
             )
             return CommandResult(cmd, cwd_path, "", "", 0)
 
+        if cmd[:3] == ["gh", "issue", "list"]:
+            return CommandResult(cmd, cwd_path, json_dumps(self.search_issues_results), "", 0)
+
         if cmd[:3] == ["gh", "issue", "create"]:
             title = cmd[cmd.index("--title") + 1]
             if "--body-file" in cmd:
@@ -912,18 +917,20 @@ def structured_plan_revision(
     plan_steps: list[str] | None = None,
     reviewer: str = "Anthropic Claude",
     human_requirements: str = "",
+    deferred_stages: list[dict[str, str]] | None = None,
 ) -> str:
+    payload = {
+        "schema_version": 1,
+        "kind": "plan_revision",
+        "state": "blocking",
+        "summary": summary,
+        "prior_plan_item_dispositions": prior_plan_item_dispositions or [],
+        "plan_steps": plan_steps or ["Update the plan.", "Run the relevant tests."],
+    }
+    if deferred_stages is not None:
+        payload["deferred_stages"] = deferred_stages
     return (
-        json.dumps(
-            {
-                "schema_version": 1,
-                "kind": "plan_revision",
-                "state": "blocking",
-                "summary": summary,
-                "prior_plan_item_dispositions": prior_plan_item_dispositions or [],
-                "plan_steps": plan_steps or ["Update the plan.", "Run the relevant tests."],
-            }
-        )
+        json.dumps(payload)
         + human_requirements
         + "\n<!-- AGENT_PLAN_STATE: blocking -->\n"
         + f"-- {reviewer}"
@@ -936,17 +943,19 @@ def structured_plan_state(
     summary: str = "Implementation plan.",
     plan_steps: list[str] | None = None,
     reviewer: str = "Anthropic Claude",
+    deferred_stages: list[dict[str, str]] | None = None,
 ) -> str:
+    payload = {
+        "schema_version": 1,
+        "kind": "plan_state",
+        "state": state,
+        "summary": summary,
+        "plan_steps": plan_steps or ["Update the code.", "Run the relevant tests."],
+    }
+    if deferred_stages is not None:
+        payload["deferred_stages"] = deferred_stages
     return (
-        json.dumps(
-            {
-                "schema_version": 1,
-                "kind": "plan_state",
-                "state": state,
-                "summary": summary,
-                "plan_steps": plan_steps or ["Update the code.", "Run the relevant tests."],
-            }
-        )
+        json.dumps(payload)
         + f"\n<!-- AGENT_PLAN_STATE: {state} -->\n"
         + f"-- {reviewer}"
     )

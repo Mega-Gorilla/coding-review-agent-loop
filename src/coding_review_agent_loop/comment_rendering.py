@@ -16,6 +16,7 @@ from .protocol import (
     PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE,
     PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE,
     SIGNATURE_RE,
+    DeferredStage,
     ParsedDiscussAgenda,
     ParsedDiscussReview,
     ParsedPlanReview,
@@ -207,6 +208,20 @@ def render_canonical_plan_steps(plan_steps: Sequence[str]) -> str:
     return "\n".join(f"{index}. {step}" for index, step in enumerate(plan_steps, start=1))
 
 
+def render_deferred_stages_section(deferred_stages: Sequence[DeferredStage]) -> str:
+    """Render declared deferred stages into the canonical plan markdown (#476).
+
+    The section rides along in stored plan state and subject hashing so plan
+    approval can materialize or warn about the stages the plan leaves out.
+    """
+    return "\n".join(
+        [
+            "### Deferred stages (not in this plan)",
+            *[f"- {stage.title}: {stage.summary}" for stage in deferred_stages],
+        ]
+    )
+
+
 def render_canonical_plan_revision(
     parsed_revision: StructuredPlanRevision,
     prior_items: Sequence[UnresolvedReviewItem],
@@ -232,6 +247,8 @@ def render_canonical_plan_revision(
             ]
         )
     )
+    if parsed_revision.deferred_stages:
+        sections.append(render_deferred_stages_section(parsed_revision.deferred_stages))
     return "\n\n".join(sections)
 
 
@@ -506,6 +523,9 @@ def _render_public_plan_state_comment(
         "## Plan",
         parsed_plan.summary.strip(),
         "\n".join(["### Plan steps", render_canonical_plan_steps(parsed_plan.plan_steps)]),
+        render_deferred_stages_section(parsed_plan.deferred_stages)
+        if parsed_plan.deferred_stages
+        else "",
         f"<!-- AGENT_PLAN_STATE: {parsed_plan.state} -->",
         f"-- {_comment_signature(agent, config, model_used)}",
     ]
@@ -822,6 +842,7 @@ def render_discuss_round_summary_comment(
     analyzer_name: str | None = None,
     research_mode: str | None = None,
     failed_debaters: Sequence[tuple[str, str]] = (),
+    unfiled_split_warning: str | None = None,
 ) -> str:
     """Render the orchestrator/analyzer round-summary comment.
 
@@ -910,6 +931,9 @@ def render_discuss_round_summary_comment(
         lines.append("")
         for proposal in split_proposals:
             lines.append(f"- {proposal}")
+    if unfiled_split_warning:
+        lines.append("")
+        lines.append(unfiled_split_warning)
     if analyzer_agenda is not None:
         heading = "### Analyzer-extracted consensus (not debater-confirmed)"
         if analyzer_name:

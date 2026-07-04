@@ -86,9 +86,23 @@ class PullRequestChecks:
     branch_protection_note: str | None = None
 
 
+@dataclass(frozen=True)
+class FoundIssue:
+    number: int | None
+    title: str
+    url: str | None
+    body: str | None
+
+
 PR_METADATA_FIELDS = "number,title,headRefName,baseRefName,headRefOid,url,body"
 PR_REVIEW_CONTEXT_FIELDS = f"{PR_METADATA_FIELDS},comments,reviews"
 ISSUE_REFERENCE_RE_TEMPLATE = r"(?:#%d\b|/issues/%d\b)"
+# GitHub closing keywords (close/fix/resolve families) followed by an issue
+# reference; matching either `#N` (optionally repo-qualified) or the issue URL.
+ISSUE_CLOSING_REFERENCE_RE_TEMPLATE = (
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s+"
+    r"(?:[\w.-]+/[\w.-]+#%d\b|#%d\b|https?://github\.com/[\w.-]+/[\w.-]+/issues/%d\b)"
+)
 
 
 def detect_repo(runner: Runner, cwd: Path, gh_cmd: str) -> str:
@@ -211,6 +225,102 @@ def validate_pr_references_issue(
         f"issue reference, then rerun the orchestrator as `agent-loop pr {pr_number}` to continue "
         "the review."
     )
+
+
+def validate_pr_body_does_not_close_issue(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    pr_number: int,
+    issue_number: int,
+) -> None:
+    """Reject a PR body that would auto-close a parent issue with remaining stages (#476)."""
+    if config.dry_run:
+        return
+    result = runner.run(
+        [
+            config.gh_cmd,
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            config.repo,
+            "--json",
+            "body,url",
+        ],
+        cwd=active_workdir(config),
+    )
+    data = json.loads(result.stdout or "{}")
+    body = _optional_str(data.get("body")) or ""
+    closing_re = re.compile(
+        ISSUE_CLOSING_REFERENCE_RE_TEMPLATE % (issue_number, issue_number, issue_number),
+        re.I,
+    )
+    if not closing_re.search(body):
+        return
+    raise AgentLoopError(
+        f"PR #{pr_number} uses a closing keyword against issue #{issue_number}, but "
+        f"unimplemented stages of #{issue_number} remain tracked separately. "
+        f"Edit the PR description on GitHub to reference the parent with `Refs #{issue_number}` "
+        f"instead of `Fixes`/`Closes`/`Resolves`, then rerun `agent-loop pr {pr_number}` to "
+        "continue the review."
+    )
+
+
+def search_issues(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    search: str,
+    state: str = "all",
+) -> tuple[FoundIssue, ...]:
+    """Search repo issues via `gh issue list --search` (#476).
+
+    Used to recover child issues created before their parent marker comment was
+    posted. Dry-run echoes the command and reports no matches so materialization
+    previews still show the would-be creations.
+    """
+    result = runner.run(
+        [
+            config.gh_cmd,
+            "issue",
+            "list",
+            "--repo",
+            config.repo,
+            "--search",
+            search,
+            "--state",
+            state,
+            "--json",
+            "number,title,url,body",
+        ],
+        cwd=active_workdir(config),
+    )
+    if config.dry_run:
+        return ()
+    raw = (result.stdout or "").strip()
+    if not raw:
+        return ()
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise AgentLoopError("Unable to parse `gh issue list` output while searching issues.") from exc
+    if not isinstance(payload, list):
+        raise AgentLoopError("Unable to parse `gh issue list` output while searching issues.")
+    found: list[FoundIssue] = []
+    for entry in payload:
+        if not isinstance(entry, dict):
+            continue
+        number = entry.get("number")
+        found.append(
+            FoundIssue(
+                number=number if isinstance(number, int) else None,
+                title=_optional_str(entry.get("title")) or "",
+                url=_optional_str(entry.get("url")),
+                body=_optional_str(entry.get("body")),
+            )
+        )
+    return tuple(found)
 
 
 def _parse_pr_metadata(

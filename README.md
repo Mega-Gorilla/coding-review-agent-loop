@@ -255,6 +255,25 @@ over-cap response is rejected and must be consolidated, not truncated. This cap
 is separate from the approved-review follow-up issue cap used by
 `--approved-followups`.
 
+When a discuss `split` consensus or a plan's declared `deferred_stages` leaves
+follow-up scope unfiled, pass `--materialize-split-issues` (to `discuss` or
+`issue --plan-first`) to file one child issue per remaining stage instead of
+leaving it as prose:
+
+```bash
+agent-loop discuss 123 --repo OWNER/REPO --materialize-split-issues
+agent-loop issue 123 --repo OWNER/REPO --plan-first --implement-after-approval \
+  --materialize-split-issues
+```
+
+Default is off; without it, the discuss/plan summaries post an explicit
+warning that follow-ups remain unfiled. Once every proposal has a child
+issue, an `implement-one-shot` run resolves which child the approved plan
+implements (`--split-stage <child-issue>` if more than one was materialized)
+and the coder is instructed to close that child while only referencing — not
+closing — the parent. See `docs/local_agent_loop.md` for the full marker and
+idempotency details.
+
 Provide a one-off task directly when there is no issue yet:
 
 ```bash

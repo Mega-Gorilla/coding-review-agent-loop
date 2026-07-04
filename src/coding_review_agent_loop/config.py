@@ -120,6 +120,12 @@ class AgentLoopConfig:
     # (today's behavior); "partial" continues the round with >= 2 surviving
     # votes and records the failure in the round summary.
     discuss_on_debater_failure: str = "fail"
+    # Materialize split outcomes into child GitHub issues (#476). Default off:
+    # unfiled split follow-ups are surfaced as explicit warnings instead.
+    materialize_split_issues: bool = False
+    # Explicit selected-stage child issue for implement-one-shot on a parent
+    # whose split children were already materialized (#476).
+    split_stage: int | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.reviewer, str):
@@ -151,6 +157,8 @@ class AgentLoopConfig:
             raise AgentLoopError(f"--discuss-on-debater-failure must be one of: {rendered}.")
         if self.discuss_debater_timeout is not None and self.discuss_debater_timeout <= 0:
             raise AgentLoopError("--discuss-debater-timeout must be greater than zero seconds.")
+        if self.split_stage is not None and self.split_stage <= 0:
+            raise AgentLoopError("--split-stage must be a positive issue number.")
 
 
 def reviewers(config: AgentLoopConfig) -> tuple[AgentName, ...]:
@@ -795,6 +803,8 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
         discuss_parallel=getattr(args, "discuss_parallel", False),
         discuss_debater_timeout=getattr(args, "discuss_debater_timeout", None),
         discuss_on_debater_failure=getattr(args, "discuss_on_debater_failure", "fail") or "fail",
+        materialize_split_issues=getattr(args, "materialize_split_issues", False),
+        split_stage=getattr(args, "split_stage", None),
         test_command=test_command,
         pre_review_tests=args.pre_review_tests,
         ci_check_name=args.ci_check_name,

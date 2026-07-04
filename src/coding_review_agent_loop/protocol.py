@@ -69,6 +69,10 @@ HUMAN_REQUIREMENTS_HEADING_RE = _followup_heading_re(r"human requirements")
 PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE = _followup_heading_re(
     r"prior unresolved plan item dispositions"
 )
+DEFERRED_STAGES_HEADING_RE = re.compile(
+    r"^\s*#{2,6}\s+deferred stages\b[^\n]*$",
+    re.I,
+)
 ANY_HEADING_RE = re.compile(r"^\s*#{1,6}\s+\S")
 HTML_COMMENT_RE = re.compile(r"^\s*<!--.*-->\s*$")
 SIGNATURE_RE = re.compile(r"^\s*--\s+\S")
@@ -199,6 +203,19 @@ class StructuredCoderFollowup:
 
 
 @dataclass(frozen=True)
+class DeferredStage:
+    """A stage of the issue the plan intentionally leaves out (#476).
+
+    Declared structurally by the coder when a plan narrows scope, so follow-up
+    stages can be materialized as child issues or explicitly warned about
+    instead of surviving only as prose.
+    """
+
+    title: str
+    summary: str
+
+
+@dataclass(frozen=True)
 class StructuredPlanRevision:
     schema_version: int
     kind: str
@@ -206,6 +223,7 @@ class StructuredPlanRevision:
     summary: str
     prior_plan_item_dispositions: tuple[ReviewItemDisposition, ...]
     plan_steps: tuple[str, ...]
+    deferred_stages: tuple[DeferredStage, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -215,6 +233,7 @@ class StructuredPlanState:
     state: str
     summary: str
     plan_steps: tuple[str, ...]
+    deferred_stages: tuple[DeferredStage, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1377,6 +1396,25 @@ def validate_structured_coder_followup(text: str) -> StructuredCoderFollowup | N
     )
 
 
+def _expect_deferred_stages(value: object, *, context: str) -> tuple[DeferredStage, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise AgentLoopError(f"{context} must be a list of objects.")
+    stages: list[DeferredStage] = []
+    for index, entry in enumerate(value, start=1):
+        entry_context = f"{context}[{index}]"
+        stage = _expect_object(entry, context=entry_context)
+        _expect_exact_keys(stage, context=entry_context, required={"title", "summary"})
+        stages.append(
+            DeferredStage(
+                title=_expect_non_empty_string(stage["title"], context=f"{entry_context}.title"),
+                summary=_expect_non_empty_string(stage["summary"], context=f"{entry_context}.summary"),
+            )
+        )
+    return tuple(stages)
+
+
 def validate_structured_plan_revision(text: str) -> StructuredPlanRevision | None:
     payload = _extract_structured_plan_revision_payload(text)
     if payload is None:
@@ -1396,6 +1434,7 @@ def validate_structured_plan_revision(text: str) -> StructuredPlanRevision | Non
             "prior_plan_item_dispositions",
             "plan_steps",
         },
+        optional={"deferred_stages"},
     )
     state = _expect_non_empty_string(payload["state"], context="plan_revision.state")
     if state != "blocking":
@@ -1421,6 +1460,9 @@ def validate_structured_plan_revision(text: str) -> StructuredPlanRevision | Non
         summary=summary,
         prior_plan_item_dispositions=dispositions,
         plan_steps=plan_steps,
+        deferred_stages=_expect_deferred_stages(
+            payload.get("deferred_stages"), context="plan_revision.deferred_stages"
+        ),
     )
 
 
@@ -1437,7 +1479,7 @@ def validate_structured_plan_state(text: str) -> StructuredPlanState | None:
         payload,
         context="plan_state",
         required={"kind", "summary", "plan_steps"},
-        optional={"schema_version", "state"},
+        optional={"schema_version", "state", "deferred_stages"},
     )
     if "state" in payload:
         _expect_state(payload["state"], context="plan_state.state")
@@ -1452,7 +1494,49 @@ def validate_structured_plan_state(text: str) -> StructuredPlanState | None:
             item_context="plan_state.plan_steps",
             min_length=1,
         ),
+        deferred_stages=_expect_deferred_stages(
+            payload.get("deferred_stages"), context="plan_state.deferred_stages"
+        ),
     )
+
+
+def parse_deferred_stages(plan_text: str) -> tuple[DeferredStage, ...]:
+    """Recover declared deferred stages from stored plan text (#476).
+
+    Stored plan state is either a raw structured plan response (initial
+    `plan_state` JSON) or canonical markdown rendered from a `plan_revision`,
+    where deferred stages appear as bullets under a `### Deferred stages`
+    heading. Freeform plans that adopted the same section parse identically.
+    """
+    for validator in (validate_structured_plan_state, validate_structured_plan_revision):
+        try:
+            parsed = validator(plan_text)
+        except AgentLoopError:
+            parsed = None
+        if parsed is not None:
+            return parsed.deferred_stages
+    stages: list[DeferredStage] = []
+    in_section = False
+    for line in plan_text.splitlines():
+        if DEFERRED_STAGES_HEADING_RE.match(line):
+            in_section = True
+            continue
+        if in_section and (ANY_HEADING_RE.match(line) or SIGNATURE_RE.match(line)):
+            break
+        if not in_section:
+            continue
+        bullet = BULLET_RE.match(line)
+        if bullet is None:
+            continue
+        text = bullet.group("text").strip()
+        if not text:
+            continue
+        title, separator, summary = text.partition(": ")
+        title = title.strip().strip("*").strip()
+        summary = summary.strip() if separator else ""
+        if title:
+            stages.append(DeferredStage(title=title, summary=summary or title))
+    return tuple(stages)
 
 
 def _collect_section_items(
