@@ -11,8 +11,6 @@ from .errors import AgentLoopError
 
 
 TEST_SECTION_RE = re.compile(r"(?im)^\s*tests(?:\s+run)?\s*:\s*(?P<body>.*)$")
-ABSOLUTE_PATH_RE = re.compile(r"(?<![\w.\\<>-])/(?:[^\s`'\"|;&)<>]+)")
-HOME_PATH_RE = re.compile(r"(?<![\w.-])(?:~|\$HOME)/(?:[^\s`'\"|;&)<>]+)")
 WINDOWS_PATH_RE = re.compile(r"(?<![\w.-])[A-Za-z]:\\[^\s`'\"|;&)<>]+")
 
 

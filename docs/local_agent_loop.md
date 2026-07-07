@@ -764,12 +764,20 @@ and to avoid sibling, home, deployment, or duplicate clones such as `~/REPO` or
 `~/claude-code/REPO`.
 
 The orchestrator validates coder-reported test commands before posting normal
-coder progress. If a `Tests:` report or structured `tests_run` entry references
-an absolute, `$HOME`, or `~/` path outside the assigned checkout, the loop fails
-with an `AgentLoopError` naming the offending command and assigned checkout.
-For initial issue, task, and approved-plan implementations, the loop also
-checks that the assigned checkout `HEAD` advanced when the coder reports a PR;
-unchanged `HEAD` is rejected before the coder PR comment is posted.
+coder progress. For `Tests:` reports and structured `tests_run` entries, it
+checks shell tokens that explicitly carry location information, such as `cd
+<path>`, `-C <path>`, `--directory <path>`, `--directory=<path>`, or a command
+token that begins with `/`, `$HOME/`, or `~/`. Prose-only environment details,
+including virtualenv notes or URL-like text, are not treated as test working
+directories. If an explicit test location is outside the assigned checkout, the
+loop fails with an `AgentLoopError` naming the offending command and assigned
+checkout. When that failure happens after a PR was already created or detected,
+the error also confirms the PR state and tells the user to continue with
+`agent-loop pr <number>` instead of rerunning implementation and creating a
+duplicate PR. For initial issue, task, and approved-plan implementations, the
+loop also checks that the assigned checkout `HEAD` advanced when the coder
+reports a PR; unchanged `HEAD` is rejected before the coder PR comment is
+posted.
 
 These temporary checkouts may disappear after reboot or `/tmp` cleanup. Large
 projects and long-lived agent setups should use explicit persistent workdirs to
