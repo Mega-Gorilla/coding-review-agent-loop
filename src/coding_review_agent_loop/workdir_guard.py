@@ -42,8 +42,6 @@ def _normalize_reported_path(raw_path: str) -> Path | None:
 
 
 def _reported_paths(command: str) -> Iterable[str]:
-    yield from HOME_PATH_RE.findall(command)
-    yield from ABSOLUTE_PATH_RE.findall(command)
     yield from WINDOWS_PATH_RE.findall(command)
 
     try:

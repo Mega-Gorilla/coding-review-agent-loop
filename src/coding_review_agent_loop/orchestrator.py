@@ -2613,6 +2613,34 @@ def _read_assigned_workdir_head(runner: Runner, config: AgentLoopConfig) -> str 
     return result.stdout.strip() or None
 
 
+def _validate_response_tests_with_post_pr_context(
+    text: str,
+    *,
+    runner: Runner,
+    config: AgentLoopConfig,
+    pr_number: int,
+) -> None:
+    try:
+        validate_response_tests_within_workdir(text, assigned_workdir=active_workdir(config))
+    except AgentLoopError as exc:
+        try:
+            validate_open_pr(runner, config=config, pr_number=pr_number)
+        except Exception as pr_exc:
+            raise AgentLoopError(
+                f"{exc}\n\n"
+                f"The coder reported PR #{pr_number}, but the orchestrator could not confirm it is open. "
+                "The handoff/reviewer comments were not posted because the test report was invalid. "
+                "Inspect the PR state on GitHub before deciding whether to resume the existing PR or rerun "
+                "implementation."
+            ) from pr_exc
+        raise AgentLoopError(
+            f"{exc}\n\n"
+            f"PR #{pr_number} was confirmed open, but the handoff/reviewer comments were not posted because "
+            "the test report was invalid. Correct the PR/comment if needed, then continue safely with "
+            f"`agent-loop pr {pr_number}` instead of rerunning implementation and creating a duplicate PR."
+        ) from exc
+
+
 def _round_ledger_may_be_incomplete(
     *,
     current_resume: ResumedReviewRound | None,
@@ -2779,13 +2807,18 @@ def _implement_approved_issue(
         operation_description="approved-plan implementation",
     )
     coder_output = coder_response.text
-    validate_response_tests_within_workdir(coder_output, assigned_workdir=active_workdir(implementation_config))
+    pr_number = int(coder_response.marker_value)
+    _validate_response_tests_with_post_pr_context(
+        coder_output,
+        runner=runner,
+        config=implementation_config,
+        pr_number=pr_number,
+    )
     validate_assigned_head_advanced(
         before_head=assigned_head_before,
         after_head=_read_assigned_workdir_head(runner, implementation_config),
         assigned_workdir=active_workdir(implementation_config),
     )
-    pr_number = int(coder_response.marker_value)
     log(config, f"{coder_name} reported PR #{pr_number}; validating it is open")
     validate_open_pr(runner, config=implementation_config, pr_number=pr_number)
     validate_pr_references_issue(
@@ -3780,13 +3813,18 @@ def run_issue_loop(
         )
         coder_output = coder_response.text
         coder_session_id = coder_response.session_id
-        validate_response_tests_within_workdir(coder_output, assigned_workdir=active_workdir(config))
+        pr_number = int(coder_response.marker_value)
+        _validate_response_tests_with_post_pr_context(
+            coder_output,
+            runner=runner,
+            config=config,
+            pr_number=pr_number,
+        )
         validate_assigned_head_advanced(
             before_head=assigned_head_before,
             after_head=_read_assigned_workdir_head(runner, config),
             assigned_workdir=active_workdir(config),
         )
-        pr_number = int(coder_response.marker_value)
         log(config, f"{agent_display_name(config.coder)} reported PR #{pr_number}; validating it is open")
         validate_open_pr(runner, config=config, pr_number=pr_number)
         validate_pr_references_issue(
@@ -3900,13 +3938,18 @@ def run_task_loop(
             session_id = coder_response.session_id
 
             if isinstance(coder_response.marker_value, int):
-                validate_response_tests_within_workdir(coder_output, assigned_workdir=active_workdir(config))
+                pr_number = coder_response.marker_value
+                _validate_response_tests_with_post_pr_context(
+                    coder_output,
+                    runner=runner,
+                    config=config,
+                    pr_number=pr_number,
+                )
                 validate_assigned_head_advanced(
                     before_head=assigned_head_before,
                     after_head=_read_assigned_workdir_head(runner, config),
                     assigned_workdir=active_workdir(config),
                 )
-                pr_number = coder_response.marker_value
                 log(config, f"{coder_name} reported PR #{pr_number}; validating it is open")
                 validate_open_pr(runner, config=config, pr_number=pr_number)
                 initial_pr_metadata = get_pr_review_context(runner, config=config, pr_number=pr_number).metadata
