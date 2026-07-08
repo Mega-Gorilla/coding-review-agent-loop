@@ -11,8 +11,6 @@ from .errors import AgentLoopError
 
 
 TEST_SECTION_RE = re.compile(r"(?im)^\s*tests(?:\s+run)?\s*:\s*(?P<body>.*)$")
-ABSOLUTE_PATH_RE = re.compile(r"(?<![\w.\\<>-])/(?:[^\s`'\"|;&)<>]+)")
-HOME_PATH_RE = re.compile(r"(?<![\w.-])(?:~|\$HOME)/(?:[^\s`'\"|;&)<>]+)")
 WINDOWS_PATH_RE = re.compile(r"(?<![\w.-])[A-Za-z]:\\[^\s`'\"|;&)<>]+")
 
 
@@ -42,8 +40,6 @@ def _normalize_reported_path(raw_path: str) -> Path | None:
 
 
 def _reported_paths(command: str) -> Iterable[str]:
-    yield from HOME_PATH_RE.findall(command)
-    yield from ABSOLUTE_PATH_RE.findall(command)
     yield from WINDOWS_PATH_RE.findall(command)
 
     try:
