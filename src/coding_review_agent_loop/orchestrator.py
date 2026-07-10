@@ -5896,6 +5896,7 @@ def _run_discuss_loop(
                     research_mode=config.discuss_research,
                     failed_debaters=tuple(failed_debaters),
                     split_proposals=tuple(round_split_proposals) if is_final else (),
+                    result_mode=config.discuss_result_mode,
                 ),
             ),
         )

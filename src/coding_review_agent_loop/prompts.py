@@ -2452,6 +2452,13 @@ def build_discuss_review_prompt(
             f"answer={getattr(v, 'answer', None) or '(none)'}; rationale={getattr(v, 'rationale', getattr(v, 'category', ''))}"
             for v in prior_round_votes
         ) or "(no prior round)"
+        analyzer_context = ""
+        if analyzer_agenda is not None:
+            analyzer_context = (
+                "\n\nAnalyzer agenda for the prior round (non-authoritative; verify it "
+                "against the issue and your own reasoning):\n"
+                + "\n".join(_render_discuss_agenda_prompt_block(analyzer_agenda))
+            )
         rebuttal = "omit `rebuttal` in round 1" if round_number == 1 else "include a non-empty `rebuttal` directly addressing the prior round"
         research = _discuss_research_policy_block(research_mode)
         return f"""Evaluate GitHub issue #{issue_number} in {config.repo} as an open-ended system/design question.
@@ -2459,7 +2466,7 @@ def build_discuss_review_prompt(
 Use this local checkout only to inspect context. Do not edit files, create a branch, commit, push, or open a pull request.
 {_issue_context_block(issue_context)}{_memory_block(memory)}
 Prior round positions (the analyzer is non-authoritative; do not treat it as a vote):
-{history}
+{history}{analyzer_context}
 
 Produce the best consensus answer or tradeoff recommendation, not an implementation vote.
 {research}

@@ -214,6 +214,33 @@ def _seed_debater_comment(
     return {"author": {"login": "bot"}, "createdAt": "2026-01-01T00:00:00Z", "body": body}
 
 
+def _seed_answer_debater_comment(
+    *, reviewer: str, round_number: int, subject: str, answer: str,
+    rationale: str = "The evidence supports this recommendation.",
+    rebuttal: str | None = None, config=None,
+) -> dict:
+    vote = ParsedDiscussAnswer(
+        position="answer", rationale=rationale, confidence="medium",
+        open_questions=(), reviewer=reviewer, answer=answer, rebuttal=rebuttal,
+    )
+    raw_text = _discuss_answer_text(
+        answer=answer, rationale=rationale, rebuttal=rebuttal, reviewer=reviewer,
+    )
+    body = render_public_agent_comment(
+        kind="discuss_answer", parsed=vote, agent=reviewer, config=config,
+        round_number=round_number,
+    )
+    body = _attach_round_metadata(
+        body,
+        PostedRoundMetadata(
+            flow="discuss", role="debater", agent=reviewer,
+            round_number=round_number, subject=subject, result_mode="answer",
+            raw_structured_coder_response=raw_text,
+        ),
+    )
+    return {"author": {"login": "bot"}, "createdAt": "2026-01-01T00:00:00Z", "body": body}
+
+
 def _seed_summary_comment(
     *,
     round_number: int,
@@ -336,6 +363,55 @@ def test_discuss_loop_answer_research_required_and_analyzer_prompt_are_mode_awar
     assert run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=0) == 0
     assert "Use an API boundary." in runner.comments[-1]
     assert all('"kind": "discuss_answer"' in " ".join(cmd) for cmd, _ in runner.commands if cmd[:1] in (["codex"], ["gemini"]))
+
+
+def test_discuss_loop_answer_debater_sees_analyzer_agenda_on_rebuttal_round(tmp_path):
+    agenda = _discuss_agenda_text()
+    answer1 = _discuss_answer_text(answer="Use an API.", reviewer="OpenAI Codex")
+    answer2 = _discuss_answer_text(
+        answer="Use an API.", rebuttal="The analyzer's ownership question is resolved by the API boundary.",
+        reviewer="OpenAI Codex",
+    )
+    gemini1 = _discuss_answer_text(answer="Use a library.", reviewer="Google Gemini")
+    gemini2 = _discuss_answer_text(
+        answer="Use an API.", rebuttal="The ownership concern favors an API.", reviewer="Google Gemini",
+    )
+    runner = FakeRunner(
+        codex_outputs=[answer1, answer2], gemini_outputs=[gemini1, gemini2],
+        claude_outputs=[agenda], issue_payload=_grounded_agenda_issue_payload(),
+    )
+    config = make_config(
+        tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer",
+        discuss_analyzer="claude",
+    )
+
+    assert run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=1) == 0
+    round2 = [
+        " ".join(cmd) for cmd, _ in runner.commands
+        if "Analyzer agenda for the prior round" in " ".join(cmd)
+    ]
+    assert len(round2) == 2, runner.commands
+    assert all("Scope of the change" in prompt for prompt in round2)
+    assert all("Would splitting resolve the scope objection?" in prompt for prompt in round2)
+
+
+def test_discuss_loop_resumes_answer_partial_round_and_is_idempotent(tmp_path):
+    subject = _issue_subject()
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer")
+    seeded = _seed_answer_debater_comment(
+        reviewer="Codex", round_number=1, subject=subject,
+        answer="Use an API.", config=config,
+    )
+    answer = _discuss_answer_text(answer="Use an API.", reviewer="Google Gemini")
+    runner = FakeRunner(issue_comments=[seeded], gemini_outputs=[answer])
+
+    assert run_discuss_loop(runner, issue_number=56, config=config) == 0
+    assert not any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
+    assert "Consensus Answer" in runner.comments[-1]
+    comment_count = len(runner.comments)
+
+    assert run_discuss_loop(runner, issue_number=56, config=config) == 0
+    assert len(runner.comments) == comment_count
 
 
 def test_discuss_loop_debates_then_deadlocks_instead_of_veto(tmp_path):
