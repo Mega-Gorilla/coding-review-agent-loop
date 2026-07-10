@@ -107,9 +107,12 @@ from .protocol import (
     DeferredStage,
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
     ParsedDiscussAgenda,
+    ParsedDiscussAnswer,
+    ParsedDiscussResponse,
     ParsedDiscussReview,
     failed_discuss_review_category,
     failed_discuss_review_placeholder,
+    failed_discuss_answer_placeholder,
     ParsedPlanReview,
     ParsedReview,
     PUBLIC_RESPONSE_MARKER,
@@ -135,6 +138,7 @@ from .protocol import (
     validate_structured_plan_revision,
     validate_structured_discuss_agenda,
     validate_structured_discuss_review,
+    validate_structured_discuss_answer,
 )
 from .protocol import parse_review
 from .repair import (
@@ -277,7 +281,7 @@ PUBLIC_RESPONSE_ARTIFACT_PREFIX_RE = re.compile(
     re.I,
 )
 STRUCTURED_PUBLIC_RESPONSE_KINDS = frozenset(
-    {"plan_review", "pr_review", "coder_followup", "plan_revision", "discuss_review"}
+    {"plan_review", "pr_review", "coder_followup", "plan_revision", "discuss_review", "discuss_answer"}
 )
 PLAN_REVISION_FOOTER_RE = re.compile(r"(?m)^<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*-->\s*$")
 STRUCTURED_FENCE_RE = re.compile(
@@ -4893,6 +4897,25 @@ def _detect_discuss_consensus(
     return outcome, split_proposals
 
 
+def _normalize_discuss_answer(answer: str) -> str:
+    return " ".join(answer.strip().split()).casefold()
+
+
+def _detect_discuss_answer_consensus(
+    responses: Sequence[ParsedDiscussAnswer], *, partial: bool = False
+) -> tuple[str, list[str]] | None:
+    if partial or not responses:
+        return None
+    if any(response.position == "needs-human" for response in responses):
+        return "needs-human", []
+    answers = [response.answer for response in responses]
+    if all(answer is not None for answer in answers):
+        normalized = {_normalize_discuss_answer(answer or "") for answer in answers}
+        if len(normalized) == 1:
+            return "answer", []
+    return None
+
+
 def _handle_discuss_split_outcome(
     runner: Runner,
     *,
@@ -5362,12 +5385,14 @@ def _run_discuss_debater_turn(
         config=config,
         prompt=prompt,
         marker_description="<!-- AGENT_PLAN_STATE: approved -->",
-        validate=lambda text, r=reviewer_name, rn=round_number: validate_structured_discuss_review(
-            text, reviewer=r, round_number=rn, research_mode=config.discuss_research
+        validate=lambda text, r=reviewer_name, rn=round_number: (
+            validate_structured_discuss_answer(text, reviewer=r, round_number=rn, research_mode=config.discuss_research)
+            if config.discuss_result_mode == "answer"
+            else validate_structured_discuss_review(text, reviewer=r, round_number=rn, research_mode=config.discuss_research)
         ),
         usage_context=usage_context,
         use_repair=True,
-        repair_expected_kind="discuss_review",
+        repair_expected_kind="discuss_answer" if config.discuss_result_mode == "answer" else "discuss_review",
         role="reviewer",
         label=f"discuss-r{round_number}",
         timeout_seconds=config.discuss_debater_timeout,
@@ -5381,7 +5406,7 @@ def _post_discuss_debater_comment(
     config: AgentLoopConfig,
     issue_number: int,
     reviewer_name: str,
-    parsed: ParsedDiscussReview,
+    parsed: ParsedDiscussResponse,
     response: ValidatedAgentResponse,
     round_number: int,
     subject: str,
@@ -5392,7 +5417,7 @@ def _post_discuss_debater_comment(
         issue_number=issue_number,
         body=_attach_round_metadata(
             render_public_agent_comment(
-                kind="discuss_review",
+                kind="discuss_answer" if config.discuss_result_mode == "answer" else "discuss_review",
                 parsed=parsed,
                 agent=reviewer_name,
                 config=config,
@@ -5408,6 +5433,7 @@ def _post_discuss_debater_comment(
                 raw_structured_coder_response=response.text,
                 model_used=response.model_used,
                 research_mode=config.discuss_research,
+                result_mode=config.discuss_result_mode,
             ),
         ),
     )
@@ -5428,10 +5454,13 @@ def _run_discuss_loop(
     subject = _discuss_subject(issue_context)
     configured_reviewers = list(_reviewers(config))
     resume_state = _resume_discuss_round(
-        issue_context.comments, subject=subject, configured_reviewers=configured_reviewers
+        issue_context.comments, subject=subject, configured_reviewers=configured_reviewers,
+        result_mode=config.discuss_result_mode,
     )
 
     def _resolve_final_split_proposals() -> tuple[list[str], Sequence[ParsedDiscussReview]] | None:
+        if config.discuss_result_mode == "answer":
+            return None
         # Resuming (or already-final) reruns must materialize a split consensus
         # instead of silently skipping (#476): prefer the split proposals
         # recorded directly on the final summary metadata, and fall back to
@@ -5556,6 +5585,7 @@ def _run_discuss_loop(
             analyzer_name=analyzer_name,
             research_mode=config.discuss_research,
             failed_debaters=final_failed_debaters,
+            result_mode=config.discuss_result_mode,
         )
         post_issue_comment(
             runner,
@@ -5675,7 +5705,7 @@ def _run_discuss_loop(
                 turn = turn_results[name]
                 if turn.error is None:
                     parsed = turn.response.marker_value
-                    assert isinstance(parsed, ParsedDiscussReview)
+                    assert isinstance(parsed, (ParsedDiscussReview, ParsedDiscussAnswer))
                     _post_discuss_debater_comment(
                         runner,
                         config=config,
@@ -5731,7 +5761,7 @@ def _run_discuss_loop(
                     )
                     continue
                 parsed = response.marker_value
-                assert isinstance(parsed, ParsedDiscussReview)
+                assert isinstance(parsed, (ParsedDiscussReview, ParsedDiscussAnswer))
                 _post_discuss_debater_comment(
                     runner,
                     config=config,
@@ -5745,7 +5775,7 @@ def _run_discuss_loop(
                 votes_by_name[reviewer_name] = parsed
 
         failed_debaters: list[tuple[str, str]] = []
-        reviewer_votes: list[ParsedDiscussReview] = []
+        reviewer_votes: list[ParsedDiscussResponse] = []
         for reviewer in configured_reviewers:
             reviewer_name = agent_display_name(reviewer)
             vote = votes_by_name.get(reviewer_name)
@@ -5755,7 +5785,11 @@ def _run_discuss_loop(
             failure = failures_by_name[reviewer_name]
             category = failure.failure_category
             failed_debaters.append((reviewer_name, category))
-            reviewer_votes.append(failed_discuss_review_placeholder(reviewer_name, category))
+            reviewer_votes.append(
+                failed_discuss_answer_placeholder(reviewer_name, category)
+                if config.discuss_result_mode == "answer"
+                else failed_discuss_review_placeholder(reviewer_name, category)
+            )
         if failed_debaters:
             # Reached only under the "partial" policy: continue when at least
             # two debaters produced votes; a partial round can never declare
@@ -5774,14 +5808,24 @@ def _run_discuss_loop(
                 + ", ".join(f"{name} ({category})" for name, category in failed_debaters),
             )
         successful_votes = [
-            vote for vote in reviewer_votes if vote.outcome != DISCUSS_FAILED_OUTCOME
+            vote for vote in reviewer_votes
+            if not (isinstance(vote, ParsedDiscussReview) and vote.outcome == DISCUSS_FAILED_OUTCOME)
+            and not isinstance(vote, type(failed_discuss_answer_placeholder("", "")))
         ]
         round_history.append(reviewer_votes)
-        consensus = _detect_discuss_consensus(reviewer_votes)
+        if config.discuss_result_mode == "answer":
+            consensus = _detect_discuss_answer_consensus(
+                [vote for vote in successful_votes if isinstance(vote, ParsedDiscussAnswer)],
+                partial=bool(failed_debaters),
+            )
+        else:
+            consensus = _detect_discuss_consensus(reviewer_votes)  # type: ignore[arg-type]
         is_final = consensus is not None or round_number == max_round_number
         if consensus is None:
-            outcome = "needs-human"
-            round_split_proposals: list[str] = _merge_discuss_split_proposals(successful_votes)
+            outcome = "deadlock" if config.discuss_result_mode == "answer" else "needs-human"
+            round_split_proposals: list[str] = (
+                [] if config.discuss_result_mode == "answer" else _merge_discuss_split_proposals(successful_votes)  # type: ignore[arg-type]
+            )
             consensus_kind = "deadlock" if is_final else None
         else:
             outcome, round_split_proposals = consensus
@@ -5820,6 +5864,7 @@ def _run_discuss_loop(
             analyzer_name=analyzer_name,
             research_mode=config.discuss_research,
             failed_debaters=tuple(failed_debaters),
+            result_mode=config.discuss_result_mode,
         )
         agenda = () if is_final else tuple(_render_discuss_agenda_lines(successful_votes))
         post_issue_comment(

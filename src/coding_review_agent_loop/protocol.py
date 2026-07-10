@@ -244,6 +244,42 @@ class StructuredDiscussReview:
 
 
 @dataclass(frozen=True)
+class StructuredDiscussAnswer:
+    schema_version: int
+    kind: str
+    position: str
+    rationale: str
+    confidence: str
+    open_questions: tuple[str, ...]
+    answer: str | None = None
+    rebuttal: str | None = None
+    analyzer_framing: str | None = None
+    framing_note: str | None = None
+
+
+@dataclass(frozen=True)
+class ParsedDiscussAnswer:
+    position: str
+    rationale: str
+    confidence: str
+    open_questions: tuple[str, ...]
+    reviewer: str
+    answer: str | None = None
+    rebuttal: str | None = None
+    analyzer_framing: str | None = None
+    framing_note: str | None = None
+    research_status: str | None = None
+    sourced_facts: tuple[DiscussSourcedFact, ...] = ()
+
+
+@dataclass(frozen=True)
+class ParsedFailedDiscussResponse:
+    reviewer: str
+    category: str
+    result_mode: str = "triage"
+
+
+@dataclass(frozen=True)
 class DiscussSourcedFact:
     fact: str
     source: str
@@ -262,6 +298,23 @@ class ParsedDiscussReview:
     # `research` object (legacy transcripts and `none`-mode responses).
     research_status: str | None = None
     sourced_facts: tuple[DiscussSourcedFact, ...] = ()
+
+
+ParsedDiscussResponse = ParsedDiscussReview | ParsedDiscussAnswer | ParsedFailedDiscussResponse
+
+
+def is_failed_discuss_response(response: ParsedDiscussResponse) -> bool:
+    return isinstance(response, ParsedFailedDiscussResponse) or (
+        isinstance(response, ParsedDiscussReview) and response.outcome == DISCUSS_FAILED_OUTCOME
+    )
+
+
+def discuss_response_position(response: ParsedDiscussResponse) -> str | None:
+    if isinstance(response, ParsedDiscussAnswer):
+        return response.position
+    if isinstance(response, ParsedDiscussReview):
+        return response.outcome
+    return None
 
 
 DISCUSS_OUTCOME_VALUES = frozenset({"implement", "do-not-implement", "needs-human", "split"})
@@ -288,6 +341,10 @@ def failed_discuss_review_category(vote: ParsedDiscussReview) -> str:
     """Recover the failure category from a placeholder vote's rationale."""
     match = re.fullmatch(r"did not respond this round \((.+)\)", vote.rationale)
     return match.group(1) if match else vote.rationale
+
+
+def failed_discuss_answer_placeholder(reviewer: str, category: str) -> ParsedFailedDiscussResponse:
+    return ParsedFailedDiscussResponse(reviewer=reviewer, category=category, result_mode="answer")
 
 
 @dataclass(frozen=True)
@@ -2045,6 +2102,81 @@ def validate_structured_discuss_review(
     if parsed is not None:
         return parsed
     raise AgentLoopError("Discuss review did not use the required structured format.")
+
+
+DISCUSS_ANSWER_POSITION_VALUES = frozenset({"answer", "needs-human"})
+DISCUSS_ANSWER_CONFIDENCE_VALUES = frozenset({"low", "medium", "high"})
+
+
+def parse_structured_discuss_answer(
+    text: str, *, reviewer: str, round_number: int = 1, research_mode: str | None = None
+) -> ParsedDiscussAnswer | None:
+    payload = _extract_structured_discuss_review_payload(text)
+    if payload is None:
+        return None
+    _require_supported_schema_version(payload)
+    if payload.get("kind") != "discuss_answer":
+        raise AgentLoopError("Structured response kind mismatch: expected `discuss_answer`.")
+    _expect_exact_keys(
+        payload,
+        context="discuss_answer",
+        required={"schema_version", "kind", "position", "rationale", "confidence", "open_questions"},
+        optional={"answer", "rebuttal", "analyzer_framing", "framing_note", "research"},
+    )
+    position = _expect_non_empty_string(payload["position"], context="discuss_answer.position")
+    if position not in DISCUSS_ANSWER_POSITION_VALUES:
+        raise AgentLoopError("discuss_answer.position must be `answer` or `needs-human`.")
+    rationale = _expect_non_empty_string(payload["rationale"], context="discuss_answer.rationale")
+    confidence = _expect_non_empty_string(payload["confidence"], context="discuss_answer.confidence")
+    if confidence not in DISCUSS_ANSWER_CONFIDENCE_VALUES:
+        raise AgentLoopError("discuss_answer.confidence must be one of: low, medium, high.")
+    open_questions = _expect_string_list(
+        payload.get("open_questions", []),
+        context="discuss_answer.open_questions",
+        item_context="discuss_answer.open_questions",
+    )
+    answer = None
+    if "answer" in payload:
+        answer = _expect_non_empty_string(payload["answer"], context="discuss_answer.answer")
+    if position == "answer" and answer is None:
+        raise AgentLoopError("discuss_answer.answer is required when position is `answer`.")
+    if position == "needs-human" and not open_questions:
+        raise AgentLoopError("discuss_answer.open_questions must be non-empty for `needs-human`.")
+    rebuttal = None
+    if "rebuttal" in payload:
+        rebuttal = _expect_non_empty_string(payload["rebuttal"], context="discuss_answer.rebuttal")
+    if round_number > 1 and rebuttal is None:
+        raise AgentLoopError("discuss_answer.rebuttal is required for debate rounds.")
+    analyzer_framing = payload.get("analyzer_framing")
+    if analyzer_framing is not None:
+        analyzer_framing = _expect_non_empty_string(analyzer_framing, context="discuss_answer.analyzer_framing")
+        if analyzer_framing not in DISCUSS_ANALYZER_FRAMING_VALUES:
+            raise AgentLoopError("discuss_answer.analyzer_framing must be `accurate` or `misframed`.")
+    framing_note = payload.get("framing_note")
+    if framing_note is not None:
+        framing_note = _expect_non_empty_string(framing_note, context="discuss_answer.framing_note")
+    if analyzer_framing == "misframed" and framing_note is None:
+        raise AgentLoopError("discuss_answer.framing_note is required when analyzer_framing is `misframed`.")
+    research_status, sourced_facts = (None, ())
+    if "research" in payload:
+        research_status, sourced_facts = _parse_discuss_research(payload["research"])
+    if research_mode == "required" and (research_status is None or research_status == "not-needed"):
+        raise AgentLoopError("discuss_answer.research with sourced, unavailable, or inconclusive status is required.")
+    return ParsedDiscussAnswer(
+        position=position, rationale=rationale, confidence=confidence,
+        open_questions=open_questions, reviewer=reviewer, answer=answer,
+        rebuttal=rebuttal, analyzer_framing=analyzer_framing, framing_note=framing_note,
+        research_status=research_status, sourced_facts=sourced_facts,
+    )
+
+
+def validate_structured_discuss_answer(
+    text: str, *, reviewer: str, round_number: int = 1, research_mode: str | None = None
+) -> ParsedDiscussAnswer:
+    parsed = parse_structured_discuss_answer(text, reviewer=reviewer, round_number=round_number, research_mode=research_mode)
+    if parsed is None:
+        raise AgentLoopError("Discuss answer did not use the required structured format.")
+    return parsed
 
 
 def _parse_discuss_agenda_disagreement(

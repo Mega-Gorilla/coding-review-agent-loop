@@ -16,12 +16,15 @@ from .protocol import (
     HTML_COMMENT_RE,
     SIGNATURE_RE,
     ParsedDiscussAgenda,
+    ParsedDiscussAnswer,
+    ParsedDiscussResponse,
     ParsedDiscussReview,
     ReviewItemDisposition,
     UnresolvedReviewItem,
     failed_discuss_review_placeholder,
     parse_structured_discuss_agenda,
     parse_structured_discuss_review,
+    parse_structured_discuss_answer,
 )
 from .unresolved_items import _apply_unresolved_item_dispositions
 
@@ -62,6 +65,8 @@ class PostedRoundMetadata:
     # having to reconstruct them from debater comment metadata. Empty on
     # non-final, non-split, and legacy comments.
     split_proposals: tuple[str, ...] = ()
+    # Missing metadata decodes as triage for legacy transcripts.
+    result_mode: str = "triage"
 
 
 @dataclass(frozen=True)
@@ -160,6 +165,7 @@ def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
         "research_mode": metadata.research_mode,
         "failed_debaters": [list(pair) for pair in metadata.failed_debaters],
         "split_proposals": list(metadata.split_proposals),
+        "result_mode": metadata.result_mode,
     }
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -217,6 +223,7 @@ def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
                 if isinstance(pair, (list, tuple)) and len(pair) == 2
             ),
             split_proposals=tuple(str(item) for item in payload.get("split_proposals", [])),
+            result_mode=str(payload.get("result_mode", "triage")),
         )
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         raise AgentLoopError("Invalid AGENT_LOOP_META payload.") from exc
@@ -593,11 +600,11 @@ def _resume_plan_round(
 @dataclass(frozen=True)
 class ResumedDiscussState:
     done: bool
-    round_history: tuple[tuple[ParsedDiscussReview, ...], ...]
+    round_history: tuple[tuple[ParsedDiscussResponse, ...], ...]
     next_round_number: int
     prior_round_agenda: tuple[str, ...] = ()
     prior_analyzer_agenda: ParsedDiscussAgenda | None = None
-    in_progress_votes: dict[str, ParsedDiscussReview] = None  # type: ignore[assignment]
+    in_progress_votes: dict[str, ParsedDiscussResponse] = None  # type: ignore[assignment]
 
     def __post_init__(self) -> None:
         if self.in_progress_votes is None:
@@ -614,12 +621,15 @@ def _decode_analyzer_agenda(raw: str | None) -> ParsedDiscussAgenda | None:
         return None
 
 
-def _decode_discuss_vote(record: PostedRoundRecord, *, round_number: int) -> ParsedDiscussReview:
+def _decode_discuss_vote(record: PostedRoundRecord, *, round_number: int) -> ParsedDiscussResponse:
     text = record.metadata.raw_structured_coder_response or record.body
-    vote = parse_structured_discuss_review(text, reviewer=record.metadata.agent, round_number=round_number)
+    if record.metadata.result_mode == "answer":
+        vote = parse_structured_discuss_answer(text, reviewer=record.metadata.agent, round_number=round_number)
+    else:
+        vote = parse_structured_discuss_review(text, reviewer=record.metadata.agent, round_number=round_number)
     if vote is None:
         raise AgentLoopError(
-            f"Could not decode discuss_review metadata for {record.metadata.agent} "
+            f"Could not decode discuss response metadata for {record.metadata.agent} "
             f"(round {round_number}); the posted comment's structured payload is missing "
             "or invalid."
         )
@@ -631,21 +641,28 @@ def _resume_discuss_round(
     *,
     subject: str,
     configured_reviewers: Sequence[AgentName],
+    result_mode: str = "triage",
 ) -> ResumedDiscussState | None:
     records = _extract_round_metadata_records(comments, flow="discuss")
     subject_records = [record for record in records if record.metadata.subject == subject]
     if not subject_records:
         return None
+    stored_modes = {record.metadata.result_mode for record in subject_records}
+    if stored_modes != {result_mode}:
+        raise AgentLoopError(
+            "Discuss transcript result mode conflicts with the requested mode; "
+            "use the same --discuss-result-mode used to create the transcript."
+        )
     configured_reviewer_names = [agent_display_name(agent) for agent in configured_reviewers]
     rounds: dict[int, list[PostedRoundRecord]] = {}
     for record in subject_records:
         rounds.setdefault(record.metadata.round_number, []).append(record)
 
-    round_history: list[tuple[ParsedDiscussReview, ...]] = []
+    round_history: list[tuple[ParsedDiscussResponse, ...]] = []
     prior_round_agenda: tuple[str, ...] = ()
     prior_analyzer_agenda: ParsedDiscussAgenda | None = None
     next_round_number = 1
-    in_progress_votes: dict[str, ParsedDiscussReview] = {}
+    in_progress_votes: dict[str, ParsedDiscussResponse] = {}
     for round_number in sorted(rounds):
         round_records = rounds[round_number]
         summary_record = next(

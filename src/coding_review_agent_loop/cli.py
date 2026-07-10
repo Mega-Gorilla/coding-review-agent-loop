@@ -542,6 +542,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     discuss.add_argument(
+        "--discuss-result-mode",
+        choices=("triage", "answer"),
+        default="triage",
+        help=(
+            "Discuss result contract (default: triage). `answer` produces an "
+            "open-ended consensus answer or explicit human escalation; omitting "
+            "this flag preserves the legacy implementation-triage votes."
+        ),
+    )
+    discuss.add_argument(
         "--discuss-parallel",
         action="store_true",
         help=(
