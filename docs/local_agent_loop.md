@@ -349,9 +349,11 @@ agent-loop discuss 123 --repo OWNER/REPO \
 Debaters return `kind: "discuss_answer"` with `position: "answer"` or
 `"needs-human"`, plus `answer`, `rationale`, `confidence`, and
 `open_questions`. A unanimous normalized answer is rendered as **Consensus
-Answer** in round one; later convergence is **Converged Answer**. An explicit
-`needs-human` position is **Needs Human Decision**. Otherwise disagreement or
-partial failure is **Deadlock**—disagreement alone never becomes escalation.
+Answer** in round one; later convergence is **Converged Answer**. When every
+successful debater has an explicit `needs-human` position, the
+result is **Needs Human Decision**. Otherwise disagreement or partial failure
+is **Deadlock**—a lone `needs-human` position and disagreement alone never
+become escalation.
 Analyzer observations remain non-authoritative and cited research remains a
 separate sourced-facts section. Repair and resume preserve the selected mode;
 transcripts cannot mix answer and triage responses.

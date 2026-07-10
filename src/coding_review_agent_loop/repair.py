@@ -864,6 +864,43 @@ Notes:
 - Preserve research.status, every sourced fact, and every source verbatim; never invent or drop them.
 - If the original reported no research, do not add a research object.
 
+## WORKED EXAMPLE 17 — discuss_answer with answer and needs-human positions:
+
+Original (malformed): answer-mode output uses a triage `outcome` field and omits
+the required answer-mode fields.
+
+CORRECT repair — use only the answer schema, preserve the conclusion, and keep
+the AGENT_PLAN_STATE footer:
+{
+  "schema_version": 1,
+  "kind": "discuss_answer",
+  "position": "answer",
+  "answer": "Use an API boundary with an explicit adapter.",
+  "rationale": "This keeps the integration replaceable without duplicating policy.",
+  "confidence": "medium",
+  "open_questions": []
+}
+<!-- AGENT_PLAN_STATE: approved -->
+-- Reviewer
+
+For an escalation, use `position: "needs-human"`, omit `answer` when there is
+no asserted answer, and include at least one concrete `open_questions` entry:
+{
+  "schema_version": 1,
+  "kind": "discuss_answer",
+  "position": "needs-human",
+  "rationale": "The requirements conflict and cannot be resolved from the issue.",
+  "confidence": "low",
+  "open_questions": ["Which latency target should control the design?"]
+}
+<!-- AGENT_PLAN_STATE: approved -->
+-- Reviewer
+
+For debate rounds, preserve a non-empty `rebuttal`. Preserve `analyzer_framing`
+and its required `framing_note`, and preserve the `research` object and every
+sourced fact. Do not repair answer mode into `discuss_review`, and do not add
+`outcome` or `split_proposals` fields.
+
 ## FORMAT:
 1. Start DIRECTLY with { — no prose, no markdown fences.
 2. After }: For approved `pr_review` or `plan_review` that now includes `<!-- HUMAN_REQUIREMENTS_RESOLVED -->`,

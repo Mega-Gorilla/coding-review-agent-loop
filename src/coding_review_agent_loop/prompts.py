@@ -2458,7 +2458,7 @@ def build_discuss_review_prompt(
 
 Use this local checkout only to inspect context. Do not edit files, create a branch, commit, push, or open a pull request.
 {_issue_context_block(issue_context)}{_memory_block(memory)}
-Prior round positions (the analyzer is non-authoritative):
+Prior round positions (the analyzer is non-authoritative; do not treat it as a vote):
 {history}
 
 Produce the best consensus answer or tradeoff recommendation, not an implementation vote.
@@ -2475,7 +2475,7 @@ Respond with exactly this JSON object followed by the approved plan footer:
   "rebuttal": "..."
 }}
 Rules: position is exactly `answer` or `needs-human`; `answer` requires non-empty answer; `needs-human` requires non-empty open_questions and may omit answer; {rebuttal}.
-Do not include triage fields such as outcome or split_proposals. The analyzer is context only, and sourced research facts must remain distinct from judgment.
+Do not include triage fields such as outcome or split_proposals. The analyzer is not authoritative and is context only; sourced research facts must remain distinct from judgment.
 <!-- AGENT_PLAN_STATE: approved -->
 -- {reviewer_signature}
 """

@@ -777,8 +777,17 @@ def _render_public_discuss_answer_comment(
     return "\n\n".join(sections)
 
 
-def _render_discuss_agenda_lines(votes: Sequence[ParsedDiscussReview]) -> list[str]:
-    return [f"- {vote.reviewer} held `{vote.outcome}`: {vote.rationale}" for vote in votes]
+def _render_discuss_agenda_lines(votes: Sequence[ParsedDiscussResponse]) -> list[str]:
+    lines: list[str] = []
+    for vote in votes:
+        if isinstance(vote, ParsedDiscussAnswer):
+            position = vote.position
+            detail = vote.answer or vote.rationale
+        else:
+            position = vote.outcome
+            detail = vote.rationale
+        lines.append(f"- {vote.reviewer} held `{position}`: {detail}")
+    return lines
 
 
 def _render_analyzer_agenda_lines(agenda: ParsedDiscussAgenda) -> list[str]:
@@ -907,10 +916,10 @@ def render_discuss_round_summary_comment(
     is_final: bool,
     subject: str,
     round_number: int = 1,
-    reviewer_votes: Sequence[ParsedDiscussReview],
+    reviewer_votes: Sequence[ParsedDiscussResponse],
     outcome: str | None = None,
     consensus_kind: str = "unanimous",
-    round_history: Sequence[Sequence[ParsedDiscussReview]] | None = None,
+    round_history: Sequence[Sequence[ParsedDiscussResponse]] | None = None,
     split_proposals: Sequence[str] | None = None,
     analyzer_agenda: ParsedDiscussAgenda | None = None,
     analyzer_name: str | None = None,

@@ -2163,6 +2163,8 @@ def parse_structured_discuss_answer(
         framing_note = _expect_non_empty_string(framing_note, context="discuss_answer.framing_note")
     if analyzer_framing == "misframed" and framing_note is None:
         raise AgentLoopError("discuss_answer.framing_note is required when analyzer_framing is `misframed`.")
+    if framing_note is not None and analyzer_framing is None:
+        raise AgentLoopError("discuss_answer.framing_note requires analyzer_framing to be set.")
     research_status, sourced_facts = (None, ())
     if "research" in payload:
         research_status, sourced_facts = _parse_discuss_research(payload["research"])

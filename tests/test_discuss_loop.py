@@ -10,6 +10,7 @@ from coding_review_agent_loop.orchestrator import (
     ROUND_RESUME_MARKER_RE,
     _attach_round_metadata,
     _decode_round_metadata,
+    _encode_round_metadata,
     _discuss_subject,
     _validate_discuss_analyzer_agenda_fidelity,
     render_public_agent_comment,
@@ -46,6 +47,20 @@ def test_answer_consensus_escalates_when_all_debaters_request_human_decision():
     assert _detect_discuss_answer_consensus(responses) == ("needs-human", [])
 
 
+def test_answer_round_metadata_round_trips_mode_and_legacy_defaults_to_triage():
+    metadata = PostedRoundMetadata(
+        flow="discuss", role="debater", agent="Codex", round_number=1,
+        subject="subject", result_mode="answer", research_mode="auto",
+    )
+    decoded = _decode_round_metadata(_encode_round_metadata(metadata))
+    assert decoded.result_mode == "answer"
+    assert decoded.research_mode == "auto"
+    legacy = _decode_round_metadata(_encode_round_metadata(
+        PostedRoundMetadata(flow="discuss", role="debater", agent="Codex", round_number=1, subject="subject")
+    ))
+    assert legacy.result_mode == "triage"
+
+
 def _discuss_review_text(
     *,
     outcome: str = "implement",
@@ -71,6 +86,34 @@ def _discuss_review_text(
         payload["analyzer_framing"] = analyzer_framing
     if framing_note is not None:
         payload["framing_note"] = framing_note
+    if research is not None:
+        payload["research"] = research
+    return json.dumps(payload) + f"\n<!-- AGENT_PLAN_STATE: approved -->\n-- {reviewer}"
+
+
+def _discuss_answer_text(
+    *,
+    answer: str | None = "Use an API boundary.",
+    position: str = "answer",
+    rationale: str = "It keeps the integration replaceable.",
+    confidence: str = "medium",
+    open_questions: list[str] | None = None,
+    rebuttal: str | None = None,
+    research: dict | None = None,
+    reviewer: str = "OpenAI Codex",
+) -> str:
+    payload: dict = {
+        "schema_version": 1,
+        "kind": "discuss_answer",
+        "position": position,
+        "rationale": rationale,
+        "confidence": confidence,
+        "open_questions": open_questions or [],
+    }
+    if answer is not None:
+        payload["answer"] = answer
+    if rebuttal is not None:
+        payload["rebuttal"] = rebuttal
     if research is not None:
         payload["research"] = research
     return json.dumps(payload) + f"\n<!-- AGENT_PLAN_STATE: approved -->\n-- {reviewer}"
@@ -230,6 +273,69 @@ def test_discuss_loop_happy_path_two_implement_votes(tmp_path):
     assert "Round 1: Codex position" in runner.comments[0]
     assert "Round 1: Gemini position" in runner.comments[1]
     assert "Consensus: Implement" in runner.comments[2]
+
+
+def test_discuss_loop_unanimous_answer_is_not_triage(tmp_path):
+    answer_text = _discuss_answer_text()
+    runner = FakeRunner(codex_outputs=[answer_text], gemini_outputs=[answer_text])
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer")
+
+    assert run_discuss_loop(runner, issue_number=56, config=config) == 0
+    assert "Consensus Answer" in runner.comments[-1]
+    assert "Use an API boundary." in runner.comments[-1]
+    assert "Consensus: Implement" not in runner.comments[-1]
+
+
+def test_discuss_loop_answer_converges_after_rebuttal(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            _discuss_answer_text(answer="Use an API boundary.", reviewer="OpenAI Codex"),
+            _discuss_answer_text(answer="Use an API boundary.", rebuttal="The concern is addressed.", reviewer="OpenAI Codex"),
+        ],
+        gemini_outputs=[
+            _discuss_answer_text(answer="Use a shared library.", reviewer="Google Gemini"),
+            _discuss_answer_text(answer="Use an API boundary.", rebuttal="The boundary avoids coupling.", reviewer="Google Gemini"),
+        ],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer")
+
+    assert run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=1) == 0
+    final = runner.comments[-1]
+    assert "Converged Answer" in final
+    assert "Use an API boundary." in final
+    assert "Consensus kind: `converged`" in final
+
+
+def test_discuss_loop_answer_disagreement_is_deadlock_and_unanimous_escalation_is_human(tmp_path):
+    disagreement = FakeRunner(
+        codex_outputs=[_discuss_answer_text(answer="Use an API.", reviewer="OpenAI Codex")],
+        gemini_outputs=[_discuss_answer_text(answer="Use a library.", reviewer="Google Gemini")],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer")
+    assert run_discuss_loop(disagreement, issue_number=56, config=config, discuss_max_rounds=0) == 0
+    assert "Deadlock" in disagreement.comments[-1]
+    assert "Needs Human Decision" not in disagreement.comments[-1]
+
+    escalation = FakeRunner(
+        codex_outputs=[_discuss_answer_text(answer=None, position="needs-human", open_questions=["Who owns the decision?"], reviewer="OpenAI Codex")],
+        gemini_outputs=[_discuss_answer_text(answer=None, position="needs-human", open_questions=["What is the target latency?"], reviewer="Google Gemini")],
+    )
+    assert run_discuss_loop(escalation, issue_number=56, config=config, discuss_max_rounds=0) == 0
+    assert "Needs Human Decision" in escalation.comments[-1]
+    assert "Who owns the decision?" in escalation.comments[-1]
+
+
+def test_discuss_loop_answer_research_required_and_analyzer_prompt_are_mode_aware(tmp_path):
+    sourced = {"status": "sourced", "sourced_facts": [{"fact": "Fact", "source": "https://example.test"}]}
+    answer = _discuss_answer_text(research=sourced)
+    runner = FakeRunner(codex_outputs=[answer], gemini_outputs=[answer])
+    config = make_config(
+        tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer",
+        discuss_research="required", discuss_analyzer="claude",
+    )
+    assert run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=0) == 0
+    assert "Use an API boundary." in runner.comments[-1]
+    assert all('"kind": "discuss_answer"' in " ".join(cmd) for cmd, _ in runner.commands if cmd[:1] in (["codex"], ["gemini"]))
 
 
 def test_discuss_loop_debates_then_deadlocks_instead_of_veto(tmp_path):
