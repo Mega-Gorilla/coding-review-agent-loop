@@ -113,6 +113,7 @@ from .protocol import (
     failed_discuss_review_category,
     failed_discuss_review_placeholder,
     failed_discuss_answer_placeholder,
+    is_failed_discuss_response,
     ParsedPlanReview,
     ParsedReview,
     PUBLIC_RESPONSE_MARKER,
@@ -4906,7 +4907,7 @@ def _detect_discuss_answer_consensus(
 ) -> tuple[str, list[str]] | None:
     if partial or not responses:
         return None
-    if any(response.position == "needs-human" for response in responses):
+    if all(response.position == "needs-human" for response in responses):
         return "needs-human", []
     answers = [response.answer for response in responses]
     if all(answer is not None for answer in answers):
@@ -5105,7 +5106,7 @@ class _DiscussAgendaSupportCorpus:
 def _build_discuss_agenda_support_corpus(
     *,
     issue_context: IssueContext,
-    round_history: Sequence[Sequence[ParsedDiscussReview]],
+    round_history: Sequence[Sequence[ParsedDiscussResponse]],
     prior_agenda: ParsedDiscussAgenda | None,
     configured_reviewers: Sequence[AgentName],
     analyzer: AgentName,
@@ -5131,15 +5132,25 @@ def _build_discuss_agenda_support_corpus(
         add(f"Round {round_index}")
         for vote in votes:
             add(vote.reviewer)
-            add(vote.outcome)
-            add(vote.rationale, phrase_support=True)
-            add(vote.rebuttal, phrase_support=True)
-            add(vote.analyzer_framing)
-            add(vote.framing_note, phrase_support=True)
-            for proposal in vote.split_proposals:
-                add(proposal, phrase_support=True)
-            add(vote.research_status)
-            for fact in vote.sourced_facts:
+            if isinstance(vote, ParsedDiscussAnswer):
+                add(vote.position)
+                add(vote.answer, phrase_support=True)
+                add(vote.rationale, phrase_support=True)
+                for question in vote.open_questions:
+                    add(question, phrase_support=True)
+            elif isinstance(vote, ParsedDiscussReview):
+                add(vote.outcome)
+                add(vote.rationale, phrase_support=True)
+                for proposal in vote.split_proposals:
+                    add(proposal, phrase_support=True)
+            else:
+                add("failed")
+                add(vote.category, phrase_support=True)
+            add(getattr(vote, "rebuttal", None), phrase_support=True)
+            add(getattr(vote, "analyzer_framing", None))
+            add(getattr(vote, "framing_note", None), phrase_support=True)
+            add(getattr(vote, "research_status", None))
+            for fact in getattr(vote, "sourced_facts", ()):
                 add(fact.fact, phrase_support=True)
                 add(fact.source, phrase_support=True)
     if prior_agenda is not None:
@@ -5200,7 +5211,7 @@ def _validate_discuss_analyzer_agenda_fidelity(
     agenda: ParsedDiscussAgenda,
     *,
     issue_context: IssueContext,
-    round_history: Sequence[Sequence[ParsedDiscussReview]],
+    round_history: Sequence[Sequence[ParsedDiscussResponse]],
     prior_agenda: ParsedDiscussAgenda | None,
     configured_reviewers: Sequence[AgentName],
     analyzer: AgentName,
@@ -5247,7 +5258,7 @@ def _run_discuss_analyzer(
     memory: AgentMemoryContext | None,
     issue_context: IssueContext,
     round_number: int,
-    round_history: Sequence[Sequence[ParsedDiscussReview]],
+    round_history: Sequence[Sequence[ParsedDiscussResponse]],
     prior_agenda: ParsedDiscussAgenda | None,
     configured_reviewers: Sequence[AgentName],
     usage_context: RunUsageContext,
@@ -5809,8 +5820,7 @@ def _run_discuss_loop(
             )
         successful_votes = [
             vote for vote in reviewer_votes
-            if not (isinstance(vote, ParsedDiscussReview) and vote.outcome == DISCUSS_FAILED_OUTCOME)
-            and not isinstance(vote, type(failed_discuss_answer_placeholder("", "")))
+            if not is_failed_discuss_response(vote)
         ]
         round_history.append(reviewer_votes)
         if config.discuss_result_mode == "answer":

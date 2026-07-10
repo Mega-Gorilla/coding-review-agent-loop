@@ -333,6 +333,7 @@ Evaluate a GitHub issue without writing any code:
 
 ```bash
 agent-loop discuss 123 --repo OWNER/REPO
+```
 
 ### Open-ended answer results
 
@@ -354,7 +355,6 @@ partial failure is **Deadlock**—disagreement alone never becomes escalation.
 Analyzer observations remain non-authoritative and cited research remains a
 separate sourced-facts section. Repair and resume preserve the selected mode;
 transcripts cannot mix answer and triage responses.
-```
 
 Discuss mode sends the issue title, body, and comments to all configured
 reviewers and asks each to return a `discuss_review` response with a single

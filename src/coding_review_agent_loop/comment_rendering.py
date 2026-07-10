@@ -20,6 +20,7 @@ from .protocol import (
     DeferredStage,
     ParsedDiscussAgenda,
     ParsedDiscussAnswer,
+    ParsedFailedDiscussResponse,
     ParsedDiscussResponse,
     ParsedDiscussReview,
     ParsedPlanReview,
@@ -812,8 +813,8 @@ def _render_analyzer_agenda_lines(agenda: ParsedDiscussAgenda) -> list[str]:
 def _render_discuss_research_section(
     *,
     research_mode: str,
-    reviewer_votes: Sequence[ParsedDiscussReview],
-    round_history: Sequence[Sequence[ParsedDiscussReview]] | None,
+    reviewer_votes: Sequence[ParsedDiscussResponse],
+    round_history: Sequence[Sequence[ParsedDiscussResponse]] | None,
 ) -> list[str]:
     """Render the final-summary research section (#477).
 
@@ -827,7 +828,8 @@ def _render_discuss_research_section(
         lines.append("Online research was disabled; all positions are agent judgment.")
         return lines
     lines.append("")
-    for vote in reviewer_votes:
+    successful_votes = [v for v in reviewer_votes if not isinstance(v, ParsedFailedDiscussResponse)]
+    for vote in successful_votes:
         if vote.research_status is None:
             lines.append(f"- {vote.reviewer}: no research status reported")
         else:
@@ -840,6 +842,8 @@ def _render_discuss_research_section(
     seen: set[tuple[str, str, str]] = set()
     for votes in fact_rounds:
         for vote in votes:
+            if isinstance(vote, ParsedFailedDiscussResponse):
+                continue
             for fact in vote.sourced_facts:
                 key = (vote.reviewer, fact.fact, fact.source)
                 if key not in seen:
@@ -851,7 +855,7 @@ def _render_discuss_research_section(
             "Sourced facts cited by debaters (everything else above is agent judgment):"
         )
         lines.extend(sourced)
-    statuses = [vote.research_status for vote in reviewer_votes]
+    statuses = [vote.research_status for vote in successful_votes]
     if statuses and all(status == "not-needed" for status in statuses):
         lines.append("")
         lines.append(
@@ -859,7 +863,7 @@ def _render_discuss_research_section(
         )
     gap_reviewers = [
         vote.reviewer
-        for vote in reviewer_votes
+        for vote in successful_votes
         if vote.research_status in {"unavailable", "inconclusive"}
     ]
     if gap_reviewers:
@@ -868,7 +872,7 @@ def _render_discuss_research_section(
             f"Research was unavailable or inconclusive for {', '.join(gap_reviewers)}; "
             "treat their related claims as judgment, not sourced fact."
         )
-    unreported = [vote.reviewer for vote in reviewer_votes if vote.research_status is None]
+    unreported = [vote.reviewer for vote in successful_votes if vote.research_status is None]
     if unreported:
         lines.append("")
         lines.append(

@@ -2018,6 +2018,7 @@ from coding_review_agent_loop.prompts import (
 )
 from coding_review_agent_loop.protocol import (
     DiscussAgendaDisagreement,
+    ParsedDiscussAnswer,
     ParsedDiscussAgenda,
     ParsedDiscussReview,
 )
@@ -2097,6 +2098,20 @@ def test_build_discuss_agenda_prompt_includes_every_round_of_history(tmp_path):
     assert "never invent positions" in prompt
     assert "Carry forward unresolved `missing_facts`" in prompt
     assert '"kind": "discuss_agenda"' in prompt
+
+
+def test_build_discuss_agenda_prompt_supports_answer_history(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer")
+    answer = ParsedDiscussAnswer(
+        position="answer", rationale="The evidence favors the API.", confidence="high",
+        open_questions=(), reviewer="Codex", answer="Use an API.", rebuttal="Addressed the concern.",
+    )
+    prompt = build_discuss_agenda_prompt(
+        56, config, analyzer="claude", round_number=2, round_history=[[answer]]
+    )
+    assert "`answer`" in prompt
+    assert "Use an API." in prompt
+    assert "Split proposals:" not in prompt
 
 
 def test_build_discuss_agenda_prompt_without_prior_agenda(tmp_path):

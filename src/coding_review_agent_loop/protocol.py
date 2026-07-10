@@ -979,7 +979,9 @@ def _extract_structured_plan_state_payload(text: str) -> dict[str, object] | Non
     )
 
 
-def _extract_structured_discuss_review_payload(text: str) -> dict[str, object] | None:
+def _extract_structured_discuss_review_payload(
+    text: str, *, context_label: str = "Structured discuss review"
+) -> dict[str, object] | None:
     text, _status = normalize_response_file_structured_text(text)
     extracted = _extract_json_object_prefix(text)
     if extracted is None:
@@ -990,7 +992,7 @@ def _extract_structured_discuss_review_payload(text: str) -> dict[str, object] |
         trailing=trailing,
         state_re=PLAN_STATE_RE,
         state_marker_name="AGENT_PLAN_STATE",
-        context_label="Structured discuss review",
+        context_label=context_label,
     )
     if result is None:
         return None
@@ -999,7 +1001,7 @@ def _extract_structured_discuss_review_payload(text: str) -> dict[str, object] |
         footer_state = footer_match.group(1).lower()
         if footer_state != "approved":
             raise AgentLoopError(
-                f"Structured discuss review footer AGENT_PLAN_STATE must be `approved`; got `{footer_state}`."
+                f"{context_label} footer AGENT_PLAN_STATE must be `approved`; got `{footer_state}`."
             )
     return result
 
@@ -2011,7 +2013,9 @@ def _parse_discuss_research(value: object) -> tuple[str, tuple[DiscussSourcedFac
 def parse_structured_discuss_review(
     text: str, *, reviewer: str, round_number: int = 1, research_mode: str | None = None
 ) -> ParsedDiscussReview | None:
-    payload = _extract_structured_discuss_review_payload(text)
+    payload = _extract_structured_discuss_review_payload(
+        text, context_label="Structured discuss review"
+    )
     if payload is None:
         return None
     _require_supported_schema_version(payload)
@@ -2111,7 +2115,9 @@ DISCUSS_ANSWER_CONFIDENCE_VALUES = frozenset({"low", "medium", "high"})
 def parse_structured_discuss_answer(
     text: str, *, reviewer: str, round_number: int = 1, research_mode: str | None = None
 ) -> ParsedDiscussAnswer | None:
-    payload = _extract_structured_discuss_review_payload(text)
+    payload = _extract_structured_discuss_review_payload(
+        text, context_label="Structured discuss answer"
+    )
     if payload is None:
         return None
     _require_supported_schema_version(payload)

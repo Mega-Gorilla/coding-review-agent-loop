@@ -14,6 +14,7 @@ from coding_review_agent_loop.orchestrator import (
     _validate_discuss_analyzer_agenda_fidelity,
     render_public_agent_comment,
     run_discuss_loop,
+    _detect_discuss_answer_consensus,
 )
 from coding_review_agent_loop.comment_rendering import render_discuss_round_summary_comment
 from coding_review_agent_loop.errors import AgentLoopError
@@ -23,9 +24,26 @@ from coding_review_agent_loop.protocol import (
     DiscussSourcedFact,
     ParsedDiscussAgenda,
     ParsedDiscussReview,
+    ParsedDiscussAnswer,
 )
 
 from agent_loop_helpers import FakeRunner, make_config
+
+
+def test_answer_consensus_does_not_escalate_for_one_early_needs_human():
+    responses = [
+        ParsedDiscussAnswer("needs-human", "unclear", "low", ("scope",), "Codex"),
+        ParsedDiscussAnswer("answer", "clear", "medium", (), "Claude", answer="Use an API."),
+    ]
+    assert _detect_discuss_answer_consensus(responses) is None
+
+
+def test_answer_consensus_escalates_when_all_debaters_request_human_decision():
+    responses = [
+        ParsedDiscussAnswer("needs-human", "unclear", "low", ("scope",), "Codex"),
+        ParsedDiscussAnswer("needs-human", "unclear", "low", ("security",), "Claude"),
+    ]
+    assert _detect_discuss_answer_consensus(responses) == ("needs-human", [])
 
 
 def _discuss_review_text(

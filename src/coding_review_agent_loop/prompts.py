@@ -2301,7 +2301,7 @@ def build_discuss_agenda_prompt(
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
     round_number: int = 1,
-    round_history: Sequence[Sequence[ParsedDiscussReview]] | None = None,
+    round_history: Sequence[Sequence[ParsedDiscussResponse]] | None = None,
     prior_agenda: ParsedDiscussAgenda | None = None,
     research_mode: str = "none",
 ) -> str:
@@ -2314,13 +2314,21 @@ def build_discuss_agenda_prompt(
             label = f"{label} (latest round)"
         history_lines.append(f"{label}:")
         for vote in votes:
-            history_lines.append(f"- {vote.reviewer}: `{vote.outcome}`")
-            history_lines.append(f"  Rationale: {vote.rationale}")
-            if vote.rebuttal:
+            if hasattr(vote, "position"):
+                history_lines.append(f"- {vote.reviewer}: `{vote.position}`")
+                if getattr(vote, "answer", None):
+                    history_lines.append(f"  Answer: {vote.answer}")
+            elif hasattr(vote, "outcome"):
+                history_lines.append(f"- {vote.reviewer}: `{vote.outcome}`")
+            else:
+                history_lines.append(f"- {vote.reviewer}: `failed`")
+            rationale = getattr(vote, "rationale", f"did not respond this round ({getattr(vote, 'category', 'failure')})")
+            history_lines.append(f"  Rationale: {rationale}")
+            if getattr(vote, "rebuttal", None):
                 history_lines.append(f"  Rebuttal: {vote.rebuttal}")
-            if vote.analyzer_framing == "misframed" and vote.framing_note:
+            if getattr(vote, "analyzer_framing", None) == "misframed" and getattr(vote, "framing_note", None):
                 history_lines.append(f"  Framing correction: {vote.framing_note}")
-            if vote.split_proposals:
+            if getattr(vote, "split_proposals", ()):
                 history_lines.append("  Split proposals:")
                 for proposal in vote.split_proposals:
                     history_lines.append(f"  - {proposal}")

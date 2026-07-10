@@ -22,6 +22,7 @@ from .protocol import (
     ReviewItemDisposition,
     UnresolvedReviewItem,
     failed_discuss_review_placeholder,
+    failed_discuss_answer_placeholder,
     parse_structured_discuss_agenda,
     parse_structured_discuss_review,
     parse_structured_discuss_answer,
@@ -690,7 +691,11 @@ def _resume_discuss_round(
             votes = tuple(
                 _decode_discuss_vote(debater_records[name], round_number=round_number)
                 if name in debater_records
-                else failed_discuss_review_placeholder(name, failed_by_name[name])
+                else (
+                    failed_discuss_answer_placeholder(name, failed_by_name[name])
+                    if result_mode == "answer"
+                    else failed_discuss_review_placeholder(name, failed_by_name[name])
+                )
                 for name in configured_reviewer_names
             )
             round_history.append(votes)
