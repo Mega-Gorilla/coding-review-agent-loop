@@ -365,6 +365,64 @@ def test_discuss_loop_answer_research_required_and_analyzer_prompt_are_mode_awar
     assert all('"kind": "discuss_answer"' in " ".join(cmd) for cmd, _ in runner.commands if cmd[:1] in (["codex"], ["gemini"]))
 
 
+def test_discuss_loop_answer_partial_live_round_records_failure_and_deadlocks(tmp_path):
+    answer = _discuss_answer_text(answer="Use an API boundary.")
+    runner = FakeRunner(
+        codex_outputs=[answer],
+        gemini_outputs=[answer],
+        claude_outputs=[("provider unavailable", 1)],
+    )
+    config = make_config(
+        tmp_path,
+        reviewer=("codex", "gemini", "claude"),
+        discuss_result_mode="answer",
+        discuss_on_debater_failure="partial",
+    )
+
+    assert run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=0) == 0
+    final = runner.comments[-1]
+    assert "Deadlock" in final
+    assert "Claude" in final
+    assert "Debater failures" in final
+    assert "Consensus Answer" not in final
+
+
+def test_discuss_loop_answer_mode_never_materializes_split_issues(tmp_path):
+    answer = _discuss_answer_text(answer="Use an API boundary.")
+    runner = FakeRunner(
+        codex_outputs=[answer],
+        gemini_outputs=[answer],
+        issue_urls=["https://github.com/OWNER/REPO/issues/101"],
+    )
+    config = make_config(
+        tmp_path,
+        reviewer=("codex", "gemini"),
+        discuss_result_mode="answer",
+        materialize_split_issues=True,
+    )
+
+    assert run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=0) == 0
+    assert runner.issues == []
+    assert "Consensus Answer" in runner.comments[-1]
+    assert "Consensus: Split" not in "\n".join(runner.comments)
+
+
+def test_discuss_loop_rejects_resume_with_conflicting_result_mode(tmp_path):
+    subject = _issue_subject()
+    seeded = _seed_answer_debater_comment(
+        reviewer="Codex", round_number=1, subject=subject,
+        answer="Use an API boundary.",
+    )
+    runner = FakeRunner(issue_comments=[seeded])
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="triage")
+
+    with pytest.raises(
+        AgentLoopError,
+        match="Discuss transcript result mode conflicts with the requested mode",
+    ):
+        run_discuss_loop(runner, issue_number=56, config=config)
+
+
 def test_discuss_loop_answer_debater_sees_analyzer_agenda_on_rebuttal_round(tmp_path):
     agenda = _discuss_agenda_text()
     answer1 = _discuss_answer_text(answer="Use an API.", reviewer="OpenAI Codex")
