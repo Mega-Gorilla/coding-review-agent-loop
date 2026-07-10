@@ -10,10 +10,12 @@ from coding_review_agent_loop.orchestrator import (
     ROUND_RESUME_MARKER_RE,
     _attach_round_metadata,
     _decode_round_metadata,
+    _encode_round_metadata,
     _discuss_subject,
     _validate_discuss_analyzer_agenda_fidelity,
     render_public_agent_comment,
     run_discuss_loop,
+    _detect_discuss_answer_consensus,
 )
 from coding_review_agent_loop.comment_rendering import render_discuss_round_summary_comment
 from coding_review_agent_loop.errors import AgentLoopError
@@ -23,9 +25,40 @@ from coding_review_agent_loop.protocol import (
     DiscussSourcedFact,
     ParsedDiscussAgenda,
     ParsedDiscussReview,
+    ParsedDiscussAnswer,
 )
 
 from agent_loop_helpers import FakeRunner, make_config
+
+
+def test_answer_consensus_does_not_escalate_for_one_early_needs_human():
+    responses = [
+        ParsedDiscussAnswer("needs-human", "unclear", "low", ("scope",), "Codex"),
+        ParsedDiscussAnswer("answer", "clear", "medium", (), "Claude", answer="Use an API."),
+    ]
+    assert _detect_discuss_answer_consensus(responses) is None
+
+
+def test_answer_consensus_escalates_when_all_debaters_request_human_decision():
+    responses = [
+        ParsedDiscussAnswer("needs-human", "unclear", "low", ("scope",), "Codex"),
+        ParsedDiscussAnswer("needs-human", "unclear", "low", ("security",), "Claude"),
+    ]
+    assert _detect_discuss_answer_consensus(responses) == ("needs-human", [])
+
+
+def test_answer_round_metadata_round_trips_mode_and_legacy_defaults_to_triage():
+    metadata = PostedRoundMetadata(
+        flow="discuss", role="debater", agent="Codex", round_number=1,
+        subject="subject", result_mode="answer", research_mode="auto",
+    )
+    decoded = _decode_round_metadata(_encode_round_metadata(metadata))
+    assert decoded.result_mode == "answer"
+    assert decoded.research_mode == "auto"
+    legacy = _decode_round_metadata(_encode_round_metadata(
+        PostedRoundMetadata(flow="discuss", role="debater", agent="Codex", round_number=1, subject="subject")
+    ))
+    assert legacy.result_mode == "triage"
 
 
 def _discuss_review_text(
@@ -53,6 +86,34 @@ def _discuss_review_text(
         payload["analyzer_framing"] = analyzer_framing
     if framing_note is not None:
         payload["framing_note"] = framing_note
+    if research is not None:
+        payload["research"] = research
+    return json.dumps(payload) + f"\n<!-- AGENT_PLAN_STATE: approved -->\n-- {reviewer}"
+
+
+def _discuss_answer_text(
+    *,
+    answer: str | None = "Use an API boundary.",
+    position: str = "answer",
+    rationale: str = "It keeps the integration replaceable.",
+    confidence: str = "medium",
+    open_questions: list[str] | None = None,
+    rebuttal: str | None = None,
+    research: dict | None = None,
+    reviewer: str = "OpenAI Codex",
+) -> str:
+    payload: dict = {
+        "schema_version": 1,
+        "kind": "discuss_answer",
+        "position": position,
+        "rationale": rationale,
+        "confidence": confidence,
+        "open_questions": open_questions or [],
+    }
+    if answer is not None:
+        payload["answer"] = answer
+    if rebuttal is not None:
+        payload["rebuttal"] = rebuttal
     if research is not None:
         payload["research"] = research
     return json.dumps(payload) + f"\n<!-- AGENT_PLAN_STATE: approved -->\n-- {reviewer}"
@@ -153,6 +214,33 @@ def _seed_debater_comment(
     return {"author": {"login": "bot"}, "createdAt": "2026-01-01T00:00:00Z", "body": body}
 
 
+def _seed_answer_debater_comment(
+    *, reviewer: str, round_number: int, subject: str, answer: str,
+    rationale: str = "The evidence supports this recommendation.",
+    rebuttal: str | None = None, config=None,
+) -> dict:
+    vote = ParsedDiscussAnswer(
+        position="answer", rationale=rationale, confidence="medium",
+        open_questions=(), reviewer=reviewer, answer=answer, rebuttal=rebuttal,
+    )
+    raw_text = _discuss_answer_text(
+        answer=answer, rationale=rationale, rebuttal=rebuttal, reviewer=reviewer,
+    )
+    body = render_public_agent_comment(
+        kind="discuss_answer", parsed=vote, agent=reviewer, config=config,
+        round_number=round_number,
+    )
+    body = _attach_round_metadata(
+        body,
+        PostedRoundMetadata(
+            flow="discuss", role="debater", agent=reviewer,
+            round_number=round_number, subject=subject, result_mode="answer",
+            raw_structured_coder_response=raw_text,
+        ),
+    )
+    return {"author": {"login": "bot"}, "createdAt": "2026-01-01T00:00:00Z", "body": body}
+
+
 def _seed_summary_comment(
     *,
     round_number: int,
@@ -212,6 +300,176 @@ def test_discuss_loop_happy_path_two_implement_votes(tmp_path):
     assert "Round 1: Codex position" in runner.comments[0]
     assert "Round 1: Gemini position" in runner.comments[1]
     assert "Consensus: Implement" in runner.comments[2]
+
+
+def test_discuss_loop_unanimous_answer_is_not_triage(tmp_path):
+    answer_text = _discuss_answer_text()
+    runner = FakeRunner(codex_outputs=[answer_text], gemini_outputs=[answer_text])
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer")
+
+    assert run_discuss_loop(runner, issue_number=56, config=config) == 0
+    assert "Consensus Answer" in runner.comments[-1]
+    assert "Use an API boundary." in runner.comments[-1]
+    assert "Consensus: Implement" not in runner.comments[-1]
+
+
+def test_discuss_loop_answer_converges_after_rebuttal(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            _discuss_answer_text(answer="Use an API boundary.", reviewer="OpenAI Codex"),
+            _discuss_answer_text(answer="Use an API boundary.", rebuttal="The concern is addressed.", reviewer="OpenAI Codex"),
+        ],
+        gemini_outputs=[
+            _discuss_answer_text(answer="Use a shared library.", reviewer="Google Gemini"),
+            _discuss_answer_text(answer="Use an API boundary.", rebuttal="The boundary avoids coupling.", reviewer="Google Gemini"),
+        ],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer")
+
+    assert run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=1) == 0
+    final = runner.comments[-1]
+    assert "Converged Answer" in final
+    assert "Use an API boundary." in final
+    assert "Consensus kind: `converged`" in final
+
+
+def test_discuss_loop_answer_disagreement_is_deadlock_and_unanimous_escalation_is_human(tmp_path):
+    disagreement = FakeRunner(
+        codex_outputs=[_discuss_answer_text(answer="Use an API.", reviewer="OpenAI Codex")],
+        gemini_outputs=[_discuss_answer_text(answer="Use a library.", reviewer="Google Gemini")],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer")
+    assert run_discuss_loop(disagreement, issue_number=56, config=config, discuss_max_rounds=0) == 0
+    assert "Deadlock" in disagreement.comments[-1]
+    assert "Needs Human Decision" not in disagreement.comments[-1]
+
+    escalation = FakeRunner(
+        codex_outputs=[_discuss_answer_text(answer=None, position="needs-human", open_questions=["Who owns the decision?"], reviewer="OpenAI Codex")],
+        gemini_outputs=[_discuss_answer_text(answer=None, position="needs-human", open_questions=["What is the target latency?"], reviewer="Google Gemini")],
+    )
+    assert run_discuss_loop(escalation, issue_number=56, config=config, discuss_max_rounds=0) == 0
+    assert "Needs Human Decision" in escalation.comments[-1]
+    assert "Who owns the decision?" in escalation.comments[-1]
+
+
+def test_discuss_loop_answer_research_required_and_analyzer_prompt_are_mode_aware(tmp_path):
+    sourced = {"status": "sourced", "sourced_facts": [{"fact": "Fact", "source": "https://example.test"}]}
+    answer = _discuss_answer_text(research=sourced)
+    runner = FakeRunner(codex_outputs=[answer], gemini_outputs=[answer])
+    config = make_config(
+        tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer",
+        discuss_research="required", discuss_analyzer="claude",
+    )
+    assert run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=0) == 0
+    assert "Use an API boundary." in runner.comments[-1]
+    assert all('"kind": "discuss_answer"' in " ".join(cmd) for cmd, _ in runner.commands if cmd[:1] in (["codex"], ["gemini"]))
+
+
+def test_discuss_loop_answer_partial_live_round_records_failure_and_deadlocks(tmp_path):
+    answer = _discuss_answer_text(answer="Use an API boundary.")
+    runner = FakeRunner(
+        codex_outputs=[answer],
+        gemini_outputs=[answer],
+        claude_outputs=[("provider unavailable", 1)],
+    )
+    config = make_config(
+        tmp_path,
+        reviewer=("codex", "gemini", "claude"),
+        discuss_result_mode="answer",
+        discuss_on_debater_failure="partial",
+    )
+
+    assert run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=0) == 0
+    final = runner.comments[-1]
+    assert "Deadlock" in final
+    assert "Claude" in final
+    assert "Debater failures" in final
+    assert "Consensus Answer" not in final
+
+
+def test_discuss_loop_answer_mode_never_materializes_split_issues(tmp_path):
+    answer = _discuss_answer_text(answer="Use an API boundary.")
+    runner = FakeRunner(
+        codex_outputs=[answer],
+        gemini_outputs=[answer],
+        issue_urls=["https://github.com/OWNER/REPO/issues/101"],
+    )
+    config = make_config(
+        tmp_path,
+        reviewer=("codex", "gemini"),
+        discuss_result_mode="answer",
+        materialize_split_issues=True,
+    )
+
+    assert run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=0) == 0
+    assert runner.issues == []
+    assert "Consensus Answer" in runner.comments[-1]
+    assert "Consensus: Split" not in "\n".join(runner.comments)
+
+
+def test_discuss_loop_rejects_resume_with_conflicting_result_mode(tmp_path):
+    subject = _issue_subject()
+    seeded = _seed_answer_debater_comment(
+        reviewer="Codex", round_number=1, subject=subject,
+        answer="Use an API boundary.",
+    )
+    runner = FakeRunner(issue_comments=[seeded])
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="triage")
+
+    with pytest.raises(
+        AgentLoopError,
+        match="Discuss transcript result mode conflicts with the requested mode",
+    ):
+        run_discuss_loop(runner, issue_number=56, config=config)
+
+
+def test_discuss_loop_answer_debater_sees_analyzer_agenda_on_rebuttal_round(tmp_path):
+    agenda = _discuss_agenda_text()
+    answer1 = _discuss_answer_text(answer="Use an API.", reviewer="OpenAI Codex")
+    answer2 = _discuss_answer_text(
+        answer="Use an API.", rebuttal="The analyzer's ownership question is resolved by the API boundary.",
+        reviewer="OpenAI Codex",
+    )
+    gemini1 = _discuss_answer_text(answer="Use a library.", reviewer="Google Gemini")
+    gemini2 = _discuss_answer_text(
+        answer="Use an API.", rebuttal="The ownership concern favors an API.", reviewer="Google Gemini",
+    )
+    runner = FakeRunner(
+        codex_outputs=[answer1, answer2], gemini_outputs=[gemini1, gemini2],
+        claude_outputs=[agenda], issue_payload=_grounded_agenda_issue_payload(),
+    )
+    config = make_config(
+        tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer",
+        discuss_analyzer="claude",
+    )
+
+    assert run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=1) == 0
+    round2 = [
+        " ".join(cmd) for cmd, _ in runner.commands
+        if "Analyzer agenda for the prior round" in " ".join(cmd)
+    ]
+    assert len(round2) == 2, runner.commands
+    assert all("Scope of the change" in prompt for prompt in round2)
+    assert all("Would splitting resolve the scope objection?" in prompt for prompt in round2)
+
+
+def test_discuss_loop_resumes_answer_partial_round_and_is_idempotent(tmp_path):
+    subject = _issue_subject()
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer")
+    seeded = _seed_answer_debater_comment(
+        reviewer="Codex", round_number=1, subject=subject,
+        answer="Use an API.", config=config,
+    )
+    answer = _discuss_answer_text(answer="Use an API.", reviewer="Google Gemini")
+    runner = FakeRunner(issue_comments=[seeded], gemini_outputs=[answer])
+
+    assert run_discuss_loop(runner, issue_number=56, config=config) == 0
+    assert not any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
+    assert "Consensus Answer" in runner.comments[-1]
+    comment_count = len(runner.comments)
+
+    assert run_discuss_loop(runner, issue_number=56, config=config) == 0
+    assert len(runner.comments) == comment_count
 
 
 def test_discuss_loop_debates_then_deadlocks_instead_of_veto(tmp_path):

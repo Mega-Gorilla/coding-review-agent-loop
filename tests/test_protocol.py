@@ -43,6 +43,7 @@ from coding_review_agent_loop.protocol import (
     parse_plan_review_items,
     parse_plan_state,
     parse_structured_discuss_agenda,
+    parse_structured_discuss_answer,
     parse_structured_discuss_review,
     parse_structured_plan_review,
     parse_structured_pr_review,
@@ -55,11 +56,87 @@ from coding_review_agent_loop.protocol import (
     validate_human_requirements_acknowledgement,
     validate_structured_coder_followup,
     validate_structured_discuss_agenda,
+    validate_structured_discuss_answer,
     validate_structured_discuss_review,
     validate_structured_human_requirements_acknowledgement,
     validate_structured_plan_state,
     validate_structured_plan_revision,
 )
+
+
+def _discuss_answer_text(payload: dict) -> str:
+    return json.dumps({"schema_version": 1, "kind": "discuss_answer", **payload}) + (
+        "\n<!-- AGENT_PLAN_STATE: approved -->\n-- Reviewer"
+    )
+
+
+def test_discuss_answer_parser_requires_answer_fields_and_is_mode_isolated():
+    parsed = validate_structured_discuss_answer(
+        _discuss_answer_text({
+            "position": "answer",
+            "answer": "Use an adapter.",
+            "rationale": "It preserves a replaceable boundary.",
+            "confidence": "high",
+            "open_questions": [],
+        }),
+        reviewer="Reviewer",
+    )
+    assert parsed.answer == "Use an adapter."
+    with pytest.raises(AgentLoopError, match="answer is required"):
+        validate_structured_discuss_answer(
+            _discuss_answer_text({
+                "position": "answer", "rationale": "Reason", "confidence": "medium",
+                "open_questions": [],
+            }),
+            reviewer="Reviewer",
+        )
+    with pytest.raises(AgentLoopError, match="kind mismatch"):
+        parse_structured_discuss_answer(
+            json.dumps({
+                "schema_version": 1, "kind": "discuss_review", "outcome": "implement",
+                "rationale": "Reason",
+            }) + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- Reviewer",
+            reviewer="Reviewer",
+        )
+
+
+def test_discuss_answer_parser_enforces_escalation_rebuttal_research_and_analyzer_rules():
+    with pytest.raises(AgentLoopError, match="open_questions must be non-empty"):
+        validate_structured_discuss_answer(
+            _discuss_answer_text({
+                "position": "needs-human", "rationale": "Blocked", "confidence": "low",
+                "open_questions": [],
+            }),
+            reviewer="Reviewer",
+        )
+    with pytest.raises(AgentLoopError, match="rebuttal is required"):
+        validate_structured_discuss_answer(
+            _discuss_answer_text({
+                "position": "answer", "answer": "Use an adapter.", "rationale": "Reason",
+                "confidence": "medium", "open_questions": [],
+            }),
+            reviewer="Reviewer", round_number=2,
+        )
+    base = {
+        "position": "answer", "answer": "Use an adapter.", "rationale": "Reason",
+        "confidence": "medium", "open_questions": [], "analyzer_framing": "accurate",
+        "rebuttal": "Addressed the objection.",
+        "research": {"status": "sourced", "sourced_facts": [{"fact": "Fact", "source": "https://example.test"}]},
+    }
+    parsed = validate_structured_discuss_answer(
+        _discuss_answer_text(base), reviewer="Reviewer", round_number=2, research_mode="required"
+    )
+    assert parsed.research_status == "sourced"
+    with pytest.raises(AgentLoopError, match="framing_note requires"):
+        validate_structured_discuss_answer(
+            _discuss_answer_text({**base, "analyzer_framing": None, "framing_note": "note"}),
+            reviewer="Reviewer",
+        )
+    with pytest.raises(AgentLoopError, match="research.*required"):
+        validate_structured_discuss_answer(
+            _discuss_answer_text({k: v for k, v in base.items() if k != "research"}),
+            reviewer="Reviewer", research_mode="required",
+        )
 from coding_review_agent_loop.agents.gemini import PUBLIC_RESPONSE_MARKER
 from coding_review_agent_loop.errors import UnknownPriorItemDispositionError
 from coding_review_agent_loop.orchestrator import (

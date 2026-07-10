@@ -20,6 +20,8 @@ from .protocol import (
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
     HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK,
     ParsedDiscussAgenda,
+    ParsedDiscussAnswer,
+    ParsedDiscussResponse,
     ParsedDiscussReview,
     UnresolvedReviewItem,
 )
@@ -2299,7 +2301,7 @@ def build_discuss_agenda_prompt(
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
     round_number: int = 1,
-    round_history: Sequence[Sequence[ParsedDiscussReview]] | None = None,
+    round_history: Sequence[Sequence[ParsedDiscussResponse]] | None = None,
     prior_agenda: ParsedDiscussAgenda | None = None,
     research_mode: str = "none",
 ) -> str:
@@ -2312,13 +2314,21 @@ def build_discuss_agenda_prompt(
             label = f"{label} (latest round)"
         history_lines.append(f"{label}:")
         for vote in votes:
-            history_lines.append(f"- {vote.reviewer}: `{vote.outcome}`")
-            history_lines.append(f"  Rationale: {vote.rationale}")
-            if vote.rebuttal:
+            if hasattr(vote, "position"):
+                history_lines.append(f"- {vote.reviewer}: `{vote.position}`")
+                if getattr(vote, "answer", None):
+                    history_lines.append(f"  Answer: {vote.answer}")
+            elif hasattr(vote, "outcome"):
+                history_lines.append(f"- {vote.reviewer}: `{vote.outcome}`")
+            else:
+                history_lines.append(f"- {vote.reviewer}: `failed`")
+            rationale = getattr(vote, "rationale", f"did not respond this round ({getattr(vote, 'category', 'failure')})")
+            history_lines.append(f"  Rationale: {rationale}")
+            if getattr(vote, "rebuttal", None):
                 history_lines.append(f"  Rebuttal: {vote.rebuttal}")
-            if vote.analyzer_framing == "misframed" and vote.framing_note:
+            if getattr(vote, "analyzer_framing", None) == "misframed" and getattr(vote, "framing_note", None):
                 history_lines.append(f"  Framing correction: {vote.framing_note}")
-            if vote.split_proposals:
+            if getattr(vote, "split_proposals", ()):
                 history_lines.append("  Split proposals:")
                 for proposal in vote.split_proposals:
                     history_lines.append(f"  - {proposal}")
@@ -2428,7 +2438,7 @@ def build_discuss_review_prompt(
     memory: AgentMemoryContext | None = None,
     issue_context: IssueContext | None = None,
     round_number: int = 1,
-    prior_round_votes: Sequence[ParsedDiscussReview] | None = None,
+    prior_round_votes: Sequence[ParsedDiscussResponse] | None = None,
     prior_round_agenda: Sequence[str] | None = None,
     analyzer_agenda: ParsedDiscussAgenda | None = None,
     research_mode: str = "none",
@@ -2436,6 +2446,46 @@ def build_discuss_review_prompt(
     reviewer_signature = agent_signature(reviewer, config)
     prior_round_votes = tuple(prior_round_votes or ())
     prior_round_agenda = tuple(prior_round_agenda or ())
+    if config.discuss_result_mode == "answer":
+        history = "\n".join(
+            f"- {getattr(v, 'reviewer', 'unknown')}: position={getattr(v, 'position', 'failed')}; "
+            f"answer={getattr(v, 'answer', None) or '(none)'}; rationale={getattr(v, 'rationale', getattr(v, 'category', ''))}"
+            for v in prior_round_votes
+        ) or "(no prior round)"
+        analyzer_context = ""
+        if analyzer_agenda is not None:
+            analyzer_context = (
+                "\n\nAnalyzer agenda for the prior round (non-authoritative; verify it "
+                "against the issue and your own reasoning):\n"
+                + "\n".join(_render_discuss_agenda_prompt_block(analyzer_agenda))
+            )
+        rebuttal = "omit `rebuttal` in round 1" if round_number == 1 else "include a non-empty `rebuttal` directly addressing the prior round"
+        research = _discuss_research_policy_block(research_mode)
+        return f"""Evaluate GitHub issue #{issue_number} in {config.repo} as an open-ended system/design question.
+
+Use this local checkout only to inspect context. Do not edit files, create a branch, commit, push, or open a pull request.
+{_issue_context_block(issue_context)}{_memory_block(memory)}
+Prior round positions (the analyzer is non-authoritative; do not treat it as a vote):
+{history}{analyzer_context}
+
+Produce the best consensus answer or tradeoff recommendation, not an implementation vote.
+{research}
+Respond with exactly this JSON object followed by the approved plan footer:
+{{
+  "schema_version": 1,
+  "kind": "discuss_answer",
+  "position": "answer",
+  "answer": "A concise answer or recommendation.",
+  "rationale": "Why this answer follows from the evidence.",
+  "confidence": "medium",
+  "open_questions": [],
+  "rebuttal": "..."
+}}
+Rules: position is exactly `answer` or `needs-human`; `answer` requires non-empty answer; `needs-human` requires non-empty open_questions and may omit answer; {rebuttal}.
+Do not include triage fields such as outcome or split_proposals. The analyzer is not authoritative and is context only; sourced research facts must remain distinct from judgment.
+<!-- AGENT_PLAN_STATE: approved -->
+-- {reviewer_signature}
+"""
     analyzer_rules = ""
     if round_number <= 1:
         round_context = (

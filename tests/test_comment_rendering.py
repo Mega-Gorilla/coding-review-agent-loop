@@ -19,7 +19,7 @@ from coding_review_agent_loop.comment_rendering import (
     render_deferred_stages_section,
     render_discuss_round_summary_comment,
 )
-from coding_review_agent_loop.protocol import ParsedDiscussReview
+from coding_review_agent_loop.protocol import ParsedDiscussAnswer, ParsedFailedDiscussResponse, ParsedDiscussReview
 from coding_review_agent_loop.orchestrator import (
     HUMAN_REQUIREMENTS_ACK_ITEM_ID,
     ITEM_SUMMARY_LIMIT,
@@ -54,6 +54,21 @@ from agent_loop_helpers import (
     structured_plan_state,
     structured_pr_review,
 )
+
+
+def test_answer_research_rendering_ignores_failed_resume_placeholder():
+    answer = ParsedDiscussAnswer(
+        position="answer", rationale="Supported.", confidence="medium", open_questions=(),
+        reviewer="Codex", answer="Use an API.", research_status="not-needed",
+    )
+    failed = ParsedFailedDiscussResponse("Claude", "timeout", "answer")
+    rendered = render_discuss_round_summary_comment(
+        is_final=True, subject="subject", round_number=1, reviewer_votes=[answer],
+        round_history=[[answer, failed]], outcome="answer", consensus_kind="unanimous",
+        research_mode="auto", result_mode="answer",
+    )
+    assert "Use an API." in rendered
+    assert "Claude" not in rendered
 
 def test_render_canonical_plan_steps_numbers_items():
     assert render_canonical_plan_steps(("Update protocol.py.", "Add tests.")) == (

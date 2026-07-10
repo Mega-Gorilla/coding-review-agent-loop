@@ -85,7 +85,7 @@ def strip_unknown_prior_item_dispositions(
 
 def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> str | None:
     """Trim envelope-only trailing material without changing structured JSON."""
-    if expected_kind not in {"pr_review", "plan_review", "plan_revision", "coder_followup", "discuss_review", "discuss_agenda"}:
+    if expected_kind not in {"pr_review", "plan_review", "plan_revision", "coder_followup", "discuss_review", "discuss_answer", "discuss_agenda"}:
         return None
 
     stripped = raw.lstrip()
@@ -100,7 +100,7 @@ def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> st
 
     json_text = stripped[:json_end].rstrip()
     trailing = stripped[json_end:]
-    state_re = PLAN_STATE_RE if expected_kind in {"plan_review", "plan_revision", "discuss_review", "discuss_agenda"} else STATE_RE
+    state_re = PLAN_STATE_RE if expected_kind in {"plan_review", "plan_revision", "discuss_review", "discuss_answer", "discuss_agenda"} else STATE_RE
     state_match = state_re.search(trailing)
     if state_match is None:
         return None
@@ -308,6 +308,26 @@ Notes:
 }
 <!-- AGENT_PLAN_STATE: approved -->
 -- <Analyzer Name>
+
+## Valid Format G — Discuss Answer:
+
+{
+  "schema_version": 1,
+  "kind": "discuss_answer",
+  "position": "answer" | "needs-human",
+  "answer": "<answer or recommendation; required for answer>",
+  "rationale": "<why>",
+  "confidence": "low" | "medium" | "high",
+  "open_questions": ["<question; required for needs-human>"],
+  "rebuttal": "<required after round one>",
+  "research": {"status": "sourced" | "not-needed" | "unavailable" | "inconclusive", "sourced_facts": []}
+}
+<!-- AGENT_PLAN_STATE: approved -->
+-- <Reviewer Name>
+
+Notes: preserve answer-mode fields, never convert this payload to `outcome` or
+`split_proposals`; `needs-human` is explicit escalation and is distinct from
+deadlock caused by disagreement.
 
 Notes:
 - consensus, disagreements, and missing_facts may be empty arrays.
@@ -844,6 +864,43 @@ Notes:
 - Preserve research.status, every sourced fact, and every source verbatim; never invent or drop them.
 - If the original reported no research, do not add a research object.
 
+## WORKED EXAMPLE 17 — discuss_answer with answer and needs-human positions:
+
+Original (malformed): answer-mode output uses a triage `outcome` field and omits
+the required answer-mode fields.
+
+CORRECT repair — use only the answer schema, preserve the conclusion, and keep
+the AGENT_PLAN_STATE footer:
+{
+  "schema_version": 1,
+  "kind": "discuss_answer",
+  "position": "answer",
+  "answer": "Use an API boundary with an explicit adapter.",
+  "rationale": "This keeps the integration replaceable without duplicating policy.",
+  "confidence": "medium",
+  "open_questions": []
+}
+<!-- AGENT_PLAN_STATE: approved -->
+-- Reviewer
+
+For an escalation, use `position: "needs-human"`, omit `answer` when there is
+no asserted answer, and include at least one concrete `open_questions` entry:
+{
+  "schema_version": 1,
+  "kind": "discuss_answer",
+  "position": "needs-human",
+  "rationale": "The requirements conflict and cannot be resolved from the issue.",
+  "confidence": "low",
+  "open_questions": ["Which latency target should control the design?"]
+}
+<!-- AGENT_PLAN_STATE: approved -->
+-- Reviewer
+
+For debate rounds, preserve a non-empty `rebuttal`. Preserve `analyzer_framing`
+and its required `framing_note`, and preserve the `research` object and every
+sourced fact. Do not repair answer mode into `discuss_review`, and do not add
+`outcome` or `split_proposals` fields.
+
 ## FORMAT:
 1. Start DIRECTLY with { — no prose, no markdown fences.
 2. After }: For approved `pr_review` or `plan_review` that now includes `<!-- HUMAN_REQUIREMENTS_RESOLVED -->`,
@@ -859,7 +916,7 @@ Output ONLY the repaired response. No explanations.
 {raw_response}"""
 
 _REPAIR_MODEL = "gemini-3.1-flash-lite"
-_SUPPORTED_EXPECTED_KINDS = {"pr_review", "plan_review", "coder_followup", "plan_revision", "discuss_review", "discuss_agenda"}
+_SUPPORTED_EXPECTED_KINDS = {"pr_review", "plan_review", "coder_followup", "plan_revision", "discuss_review", "discuss_answer", "discuss_agenda"}
 RepairOutcome = Literal[
     "succeeded", "nonzero_exit", "empty_output", "timeout", "spawn_error", "invalid_output"
 ]

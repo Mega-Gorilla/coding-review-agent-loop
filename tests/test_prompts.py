@@ -2018,6 +2018,7 @@ from coding_review_agent_loop.prompts import (
 )
 from coding_review_agent_loop.protocol import (
     DiscussAgendaDisagreement,
+    ParsedDiscussAnswer,
     ParsedDiscussAgenda,
     ParsedDiscussReview,
 )
@@ -2099,6 +2100,20 @@ def test_build_discuss_agenda_prompt_includes_every_round_of_history(tmp_path):
     assert '"kind": "discuss_agenda"' in prompt
 
 
+def test_build_discuss_agenda_prompt_supports_answer_history(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer")
+    answer = ParsedDiscussAnswer(
+        position="answer", rationale="The evidence favors the API.", confidence="high",
+        open_questions=(), reviewer="Codex", answer="Use an API.", rebuttal="Addressed the concern.",
+    )
+    prompt = build_discuss_agenda_prompt(
+        56, config, analyzer="claude", round_number=2, round_history=[[answer]]
+    )
+    assert "`answer`" in prompt
+    assert "Use an API." in prompt
+    assert "Split proposals:" not in prompt
+
+
 def test_build_discuss_agenda_prompt_without_prior_agenda(tmp_path):
     config = make_config(tmp_path, reviewer=("codex", "gemini"))
     prompt = build_discuss_agenda_prompt(
@@ -2149,6 +2164,27 @@ def test_build_discuss_review_prompt_analyzer_mode_omits_other_debaters_text(tmp
     assert "analyzer_framing" in prompt
     assert "misframed" in prompt
     assert "The analyzer is not authoritative" in prompt
+
+
+def test_build_discuss_answer_prompt_keeps_analyzer_and_research_non_authoritative(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer")
+    prior = ParsedDiscussAnswer(
+        position="answer", rationale="Prior rationale.", confidence="medium",
+        open_questions=("Which latency target applies?",), reviewer="Codex",
+        answer="Use an API.", rebuttal="The boundary reduces coupling.",
+    )
+    prompt = build_discuss_review_prompt(
+        56, config, reviewer="codex", round_number=2, prior_round_votes=[prior],
+        prior_round_agenda=("- Codex held `answer`: Use an API.",),
+        analyzer_agenda=_sample_agenda(), research_mode="required",
+    )
+    assert '"kind": "discuss_answer"' in prompt
+    assert '"position": "answer"' in prompt
+    assert "The analyzer is not authoritative" in prompt
+    assert "Research policy: `required`" in prompt
+    assert "sourced_facts" in prompt
+    assert '"outcome":' not in prompt
+    assert '"split_proposals":' not in prompt
 
 
 def test_build_discuss_review_prompt_plain_mode_unchanged_without_agenda(tmp_path):

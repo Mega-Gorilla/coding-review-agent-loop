@@ -1,5 +1,13 @@
 # coding-review-agent-loop
 
+Discuss mode defaults to the backward-compatible implementation-triage result
+contract. For open-ended design or system questions, pass
+`--discuss-result-mode answer`; it produces a consensus recommendation,
+explicit `needs-human` escalation, or a deadlock summary without forcing an
+implementation vote. Answer-mode transcripts are mode-bound for repair and
+resume, while analyzer observations and sourced research remain clearly
+separate from debater-confirmed conclusions.
+
 Local command-line orchestration for a coding PR review loop.
 
 Run a local Claude/Codex/Gemini PR review loop using your existing CLI subscriptions.

@@ -45,6 +45,7 @@ DISCUSS_RESEARCH_MODES: frozenset[str] = frozenset({"none", "required", "auto"})
 
 # Discuss-mode debater failure policy values (#475).
 DISCUSS_DEBATER_FAILURE_MODES: frozenset[str] = frozenset({"fail", "partial"})
+DISCUSS_RESULT_MODES: frozenset[str] = frozenset({"triage", "answer"})
 
 
 @dataclass(frozen=True)
@@ -116,6 +117,9 @@ class AgentLoopConfig:
     # "required" enforces sourced external facts from every debater, "auto"
     # lets debaters/analyzer decide using conservative triggers.
     discuss_research: str = "none"
+    # Result contract for discuss.  Triage is deliberately the default for
+    # backwards compatibility with existing transcripts and callers.
+    discuss_result_mode: str = "triage"
     # Parallel debater execution for discuss mode (#475). Opt-in; sequential
     # stays the default to avoid surprise quota pressure.
     discuss_parallel: bool = False
@@ -184,6 +188,9 @@ class AgentLoopConfig:
         if self.discuss_research not in DISCUSS_RESEARCH_MODES:
             rendered = ", ".join(f"'{mode}'" for mode in sorted(DISCUSS_RESEARCH_MODES))
             raise AgentLoopError(f"--discuss-research must be one of: {rendered}.")
+        if self.discuss_result_mode not in DISCUSS_RESULT_MODES:
+            rendered = ", ".join(f"'{mode}'" for mode in sorted(DISCUSS_RESULT_MODES))
+            raise AgentLoopError(f"--discuss-result-mode must be one of: {rendered}.")
         if self.discuss_on_debater_failure not in DISCUSS_DEBATER_FAILURE_MODES:
             rendered = ", ".join(f"'{mode}'" for mode in sorted(DISCUSS_DEBATER_FAILURE_MODES))
             raise AgentLoopError(f"--discuss-on-debater-failure must be one of: {rendered}.")
@@ -869,6 +876,7 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
         repair_timeout_seconds=getattr(args, "repair_timeout_seconds", 120),
         discuss_analyzer=getattr(args, "discuss_analyzer", None),
         discuss_research=getattr(args, "discuss_research", "none") or "none",
+        discuss_result_mode=getattr(args, "discuss_result_mode", "triage") or "triage",
         discuss_parallel=getattr(args, "discuss_parallel", False),
         discuss_debater_timeout=getattr(args, "discuss_debater_timeout", None),
         discuss_on_debater_failure=getattr(args, "discuss_on_debater_failure", "fail") or "fail",

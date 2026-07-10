@@ -335,6 +335,29 @@ Evaluate a GitHub issue without writing any code:
 agent-loop discuss 123 --repo OWNER/REPO
 ```
 
+### Open-ended answer results
+
+The legacy implementation-triage contract remains the default. For system and
+design questions, use `--discuss-result-mode answer`:
+
+```bash
+agent-loop discuss 123 --repo OWNER/REPO \
+  --reviewer codex --reviewer claude \
+  --discuss-result-mode answer
+```
+
+Debaters return `kind: "discuss_answer"` with `position: "answer"` or
+`"needs-human"`, plus `answer`, `rationale`, `confidence`, and
+`open_questions`. A unanimous normalized answer is rendered as **Consensus
+Answer** in round one; later convergence is **Converged Answer**. When every
+successful debater has an explicit `needs-human` position, the
+result is **Needs Human Decision**. Otherwise disagreement or partial failure
+is **Deadlock**—a lone `needs-human` position and disagreement alone never
+become escalation.
+Analyzer observations remain non-authoritative and cited research remains a
+separate sourced-facts section. Repair and resume preserve the selected mode;
+transcripts cannot mix answer and triage responses.
+
 Discuss mode sends the issue title, body, and comments to all configured
 reviewers and asks each to return a `discuss_review` response with a single
 outcome vote. Instead of collapsing a round into one orchestrator comment,

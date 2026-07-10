@@ -3,10 +3,40 @@ from agent_loop_helpers import *  # noqa: F403
 
 from coding_review_agent_loop.repair import (
     _REPAIR_PROMPT,
+    _build_repair_prompt,
     attempt_envelope_normalization,
     attempt_repair,
     execute_repair,
 )
+from coding_review_agent_loop.protocol import validate_structured_discuss_answer
+
+
+def test_answer_repair_prompt_has_mode_specific_schema_and_examples():
+    prompt = _build_repair_prompt(
+        '{"kind":"discuss_review","outcome":"implement","rationale":"Use an adapter."}',
+        expected_kind="discuss_answer",
+    )
+    assert '"kind": "discuss_answer"' in prompt
+    assert '"position": "needs-human"' in prompt
+    assert '"open_questions"' in prompt
+    assert "Do not repair answer mode into `discuss_review`" in prompt
+    assert "split_proposals" in prompt
+
+
+def test_answer_repair_shape_preserves_answer_and_rejects_triage_fields():
+    valid = json.dumps({
+        "schema_version": 1, "kind": "discuss_answer", "position": "answer",
+        "answer": "Use an adapter.", "rationale": "It isolates policy.",
+        "confidence": "medium", "open_questions": [],
+    }) + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- Reviewer"
+    assert validate_structured_discuss_answer(valid, reviewer="Reviewer").position == "answer"
+    malformed = json.dumps({
+        "schema_version": 1, "kind": "discuss_answer", "position": "answer",
+        "answer": "Use an adapter.", "rationale": "Reason", "confidence": "medium",
+        "open_questions": [], "outcome": "implement",
+    }) + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- Reviewer"
+    with pytest.raises(AgentLoopError, match="unknown field.*outcome"):
+        validate_structured_discuss_answer(malformed, reviewer="Reviewer")
 
 def test_envelope_normalization_duplicate_pr_state_footer_preserves_dispositions():
     raw = (

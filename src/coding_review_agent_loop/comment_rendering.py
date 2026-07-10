@@ -19,6 +19,9 @@ from .protocol import (
     SIGNATURE_RE,
     DeferredStage,
     ParsedDiscussAgenda,
+    ParsedDiscussAnswer,
+    ParsedFailedDiscussResponse,
+    ParsedDiscussResponse,
     ParsedDiscussReview,
     ParsedPlanReview,
     ParsedReview,
@@ -690,6 +693,12 @@ def render_public_agent_comment(
             config=config,
             model_used=model_used,
         )
+    if kind == "discuss_answer":
+        if not isinstance(parsed, ParsedDiscussAnswer):
+            raise AgentLoopError("render_public_agent_comment expected ParsedDiscussAnswer.")
+        return _render_public_discuss_answer_comment(
+            parsed, reviewer=agent, round_number=round_number, config=config, model_used=model_used
+        )
     raise AgentLoopError(f"Unknown render kind: {kind}")
 
 
@@ -747,8 +756,38 @@ def _render_public_discuss_review_comment(
     return "\n\n".join(section for section in sections if section)
 
 
-def _render_discuss_agenda_lines(votes: Sequence[ParsedDiscussReview]) -> list[str]:
-    return [f"- {vote.reviewer} held `{vote.outcome}`: {vote.rationale}" for vote in votes]
+def _render_public_discuss_answer_comment(
+    parsed: ParsedDiscussAnswer, *, reviewer: str, round_number: int = 1,
+    config: AgentLoopConfig | None = None, model_used: str | None = None,
+) -> str:
+    sections = [f"## Round {round_number}: {reviewer} answer", f"**Position:** `{parsed.position}`"]
+    if parsed.answer:
+        sections.append("### Answer\n\n" + parsed.answer.strip())
+    sections.append("### Rationale\n\n" + parsed.rationale.strip())
+    sections.append(f"**Confidence:** `{parsed.confidence}`")
+    if parsed.open_questions:
+        sections.append("### Open questions\n\n" + "\n".join(f"- {q}" for q in parsed.open_questions))
+    if parsed.rebuttal:
+        sections.append("### Rebuttal\n\n" + parsed.rebuttal.strip())
+    if parsed.research_status is not None:
+        sections.append(f"**Research:** `{parsed.research_status}`")
+    if parsed.sourced_facts:
+        sections.append("### Sourced facts\n\n" + "\n".join(f"- {f.fact} — source: {f.source}" for f in parsed.sourced_facts))
+    sections.append(f"-- {_comment_signature(reviewer, config, model_used)}")
+    return "\n\n".join(sections)
+
+
+def _render_discuss_agenda_lines(votes: Sequence[ParsedDiscussResponse]) -> list[str]:
+    lines: list[str] = []
+    for vote in votes:
+        if isinstance(vote, ParsedDiscussAnswer):
+            position = vote.position
+            detail = vote.answer or vote.rationale
+        else:
+            position = vote.outcome
+            detail = vote.rationale
+        lines.append(f"- {vote.reviewer} held `{position}`: {detail}")
+    return lines
 
 
 def _render_analyzer_agenda_lines(agenda: ParsedDiscussAgenda) -> list[str]:
@@ -783,8 +822,8 @@ def _render_analyzer_agenda_lines(agenda: ParsedDiscussAgenda) -> list[str]:
 def _render_discuss_research_section(
     *,
     research_mode: str,
-    reviewer_votes: Sequence[ParsedDiscussReview],
-    round_history: Sequence[Sequence[ParsedDiscussReview]] | None,
+    reviewer_votes: Sequence[ParsedDiscussResponse],
+    round_history: Sequence[Sequence[ParsedDiscussResponse]] | None,
 ) -> list[str]:
     """Render the final-summary research section (#477).
 
@@ -798,7 +837,8 @@ def _render_discuss_research_section(
         lines.append("Online research was disabled; all positions are agent judgment.")
         return lines
     lines.append("")
-    for vote in reviewer_votes:
+    successful_votes = [v for v in reviewer_votes if not isinstance(v, ParsedFailedDiscussResponse)]
+    for vote in successful_votes:
         if vote.research_status is None:
             lines.append(f"- {vote.reviewer}: no research status reported")
         else:
@@ -811,6 +851,8 @@ def _render_discuss_research_section(
     seen: set[tuple[str, str, str]] = set()
     for votes in fact_rounds:
         for vote in votes:
+            if isinstance(vote, ParsedFailedDiscussResponse):
+                continue
             for fact in vote.sourced_facts:
                 key = (vote.reviewer, fact.fact, fact.source)
                 if key not in seen:
@@ -822,7 +864,7 @@ def _render_discuss_research_section(
             "Sourced facts cited by debaters (everything else above is agent judgment):"
         )
         lines.extend(sourced)
-    statuses = [vote.research_status for vote in reviewer_votes]
+    statuses = [vote.research_status for vote in successful_votes]
     if statuses and all(status == "not-needed" for status in statuses):
         lines.append("")
         lines.append(
@@ -830,7 +872,7 @@ def _render_discuss_research_section(
         )
     gap_reviewers = [
         vote.reviewer
-        for vote in reviewer_votes
+        for vote in successful_votes
         if vote.research_status in {"unavailable", "inconclusive"}
     ]
     if gap_reviewers:
@@ -839,7 +881,7 @@ def _render_discuss_research_section(
             f"Research was unavailable or inconclusive for {', '.join(gap_reviewers)}; "
             "treat their related claims as judgment, not sourced fact."
         )
-    unreported = [vote.reviewer for vote in reviewer_votes if vote.research_status is None]
+    unreported = [vote.reviewer for vote in successful_votes if vote.research_status is None]
     if unreported:
         lines.append("")
         lines.append(
@@ -874,15 +916,16 @@ def render_discuss_round_summary_comment(
     is_final: bool,
     subject: str,
     round_number: int = 1,
-    reviewer_votes: Sequence[ParsedDiscussReview],
+    reviewer_votes: Sequence[ParsedDiscussResponse],
     outcome: str | None = None,
     consensus_kind: str = "unanimous",
-    round_history: Sequence[Sequence[ParsedDiscussReview]] | None = None,
+    round_history: Sequence[Sequence[ParsedDiscussResponse]] | None = None,
     split_proposals: Sequence[str] | None = None,
     analyzer_agenda: ParsedDiscussAgenda | None = None,
     analyzer_name: str | None = None,
     research_mode: str | None = None,
     failed_debaters: Sequence[tuple[str, str]] = (),
+    result_mode: str = "triage",
 ) -> str:
     """Render the orchestrator/analyzer round-summary comment.
 
@@ -896,6 +939,14 @@ def render_discuss_round_summary_comment(
     consensus section kept distinct from the debater vote table.
     """
     split_proposals = list(split_proposals or ())
+    if result_mode == "answer":
+        return _render_discuss_answer_summary(
+            is_final=is_final, subject=subject, round_number=round_number,
+            reviewer_votes=reviewer_votes, consensus_kind=consensus_kind,
+            round_history=round_history, analyzer_agenda=analyzer_agenda,
+            analyzer_name=analyzer_name, research_mode=research_mode,
+            failed_debaters=failed_debaters, outcome=outcome,
+        )
     if not is_final:
         lines: list[str] = [
             f"## Round {round_number} summary: Consensus Pending",
@@ -1005,4 +1056,41 @@ def render_discuss_round_summary_comment(
     lines.append("")
     lines.append("-- Orchestrator")
     lines.append(f"<!-- AGENT_DISCUSS_CONSENSUS: {subject} -->")
+    return "\n".join(lines)
+
+
+def _render_discuss_answer_summary(*, is_final: bool, subject: str, round_number: int,
+    reviewer_votes: Sequence[ParsedDiscussAnswer], consensus_kind: str,
+    round_history: Sequence[Sequence[ParsedDiscussAnswer]] | None,
+    analyzer_agenda: ParsedDiscussAgenda | None, analyzer_name: str | None,
+    research_mode: str | None, failed_debaters: Sequence[tuple[str, str]], outcome: str | None) -> str:
+    if not is_final:
+        heading = f"## Round {round_number} summary: Answer Pending"
+    elif outcome == "needs-human":
+        heading = "## Needs Human Decision"
+    elif outcome == "deadlock":
+        heading = "## Deadlock"
+    else:
+        heading = "## " + ("Consensus Answer" if consensus_kind == "unanimous" else "Converged Answer")
+    lines = [heading, "", f"Consensus kind: `{consensus_kind}` after round {round_number}.", ""]
+    if is_final and outcome not in {"needs-human", "deadlock"}:
+        answers = [v.answer for v in reviewer_votes if v.answer]
+        if answers:
+            lines.extend(["### Answer", "", answers[0], ""])
+    lines.extend(["| Reviewer | Position | Confidence | Answer |", "| --- | --- | --- | --- |"])
+    for vote in reviewer_votes:
+        answer = (vote.answer or "(no asserted answer)").replace("|", "\\|").replace("\n", " ")
+        lines.append(f"| {vote.reviewer} | {vote.position} | {vote.confidence} | {answer} |")
+    if failed_debaters:
+        lines.extend(_render_discuss_failed_debater_lines(failed_debaters, is_final=is_final))
+    questions = [q for v in reviewer_votes for q in v.open_questions]
+    if questions:
+        lines.extend(["", "### Open questions", "", *[f"- {q}" for q in dict.fromkeys(questions)]])
+    if outcome == "deadlock":
+        lines.extend(["", "### Unresolved disagreement", "", "The debaters did not converge on one normalized answer."])
+    if analyzer_agenda is not None:
+        lines.extend(["", "### Analyzer observations (not debater-confirmed)", "", "The analyzer is non-authoritative.", "", *_render_analyzer_agenda_lines(analyzer_agenda)])
+    if research_mode is not None:
+        lines.extend(["", *_render_discuss_research_section(research_mode=research_mode, reviewer_votes=reviewer_votes, round_history=round_history)])
+    lines.extend(["", "-- Orchestrator", f"<!-- AGENT_DISCUSS_CONSENSUS: {subject} -->"] if is_final else ["", "-- Orchestrator"])
     return "\n".join(lines)
