@@ -5481,7 +5481,13 @@ def _run_discuss_semantic_finalization(
         comparison = response.marker_value
         assert isinstance(comparison, ParsedDiscussSemanticComparison)
     except (AgentLoopError, AgentInvocationError):
-        return "deadlock", "semantic-comparison-failed", None
+        # Preserve an explicit audit record even when the comparator itself
+        # fails. This distinguishes its fail-closed deadlock from a purely
+        # textual disagreement in both the public summary and round metadata.
+        return "deadlock", "semantic-comparison-failed", {
+            "classification": "failed",
+            "analyzer": agent_display_name(analyzer),
+        }
     audit: dict[str, object] = {
         "classification": comparison.classification,
         "shared_recommendation": comparison.shared_recommendation,
@@ -5942,6 +5948,7 @@ def _run_discuss_loop(
             consensus = _detect_discuss_consensus(reviewer_votes)  # type: ignore[arg-type]
         is_final = consensus is not None or round_number == max_round_number
         semantic_comparison: dict[str, object] | None = None
+        semantic_finalization_ran = False
         # Keep normalized equality as the zero-call fast path.  Only a complete,
         # final all-answer round is eligible for the configured independent analyzer.
         if (
@@ -5950,6 +5957,7 @@ def _run_discuss_loop(
             and len(successful_votes) == len(configured_reviewers)
             and all(isinstance(vote, ParsedDiscussAnswer) and vote.position == "answer" and vote.answer for vote in successful_votes)
         ):
+            semantic_finalization_ran = True
             outcome, semantic_kind, semantic_comparison = _run_discuss_semantic_finalization(
                 runner, issue_number=issue_number, config=config,
                 answers=[vote for vote in successful_votes if isinstance(vote, ParsedDiscussAnswer)],
@@ -5962,7 +5970,9 @@ def _run_discuss_loop(
             round_split_proposals: list[str] = (
                 [] if config.discuss_result_mode == "answer" else _merge_discuss_split_proposals(successful_votes)  # type: ignore[arg-type]
             )
-            consensus_kind = "deadlock" if is_final else None
+            consensus_kind = None if not is_final else (
+                semantic_kind if semantic_finalization_ran else "deadlock"
+            )
         else:
             outcome, round_split_proposals = consensus
             if semantic_comparison is None:

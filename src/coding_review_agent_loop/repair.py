@@ -196,7 +196,7 @@ def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> st
 # Uses str.replace("{raw_response}", raw, 1) for substitution because the prompt
 # itself contains literal { } characters in the JSON examples.
 _REPAIR_PROMPT = """\
-You are a format-repair assistant. An AI agent produced a code review, plan review, plan revision, coder follow-up, discuss review, or discuss agenda that failed strict schema validation. Extract its intent and reformat it into one of these valid formats.
+You are a format-repair assistant. An AI agent produced a code review, plan review, plan revision, coder follow-up, discuss review, discuss agenda, semantic comparison, or answer confirmation that failed strict schema validation. Extract its intent and reformat it into one of these valid formats.
 
 {expected_kind_instruction}
 
@@ -343,6 +343,42 @@ When research intent is present, preserve `target` and `questions` together;
 never invent either field or a source while repairing. For `status: "not-needed"`,
 omit both intent fields because they are valid only for active research.
 
+## Valid Format H — Discuss Semantic Comparison:
+
+{
+  "schema_version": 1,
+  "kind": "discuss_semantic_comparison",
+  "classification": "equivalent" | "compatible_with_residual_decisions" | "material_conflict",
+  "shared_recommendation": "<common recommendation or concise conflict summary>",
+  "remaining_decisions": ["<decision required only for compatible answers>"],
+  "evidence": [{"reviewer": "<final-round reviewer>", "supports": "<what its answer supports>"}]
+}
+<!-- AGENT_PLAN_STATE: approved -->
+-- <Analyzer Name>
+
+Notes: preserve the supplied final-round reviewers exactly: evidence must contain
+one non-empty entry for every reviewer and no others. `equivalent` requires an
+empty remaining_decisions array; `compatible_with_residual_decisions` requires a
+non-empty one. Never invent repository facts, research, or a recommendation that
+is not recoverable from the compared answers.
+
+## Valid Format I — Discuss Answer Confirmation:
+
+{
+  "schema_version": 1,
+  "kind": "discuss_answer_confirmation",
+  "reviewer": "<the confirming reviewer>",
+  "decision": "confirm" | "refine",
+  "rationale": "<why>",
+  "answer": "<non-empty replacement; required only for refine>"
+}
+<!-- AGENT_PLAN_STATE: approved -->
+-- <Reviewer Name>
+
+Notes: `confirm` must omit answer; `refine` must include a non-empty answer.
+Preserve the reviewer identity supplied by the expected-kind context and do not
+invent a replacement answer.
+
 Notes:
 - consensus, disagreements, and missing_facts may be empty arrays.
 - each disagreement requires non-empty topic, positions, and question_for_next_round.
@@ -440,6 +476,8 @@ the `### Human requirements` section from Format D.
 - If an expected response kind is provided above, use ONLY that format. Do not infer a different kind from keywords in the malformed response.
 - Use Format C if the original contains "coder_followup" or "addressed_items" or "remaining_items".
 - Use Format D if the original contains "plan_revision" or "plan_steps".
+- Use Format H if the original contains "discuss_semantic_comparison" or "remaining_decisions".
+- Use Format I if the original contains "discuss_answer_confirmation" or "decision".
 - Use Format F if the original contains "discuss_agenda" or "question_for_next_round".
 - Use Format B if the original contains AGENT_PLAN_STATE / blocking_plan_issues / same_plan_followups / prior_plan_item_dispositions.
 - Otherwise use Format A.

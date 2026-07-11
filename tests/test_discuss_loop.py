@@ -119,6 +119,37 @@ def _discuss_answer_text(
     return json.dumps(payload) + f"\n<!-- AGENT_PLAN_STATE: approved -->\n-- {reviewer}"
 
 
+def _semantic_comparison_text(
+    *, classification: str, shared_recommendation: str,
+    remaining_decisions: list[str] | None = None,
+) -> str:
+    payload = {
+        "schema_version": 1,
+        "kind": "discuss_semantic_comparison",
+        "classification": classification,
+        "shared_recommendation": shared_recommendation,
+        "remaining_decisions": remaining_decisions or [],
+        "evidence": [
+            {"reviewer": "Codex", "supports": "Supports the shared recommendation."},
+            {"reviewer": "Gemini", "supports": "Supports the shared recommendation."},
+        ],
+    }
+    return json.dumps(payload) + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- Anthropic Claude"
+
+
+def _answer_confirmation_text(*, reviewer: str, decision: str = "confirm", answer: str | None = None) -> str:
+    payload = {
+        "schema_version": 1,
+        "kind": "discuss_answer_confirmation",
+        "reviewer": reviewer,
+        "decision": decision,
+        "rationale": "The recommendation is acceptable.",
+    }
+    if answer is not None:
+        payload["answer"] = answer
+    return json.dumps(payload) + f"\n<!-- AGENT_PLAN_STATE: approved -->\n-- {reviewer}"
+
+
 def _discuss_agenda_text(
     *,
     consensus: list[str] | None = None,
@@ -350,6 +381,108 @@ def test_discuss_loop_answer_disagreement_is_deadlock_and_unanimous_escalation_i
     assert run_discuss_loop(escalation, issue_number=56, config=config, discuss_max_rounds=0) == 0
     assert "Needs Human Decision" in escalation.comments[-1]
     assert "Who owns the decision?" in escalation.comments[-1]
+
+
+def test_discuss_loop_semantic_equivalent_paraphrases_converge(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[_discuss_answer_text(answer="Add a bounded verification subphase.")],
+        gemini_outputs=[_discuss_answer_text(answer="Introduce a capped, targeted verification phase.")],
+        claude_outputs=[_semantic_comparison_text(
+            classification="equivalent", shared_recommendation="Add a targeted, budget-capped verification subphase.",
+        )],
+    )
+    config = make_config(
+        tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer", discuss_analyzer="claude",
+    )
+
+    assert run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=0) == 0
+    final = runner.comments[-1]
+    assert "Converged Answer" in final
+    assert "Consensus kind: `semantic-equivalent`" in final
+    assert "targeted, budget-capped verification subphase" in final
+    assert "Semantic comparison (advisory; not a debater vote)" in final
+    metadata = ROUND_RESUME_MARKER_RE.search(runner.issue_comments[-1]["body"])
+    assert metadata is not None
+    assert _decode_round_metadata(metadata.group("payload")).consensus_kind == "semantic-equivalent"
+
+
+@pytest.mark.parametrize("refine", [False, True])
+def test_discuss_loop_semantic_compatible_answers_require_debater_confirmation(tmp_path, refine):
+    canonical = "Add a targeted, budget-capped verification subphase."
+    runner = FakeRunner(
+        codex_outputs=[
+            _discuss_answer_text(answer="Add bounded verification."),
+            _answer_confirmation_text(reviewer="Codex", decision="confirm"),
+        ],
+        gemini_outputs=[
+            _discuss_answer_text(answer="Use targeted verification with a cap."),
+            _answer_confirmation_text(
+                reviewer="Gemini", decision="refine" if refine else "confirm",
+                answer=canonical if refine else None,
+            ),
+        ],
+        claude_outputs=[_semantic_comparison_text(
+            classification="compatible_with_residual_decisions", shared_recommendation=canonical,
+            remaining_decisions=["Choose the cap."],
+        )],
+    )
+    config = make_config(
+        tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer", discuss_analyzer="claude",
+    )
+
+    assert run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=0) == 0
+    final = runner.comments[-1]
+    assert "Consensus kind: `debater-confirmed`" in final
+    assert "The recommendation above was explicitly confirmed by every debater." in final
+    assert "Residual decisions:" in final
+    metadata = ROUND_RESUME_MARKER_RE.search(runner.issue_comments[-1]["body"])
+    assert metadata is not None
+    assert _decode_round_metadata(metadata.group("payload")).consensus_kind == "debater-confirmed"
+
+
+@pytest.mark.parametrize("failed_comparison", [("comparator unavailable", 1), "not structured"])
+def test_discuss_loop_semantic_material_conflict_and_failure_are_auditable_deadlocks(tmp_path, failed_comparison):
+    def run_with(comparison):
+        runner = FakeRunner(
+            codex_outputs=[_discuss_answer_text(answer="Use an API.")],
+            gemini_outputs=[_discuss_answer_text(answer="Use a library.")],
+            claude_outputs=[comparison],
+        )
+        config = make_config(
+            tmp_path, reviewer=("codex", "gemini"), discuss_result_mode="answer", discuss_analyzer="claude",
+        )
+        assert run_discuss_loop(runner, issue_number=56, config=config, discuss_max_rounds=0) == 0
+        return runner
+
+    conflict_runner = run_with(_semantic_comparison_text(
+        classification="material_conflict", shared_recommendation="The alternatives materially differ.",
+    ))
+    conflict = conflict_runner.comments[-1]
+    assert "Deadlock" in conflict
+    assert "Consensus kind: `material-conflict`" in conflict
+    assert "Classification: `material_conflict`" in conflict
+    metadata = ROUND_RESUME_MARKER_RE.search(conflict_runner.issue_comments[-1]["body"])
+    assert metadata is not None
+    assert _decode_round_metadata(metadata.group("payload")).consensus_kind == "material-conflict"
+
+    failure_runner = run_with(failed_comparison)
+    failure = failure_runner.comments[-1]
+    assert "Deadlock" in failure
+    assert "Consensus kind: `semantic-comparison-failed`" in failure
+    assert "Classification: `failed`" in failure
+    metadata = ROUND_RESUME_MARKER_RE.search(failure_runner.issue_comments[-1]["body"])
+    assert metadata is not None
+    assert _decode_round_metadata(metadata.group("payload")).consensus_kind == "semantic-comparison-failed"
+
+
+def test_discuss_loop_triage_mode_does_not_invoke_semantic_comparator(tmp_path):
+    vote = _discuss_review_text(outcome="implement")
+    runner = FakeRunner(codex_outputs=[vote], gemini_outputs=[vote])
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), discuss_analyzer="claude")
+
+    assert run_discuss_loop(runner, issue_number=56, config=config) == 0
+    assert "Consensus: Implement" in runner.comments[-1]
+    assert not any("discuss_semantic_comparison" in " ".join(command) for command, _ in runner.commands)
 
 
 def test_discuss_loop_answer_research_required_and_analyzer_prompt_are_mode_aware(tmp_path):

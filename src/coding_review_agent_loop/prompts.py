@@ -2677,7 +2677,6 @@ Rules:
 
 def build_discuss_semantic_comparison_prompt(
     issue_number: int, config: AgentLoopConfig, *, answers: Sequence[ParsedDiscussAnswer],
-    issue_context: IssueContext | None = None,
 ) -> str:
     """A bounded, advisory final-round comparator prompt (#528)."""
     answer_lines = "\n".join(f"- {item.reviewer}: {item.answer}" for item in answers)
