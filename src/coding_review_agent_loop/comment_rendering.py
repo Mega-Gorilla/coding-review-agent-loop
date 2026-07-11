@@ -840,6 +840,7 @@ def _render_discuss_research_section(
     research_mode: str,
     reviewer_votes: Sequence[ParsedDiscussResponse],
     round_history: Sequence[Sequence[ParsedDiscussResponse]] | None,
+    evidence_reconciliation: dict[str, object] | None = None,
 ) -> list[str]:
     """Render the final-summary research section (#477).
 
@@ -865,24 +866,51 @@ def _render_discuss_research_section(
         if getattr(vote, "research_target", None):
             lines.append(f"  Target: `{vote.research_target}`")
             lines.extend(f"  Question: {question}" for question in vote.research_questions)
-    fact_rounds = round_history if round_history else [reviewer_votes]
-    sourced: list[str] = []
-    seen: set[tuple[str, str, str]] = set()
-    for votes in fact_rounds:
-        for vote in votes:
-            if isinstance(vote, ParsedFailedDiscussResponse):
-                continue
-            for fact in vote.sourced_facts:
-                key = (vote.reviewer, fact.fact, fact.source)
-                if key not in seen:
-                    seen.add(key)
-                    sourced.append(f"- {vote.reviewer}: {fact.fact} — source: {fact.source}")
-    if sourced:
-        lines.append("")
-        lines.append(
-            "Sourced facts cited by debaters (everything else above is agent judgment):"
-        )
-        lines.extend(sourced)
+    # Final summaries use the reconciled ledger.  Individual debater comments
+    # remain the complete append-only audit trail.
+    if evidence_reconciliation is not None:
+        rendered = evidence_reconciliation.get("rendered", [])
+        lines.append("Sourced facts cited by debaters are reported evidence unless directly verified below.")
+        current = [item for item in rendered if "status" in item]
+        history = [item for item in rendered if "action" in item]
+        for status, heading in (
+            ("verified", "Verified evidence"),
+            ("reported-but-unverified", "Reported but unverified"),
+            ("missing", "Missing facts"),
+        ):
+            entries = [item for item in current if item.get("status") == status]
+            if entries:
+                lines.extend(["", f"### {heading}", ""])
+                for item in entries:
+                    sources = "; ".join(item.get("sources", [])) or "no source supplied"
+                    contributors = ", ".join(item.get("contributors", []))
+                    refs = ", ".join(item.get("ids", []))
+                    lines.append(f"- {item.get('fact')} — contributors: {contributors}; source: {sources} (`{refs}`)")
+        if history:
+            lines.extend(["", "### Retracted or superseded history", ""])
+            for item in history:
+                lines.append(f"- {item.get('action')}: {item.get('fact')} (`{item.get('id')}`); reason: {item.get('reason')}")
+        omitted = evidence_reconciliation.get("omitted_entries", 0)
+        lines.extend(["", f"Audit: {evidence_reconciliation.get('observation_count', 0)} observations, {evidence_reconciliation.get('update_count', 0)} updates; ledger digest `{evidence_reconciliation.get('digest')}`."])
+        if omitted:
+            lines.append(f"{omitted} lower-priority ledger entries were omitted from this bounded summary; round comments and replay metadata retain the raw audit trail.")
+    else:
+        # Compatibility for callers rendering an old transcript without the
+        # persisted reconciliation artifact.
+        fact_rounds = round_history if round_history else [reviewer_votes]
+        sourced: list[str] = []
+        seen: set[tuple[str, str, str]] = set()
+        for votes in fact_rounds:
+            for vote in votes:
+                if isinstance(vote, ParsedFailedDiscussResponse):
+                    continue
+                for fact in vote.sourced_facts:
+                    key = (vote.reviewer, fact.fact, fact.source)
+                    if key not in seen:
+                        seen.add(key)
+                        sourced.append(f"- {vote.reviewer}: {fact.fact} — source: {fact.source}")
+        if sourced:
+            lines.extend(["", "Sourced facts cited by debaters (everything else above is agent judgment):", *sourced])
     statuses = [vote.research_status for vote in successful_votes]
     if statuses and all(status == "not-needed" for status in statuses):
         lines.append("")
@@ -948,6 +976,7 @@ def render_discuss_round_summary_comment(
     failed_debaters: Sequence[tuple[str, str]] = (),
     result_mode: str = "triage",
     semantic_comparison: dict[str, object] | None = None,
+    evidence_reconciliation: dict[str, object] | None = None,
 ) -> str:
     """Render the orchestrator/analyzer round-summary comment.
 
@@ -970,7 +999,7 @@ def render_discuss_round_summary_comment(
             final_analyzer_agenda=final_analyzer_agenda,
             analyzer_name=analyzer_name, research_mode=research_mode,
             failed_debaters=failed_debaters, outcome=outcome,
-            semantic_comparison=semantic_comparison,
+            semantic_comparison=semantic_comparison, evidence_reconciliation=evidence_reconciliation,
         )
     if not is_final:
         lines: list[str] = [
@@ -1074,6 +1103,7 @@ def render_discuss_round_summary_comment(
                 research_mode=research_mode,
                 reviewer_votes=reviewer_votes,
                 round_history=round_history,
+                evidence_reconciliation=evidence_reconciliation,
             )
         )
     if round_history:
@@ -1095,7 +1125,8 @@ def _render_discuss_answer_summary(*, is_final: bool, subject: str, round_number
     analyzer_agenda: ParsedDiscussAgenda | None, prior_analyzer_agenda: ParsedDiscussAgenda | None,
     final_analyzer_agenda: ParsedDiscussAgenda | None, analyzer_name: str | None,
     research_mode: str | None, failed_debaters: Sequence[tuple[str, str]], outcome: str | None,
-    semantic_comparison: dict[str, object] | None = None) -> str:
+    semantic_comparison: dict[str, object] | None = None,
+    evidence_reconciliation: dict[str, object] | None = None) -> str:
     if not is_final:
         heading = f"## Round {round_number} summary: Answer Pending"
     elif outcome == "needs-human":
@@ -1150,6 +1181,6 @@ def _render_discuss_answer_summary(*, is_final: bool, subject: str, round_number
     if prior_analyzer_agenda is not None:
         lines.extend(["", "### Agenda before final round", "", "Historical analyzer agenda only; it is not current-state analysis.", "", *_render_analyzer_agenda_lines(prior_analyzer_agenda)])
     if research_mode is not None:
-        lines.extend(["", *_render_discuss_research_section(research_mode=research_mode, reviewer_votes=reviewer_votes, round_history=round_history)])
+        lines.extend(["", *_render_discuss_research_section(research_mode=research_mode, reviewer_votes=reviewer_votes, round_history=round_history, evidence_reconciliation=evidence_reconciliation)])
     lines.extend(["", "-- Orchestrator", f"<!-- AGENT_DISCUSS_CONSENSUS: {subject} -->"] if is_final else ["", "-- Orchestrator"])
     return "\n".join(lines)

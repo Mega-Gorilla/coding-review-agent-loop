@@ -587,6 +587,34 @@ Rendering keeps sourced facts distinct from judgment:
   research policy never fails on old comments; enforcement applies only to
   newly invoked debaters.
 
+### Reconciled final evidence
+
+New discuss responses include an `evidence` object with `claims` and `updates`
+(both arrays may be empty). Claims use `verified`, `reported-but-unverified`,
+or `missing`. A verified claim requires an agent attestation that it inspected
+the exact supporting source: `external-source-inspected` with a non-empty
+reference, or `checkout-inspected` with repository-relative `path:line`.
+`missing` cannot carry a citation. Legacy `research.sourced_facts` are retained
+as reported-but-unverified; citations alone never promote a claim.
+
+For later rounds, prompts show stable observation IDs. Debaters retract or
+replace an earlier claim only through `updates`, for example
+`{"action":"supersede","target_observation_id":"issue-123-r1-Codex-c0","reason":"direct inspection disproved it","replacement_claim_index":0}`.
+This works without `--discuss-analyzer`; exact normalized fact/source matches
+combine attribution deterministically. Paraphrase grouping is optional
+evidence-reconciler behavior and never changes a status, invents an unknown, or
+revives an agenda. The existing #529 rule still applies: the final analyzer
+gets final-round debater text only.
+
+Final comments render separate Verified evidence, Reported but unverified,
+Missing facts, and Retracted or superseded history sections. Reconciliation
+input is bounded to 64 observations / 24,000 UTF-8 bytes (fact/reason fields
+clip to 512 bytes and sources to 256); the final ledger is bounded to 50
+entries / 16,000 bytes. Selection is newest-first within updates/targets,
+final-round claims, verified, reported, missing, and old history. Omitted
+counts and a digest point to the complete per-round comments and replay
+metadata, which remain the audit trail.
+
 ### Parallel debater execution
 
 `--discuss-parallel` runs same-round debaters concurrently instead of one

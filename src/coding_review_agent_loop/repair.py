@@ -85,7 +85,7 @@ def strip_unknown_prior_item_dispositions(
 
 def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> str | None:
     """Trim envelope-only trailing material without changing structured JSON."""
-    if expected_kind not in {"pr_review", "plan_review", "plan_revision", "coder_followup", "discuss_review", "discuss_answer", "discuss_agenda", "discuss_semantic_comparison", "discuss_answer_confirmation"}:
+    if expected_kind not in {"pr_review", "plan_review", "plan_revision", "coder_followup", "discuss_review", "discuss_answer", "discuss_agenda", "discuss_semantic_comparison", "discuss_answer_confirmation", "discuss_evidence_reconciliation"}:
         return None
 
     stripped = raw.lstrip()

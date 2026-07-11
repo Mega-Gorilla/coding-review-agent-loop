@@ -2304,6 +2304,26 @@ def _discuss_research_policy_block(research_mode: str) -> str:
     )
 
 
+def _render_prior_evidence_index(issue_number: int, prior_round_votes: Sequence[ParsedDiscussResponse], round_number: int) -> str:
+    """A compact, analyzer-independent target index for explicit updates."""
+    if round_number <= 1 or not prior_round_votes:
+        return ""
+    lines = ["Prior evidence index (use these stable IDs in `evidence.updates`; this is not analyzer agenda text):"]
+    for vote in prior_round_votes:
+        claims = list(getattr(vote, "evidence_claims", ()))
+        claims.extend(
+            # Legacy sourced facts are still addressable and always reported.
+            type("Legacy", (), {"fact": item.fact, "status": "reported-but-unverified"})()
+            for item in getattr(vote, "sourced_facts", ())
+        )
+        for index, claim in enumerate(claims):
+            lines.append(f"- issue-{issue_number}-r{round_number - 1}-{vote.reviewer}-c{index}: [{claim.status}] {claim.fact}")
+    return "\n".join(lines) + "\n"
+
+
+DISCUSS_EVIDENCE_PROMPT_RULES = """Record evidence separately from your recommendation in a required `evidence` object. `claims` may be empty and each claim is `{fact, status, source?, verification_basis?}`. Status is exactly `verified`, `reported-but-unverified`, or `missing`. A source is only reported until you attest that you directly inspected it and it supports the exact claim: then use `verified` with `verification_basis` `external-source-inspected` (URL/reference) or `checkout-inspected` (repository-relative `path:line`). `missing` has no source or verification. To withdraw or replace prior evidence, add `updates` entries with `action` `retract` or `supersede`, target ID, non-empty reason, and optional `replacement_claim_index` into this response's claims. Do not infer retractions from prose."""
+
+
 def build_discuss_agenda_prompt(
     issue_number: int,
     config: AgentLoopConfig,
@@ -2513,6 +2533,35 @@ Rules:
 """
 
 
+def build_discuss_evidence_reconciliation_prompt(
+    issue_number: int, config: AgentLoopConfig, *, analyzer: AgentName,
+    candidates: Sequence[dict[str, object]],
+) -> str:
+    """Optional, evidence-only paraphrase grouper; it cannot adjudicate facts."""
+    signature = agent_signature(analyzer, config)
+    rendered = json.dumps(list(candidates), ensure_ascii=False, indent=2)
+    return f"""Group only semantically equivalent active evidence observations for GitHub issue #{issue_number} in {config.repo}.
+
+You are an evidence-only reconciler. Do not use issue context, debate prose,
+earlier agendas, sources, or external information. Do not create, remove,
+verify, retract, supersede, rank, or change the status of any claim. Return
+only disjoint groups of supplied IDs with the same status; omit IDs that should
+remain separate.
+
+Bounded observations:
+{rendered}
+
+Return exactly:
+{{
+  "schema_version": 1,
+  "kind": "discuss_evidence_reconciliation",
+  "groups": [["observation-id-a", "observation-id-b"]]
+}}
+<!-- AGENT_PLAN_STATE: approved -->
+-- {signature}
+"""
+
+
 def build_discuss_review_prompt(
     issue_number: int,
     config: AgentLoopConfig,
@@ -2529,6 +2578,11 @@ def build_discuss_review_prompt(
     reviewer_signature = agent_signature(reviewer, config)
     prior_round_votes = tuple(prior_round_votes or ())
     prior_round_agenda = tuple(prior_round_agenda or ())
+    prior_evidence_index = _render_prior_evidence_index(issue_number, prior_round_votes, round_number)
+    evidence_example = (',\n  "evidence": {\n'
+                        '    "claims": [{"fact": "A reported implementation fact.", "status": "reported-but-unverified"}],\n'
+                        '    "updates": []\n'
+                        '  }')
     if config.discuss_result_mode == "answer":
         history = "\n".join(
             f"- {getattr(v, 'reviewer', 'unknown')}: position={getattr(v, 'position', 'failed')}; "
@@ -2572,6 +2626,7 @@ Use this local checkout only to inspect context. Do not edit files, create a bra
 {_issue_context_block(issue_context)}{_memory_block(memory)}
 Prior round positions (the analyzer is non-authoritative; do not treat it as a vote):
 {history}{analyzer_context}
+{prior_evidence_index}
 
 Produce the best consensus answer or tradeoff recommendation, not an implementation vote.
 {research}
@@ -2584,9 +2639,9 @@ Respond with exactly this JSON object followed by the approved plan footer:
   "rationale": "Why this answer follows from the evidence.",
   "confidence": "medium",
   "open_questions": [],
-  "rebuttal": "..."{research_example}
+  "rebuttal": "..."{research_example}{evidence_example}
 }}
-Rules: position is exactly `answer` or `needs-human`; `answer` requires non-empty answer; `needs-human` requires non-empty open_questions and may omit answer; {rebuttal}.{research_rules}
+Rules: position is exactly `answer` or `needs-human`; `answer` requires non-empty answer; `needs-human` requires non-empty open_questions and may omit answer; {rebuttal}.{research_rules} {DISCUSS_EVIDENCE_PROMPT_RULES}
 Do not include triage fields such as outcome or split_proposals. The analyzer is not authoritative and is context only; sourced research facts must remain distinct from judgment.
 <!-- AGENT_PLAN_STATE: approved -->
 -- {reviewer_signature}
@@ -2708,6 +2763,8 @@ branch, commit, push, or open a pull request during this evaluation.
 {_issue_context_block(issue_context)}{_memory_block(memory)}
 {round_context}
 
+{prior_evidence_index}
+
 {_discuss_research_policy_block(research_mode)}
 
 Vote on one of these outcomes:
@@ -2723,7 +2780,7 @@ Respond using this mandatory structured JSON format:
   "kind": "discuss_review",
   "outcome": "implement",
   "rationale": "The feature is clearly scoped and fills a documented user need.",
-  "split_proposals": []{rebuttal_example}{research_example}
+  "split_proposals": []{rebuttal_example}{research_example}{evidence_example}
 }}
 <!-- AGENT_PLAN_STATE: approved -->
 -- {reviewer_signature}
@@ -2733,6 +2790,7 @@ Rules:
 - `rationale` is required and must be non-empty.
 - `split_proposals` is required and must be non-empty when `outcome` is `split`; omit or use `[]` for other outcomes.
 {rebuttal_rule}{analyzer_rules}{research_rules}
+- {DISCUSS_EVIDENCE_PROMPT_RULES}
 - The footer must always be `<!-- AGENT_PLAN_STATE: approved -->` regardless of your outcome.
 - Do not include prose or code fences before the JSON object.
 - Do not place your signature before the `AGENT_PLAN_STATE` footer.

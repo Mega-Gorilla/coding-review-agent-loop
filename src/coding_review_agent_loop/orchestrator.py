@@ -81,6 +81,11 @@ from .split_materialization import (
     split_stage_proposal_from_text,
 )
 from .logging import log, new_run_id, run_usage_summary_path
+from .evidence_reconciliation import (
+    bounded_reconciliation_candidates,
+    collect_evidence_observations,
+    reconcile_evidence,
+)
 from .memory import AgentMemoryContext, prepare_agent_memory
 from .migrations import validate_pr_migration_topology
 from .prompts import (
@@ -89,6 +94,7 @@ from .prompts import (
     CompactPrReviewTailContext,
     build_discuss_agenda_prompt,
     build_discuss_final_analysis_prompt,
+    build_discuss_evidence_reconciliation_prompt,
     build_discuss_answer_confirmation_prompt,
     build_discuss_semantic_comparison_prompt,
     build_discuss_review_prompt,
@@ -112,6 +118,7 @@ from .protocol import (
     DeferredStage,
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
     ParsedDiscussAgenda,
+    ParsedDiscussEvidenceReconciliation,
     ParsedDiscussAnswer,
     ParsedDiscussSemanticComparison,
     ParsedDiscussResponse,
@@ -147,6 +154,7 @@ from .protocol import (
     validate_structured_discuss_review,
     validate_structured_discuss_answer,
     validate_structured_discuss_answer_confirmation,
+    validate_structured_discuss_evidence_reconciliation,
     validate_structured_discuss_semantic_comparison,
 )
 from .protocol import parse_review
@@ -5436,6 +5444,8 @@ def _run_discuss_final_analyzer(
         is_failed_discuss_response(vote) for vote in final_votes
     ):
         return None, None
+
+
     analyzer_name = agent_display_name(analyzer)
     try:
         response = _run_validated_agent(
@@ -5461,6 +5471,39 @@ def _run_discuss_final_analyzer(
     except Exception as exc:
         log(config, f"discuss: final analyzer {analyzer_name} unavailable ({exc}); omitting advisory observations")
         return None, None
+
+
+def _run_discuss_evidence_reconciler(
+    runner: Runner, *, issue_number: int, config: AgentLoopConfig, analyzer: AgentName | None,
+    subject: str, round_history: Sequence[Sequence[ParsedDiscussResponse]], usage_context: RunUsageContext,
+) -> tuple[tuple[tuple[str, ...], ...], str | None]:
+    """Best-effort semantic grouping, isolated from the final agenda analyzer."""
+    if analyzer is None:
+        return (), None
+    observations, updates = collect_evidence_observations(subject, round_history)
+    candidates = bounded_reconciliation_candidates(observations, updates)
+    candidate_ids = {str(candidate["id"]) for candidate in candidates}
+    statuses = {item.observation_id: item.status for item in observations if item.observation_id in candidate_ids}
+    if len(candidates) < 2:
+        return (), None
+    try:
+        response = _run_validated_agent(
+            runner, agent=analyzer, config=config,
+            prompt=build_discuss_evidence_reconciliation_prompt(issue_number, config, analyzer=analyzer, candidates=candidates),
+            marker_description="<!-- AGENT_PLAN_STATE: approved -->",
+            validate=lambda text: validate_structured_discuss_evidence_reconciliation(text, observation_ids=tuple(statuses), observation_statuses=statuses),
+            usage_context=usage_context, use_repair=True,
+            repair_expected_kind="discuss_evidence_reconciliation", role="analyzer",
+            label="discuss-evidence-reconciliation", operation_description="evidence reconciliation",
+        )
+        parsed = response.marker_value
+        assert isinstance(parsed, ParsedDiscussEvidenceReconciliation)
+        return parsed.groups, response.text
+    except QuotaResetExceededError:
+        raise
+    except Exception as exc:
+        log(config, f"discuss: evidence reconciler unavailable ({exc}); using exact-match ledger")
+        return (), None
 
 
 @dataclass(frozen=True)
@@ -5652,6 +5695,19 @@ def _post_discuss_debater_comment(
     )
 
 
+def _validate_discuss_evidence_update_targets(
+    parsed: ParsedDiscussResponse, *, subject: str, round_history: Sequence[Sequence[ParsedDiscussResponse]],
+) -> None:
+    """Reject active malformed updates; legacy replay merely audits them."""
+    if not isinstance(parsed, (ParsedDiscussReview, ParsedDiscussAnswer)):
+        return
+    observations, _updates = collect_evidence_observations(subject, round_history)
+    allowed = {item.observation_id for item in observations}
+    for update in parsed.evidence_updates:
+        if not update.target_observation_id.startswith(f"{subject}-") or update.target_observation_id not in allowed:
+            raise AgentLoopError(f"evidence update targets unknown or cross-subject observation: {update.target_observation_id}")
+
+
 def _run_discuss_loop(
     runner: Runner,
     *,
@@ -5795,6 +5851,12 @@ def _run_discuss_loop(
             configured_reviewers=configured_reviewers,
             usage_context=usage_context,
         )
+        evidence_groups, evidence_reconciler_raw = _run_discuss_evidence_reconciler(
+            runner, issue_number=issue_number, config=config, analyzer=analyzer, subject=f"issue-{issue_number}",
+            round_history=round_history, usage_context=usage_context,
+        )
+        evidence_reconciliation = reconcile_evidence(f"issue-{issue_number}", round_history, evidence_groups)
+        evidence_reconciliation["raw_evidence_reconciler_response"] = evidence_reconciler_raw
         summary_body = render_discuss_round_summary_comment(
             round_number=final_round_number,
             reviewer_votes=final_successful_votes,
@@ -5810,6 +5872,7 @@ def _run_discuss_loop(
             research_mode=config.discuss_research,
             failed_debaters=final_failed_debaters,
             result_mode=config.discuss_result_mode,
+            evidence_reconciliation=evidence_reconciliation,
         )
         post_issue_comment(
             runner,
@@ -5829,6 +5892,7 @@ def _run_discuss_loop(
                     final_analyzer_response=final_analyzer_response_raw,
                     research_mode=config.discuss_research,
                     failed_debaters=final_failed_debaters,
+                    evidence_reconciliation=evidence_reconciliation,
                 ),
             ),
         )
@@ -5899,6 +5963,11 @@ def _run_discuss_loop(
                         prompt=prompts[reviewer_name],
                         round_number=round_number,
                         usage_context=usage_context,
+                    )
+                    parsed = response.marker_value
+                    assert isinstance(parsed, (ParsedDiscussReview, ParsedDiscussAnswer))
+                    _validate_discuss_evidence_update_targets(
+                        parsed, subject=f"issue-{issue_number}", round_history=round_history
                     )
                 except AgentLoopError as exc:
                     # Includes QuotaResetExceededError: captured here and
@@ -5987,6 +6056,9 @@ def _run_discuss_loop(
                     continue
                 parsed = response.marker_value
                 assert isinstance(parsed, (ParsedDiscussReview, ParsedDiscussAnswer))
+                _validate_discuss_evidence_update_targets(
+                    parsed, subject=f"issue-{issue_number}", round_history=round_history
+                )
                 _post_discuss_debater_comment(
                     runner,
                     config=config,
@@ -6104,6 +6176,14 @@ def _run_discuss_loop(
                 configured_reviewers=configured_reviewers,
                 usage_context=usage_context,
             )
+        evidence_reconciliation = None
+        if is_final:
+            evidence_groups, evidence_reconciler_raw = _run_discuss_evidence_reconciler(
+                runner, issue_number=issue_number, config=config, analyzer=analyzer, subject=f"issue-{issue_number}",
+                round_history=round_history, usage_context=usage_context,
+            )
+            evidence_reconciliation = reconcile_evidence(f"issue-{issue_number}", round_history, evidence_groups)
+            evidence_reconciliation["raw_evidence_reconciler_response"] = evidence_reconciler_raw
         summary_body = render_discuss_round_summary_comment(
             round_number=round_number,
             # The vote table and agenda draw from real positions only; failed
@@ -6123,6 +6203,7 @@ def _run_discuss_loop(
             failed_debaters=tuple(failed_debaters),
             result_mode=config.discuss_result_mode,
             semantic_comparison=semantic_comparison,
+            evidence_reconciliation=evidence_reconciliation,
         )
         agenda = () if is_final else tuple(_render_discuss_agenda_lines(successful_votes))
         post_issue_comment(
@@ -6146,6 +6227,7 @@ def _run_discuss_loop(
                     failed_debaters=tuple(failed_debaters),
                     split_proposals=tuple(round_split_proposals) if is_final else (),
                     result_mode=config.discuss_result_mode,
+                    evidence_reconciliation=evidence_reconciliation,
                 ),
             ),
         )

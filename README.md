@@ -757,6 +757,29 @@ python -m pytest
 
 Tests use fake subprocess runners. They do not call real `claude`, `codex`, `gemini`, or `gh`.
 
+### Discuss evidence reconciliation
+
+Final discuss summaries reconcile structured debater evidence instead of
+rendering an append-only research ledger. Claims are `verified`,
+`reported-but-unverified`, or `missing`; an explicit update records the
+historical `retracted` or `superseded` state. `verified` means the debater
+attests it directly inspected the cited source or checkout location and that it
+supports the exact claim (`external-source-inspected` with a reference, or
+`checkout-inspected` with a repository-relative `path:line`). Legacy
+`research.sourced_facts` remain reported, never automatically verified.
+
+Debaters provide `evidence.claims` and `evidence.updates`; an update names a
+stable prior observation ID and has `action: retract|supersede` plus a reason.
+Exact fact/source duplicates combine contributor attribution without an
+analyzer. The optional evidence reconciler may group paraphrases, but cannot
+create claims, change statuses, or decide retractions. Final-analyzer
+observations remain final-round-text-only.
+
+The optional reconciler sees at most 64 clipped observations / 24,000 UTF-8
+bytes. The rendered ledger is capped at 50 entries / 16,000 bytes, prioritizing
+updates and targets, final-round claims, verified, reported, missing, then old
+history. Round comments and replay metadata retain the full raw audit trail.
+
 ### Test file layout
 
 The test suite is split across focused modules for faster, targeted runs:

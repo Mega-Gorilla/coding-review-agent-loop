@@ -71,6 +71,9 @@ class PostedRoundMetadata:
     split_proposals: tuple[str, ...] = ()
     # Missing metadata decodes as triage for legacy transcripts.
     result_mode: str = "triage"
+    # Canonical bounded #535 evidence artifact on final summaries.  Keeping it
+    # here makes resume idempotent without feeding evidence into analyzer agenda.
+    evidence_reconciliation: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +174,7 @@ def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
         "failed_debaters": [list(pair) for pair in metadata.failed_debaters],
         "split_proposals": list(metadata.split_proposals),
         "result_mode": metadata.result_mode,
+        "evidence_reconciliation": metadata.evidence_reconciliation,
     }
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -234,6 +238,11 @@ def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
             ),
             split_proposals=tuple(str(item) for item in payload.get("split_proposals", [])),
             result_mode=str(payload.get("result_mode", "triage")),
+            evidence_reconciliation=(
+                payload.get("evidence_reconciliation")
+                if isinstance(payload.get("evidence_reconciliation"), dict)
+                else None
+            ),
         )
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         raise AgentLoopError("Invalid AGENT_LOOP_META payload.") from exc

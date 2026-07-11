@@ -257,6 +257,29 @@ class StructuredDiscussAnswer:
     framing_note: str | None = None
 
 
+DISCUSS_EVIDENCE_STATUS_VALUES = frozenset({"verified", "reported-but-unverified", "missing"})
+DISCUSS_EVIDENCE_UPDATE_ACTIONS = frozenset({"retract", "supersede"})
+DISCUSS_VERIFICATION_BASES = frozenset({"external-source-inspected", "checkout-inspected"})
+
+
+@dataclass(frozen=True)
+class DiscussEvidenceClaim:
+    """A debater-authored observation.  IDs are assigned by the orchestrator."""
+
+    fact: str
+    status: str
+    source: str | None = None
+    verification_basis: str | None = None
+
+
+@dataclass(frozen=True)
+class DiscussEvidenceUpdate:
+    action: str
+    target_observation_id: str
+    reason: str
+    replacement_claim_index: int | None = None
+
+
 @dataclass(frozen=True)
 class ParsedDiscussAnswer:
     position: str
@@ -272,6 +295,8 @@ class ParsedDiscussAnswer:
     sourced_facts: tuple[DiscussSourcedFact, ...] = ()
     research_target: str | None = None
     research_questions: tuple[str, ...] = ()
+    evidence_claims: tuple[DiscussEvidenceClaim, ...] = ()
+    evidence_updates: tuple[DiscussEvidenceUpdate, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -294,6 +319,11 @@ class ParsedDiscussAnswerConfirmation:
     decision: str
     rationale: str
     answer: str | None = None
+
+
+@dataclass(frozen=True)
+class ParsedDiscussEvidenceReconciliation:
+    groups: tuple[tuple[str, ...], ...]
 
 
 @dataclass(frozen=True)
@@ -324,6 +354,8 @@ class ParsedDiscussReview:
     sourced_facts: tuple[DiscussSourcedFact, ...] = ()
     research_target: str | None = None
     research_questions: tuple[str, ...] = ()
+    evidence_claims: tuple[DiscussEvidenceClaim, ...] = ()
+    evidence_updates: tuple[DiscussEvidenceUpdate, ...] = ()
 
 
 ParsedDiscussResponse = ParsedDiscussReview | ParsedDiscussAnswer | ParsedFailedDiscussResponse
@@ -2070,6 +2102,70 @@ def _parse_discuss_research(
     return status, tuple(sourced_facts), target, questions
 
 
+def _parse_discuss_evidence(
+    value: object,
+) -> tuple[tuple[DiscussEvidenceClaim, ...], tuple[DiscussEvidenceUpdate, ...]]:
+    """Parse explicit evidence without trying to infer meaning from prose.
+
+    This deliberately stays optional so persisted pre-#535 transcript responses
+    can still be replayed.  Legacy ``research.sourced_facts`` are projected by
+    the reconciliation layer as reported observations.
+    """
+    payload = _expect_object(value, context="discuss evidence")
+    _expect_exact_keys(payload, context="discuss evidence", required={"claims", "updates"})
+    claims_value = payload["claims"]
+    updates_value = payload["updates"]
+    if not isinstance(claims_value, list) or not isinstance(updates_value, list):
+        raise AgentLoopError("discuss evidence.claims and evidence.updates must be JSON arrays.")
+    claims: list[DiscussEvidenceClaim] = []
+    for index, item in enumerate(claims_value):
+        context = f"discuss evidence.claims at index {index}"
+        claim = _expect_object(item, context=context)
+        _expect_exact_keys(
+            claim, context=context, required={"fact", "status"},
+            optional={"source", "verification_basis"},
+        )
+        fact = _expect_non_empty_string(claim["fact"], context=f"{context}.fact")
+        status = _expect_non_empty_string(claim["status"], context=f"{context}.status")
+        if status not in DISCUSS_EVIDENCE_STATUS_VALUES:
+            raise AgentLoopError("discuss evidence claim status must be verified, reported-but-unverified, or missing.")
+        source = (_expect_non_empty_string(claim["source"], context=f"{context}.source")
+                  if "source" in claim else None)
+        basis = (_expect_non_empty_string(claim["verification_basis"], context=f"{context}.verification_basis")
+                 if "verification_basis" in claim else None)
+        if status == "missing" and (source is not None or basis is not None):
+            raise AgentLoopError("missing evidence claims cannot carry a source or verification basis.")
+        if status == "verified":
+            if basis not in DISCUSS_VERIFICATION_BASES or source is None:
+                raise AgentLoopError("verified evidence requires source and verification_basis external-source-inspected or checkout-inspected.")
+            if basis == "checkout-inspected" and not re.fullmatch(r"[^\s:][^:]*:\d+", source):
+                raise AgentLoopError("checkout-inspected verified evidence requires a repository-relative path:line source.")
+        elif basis is not None:
+            raise AgentLoopError("only verified evidence may carry verification_basis.")
+        claims.append(DiscussEvidenceClaim(fact=fact, status=status, source=source, verification_basis=basis))
+    updates: list[DiscussEvidenceUpdate] = []
+    for index, item in enumerate(updates_value):
+        context = f"discuss evidence.updates at index {index}"
+        update = _expect_object(item, context=context)
+        _expect_exact_keys(
+            update, context=context, required={"action", "target_observation_id", "reason"},
+            optional={"replacement_claim_index"},
+        )
+        action = _expect_non_empty_string(update["action"], context=f"{context}.action")
+        if action not in DISCUSS_EVIDENCE_UPDATE_ACTIONS:
+            raise AgentLoopError("discuss evidence update action must be retract or supersede.")
+        replacement = update.get("replacement_claim_index")
+        if replacement is not None and (not isinstance(replacement, int) or isinstance(replacement, bool) or replacement < 0 or replacement >= len(claims)):
+            raise AgentLoopError("evidence replacement_claim_index must reference a claim in the same response.")
+        updates.append(DiscussEvidenceUpdate(
+            action=action,
+            target_observation_id=_expect_non_empty_string(update["target_observation_id"], context=f"{context}.target_observation_id"),
+            reason=_expect_non_empty_string(update["reason"], context=f"{context}.reason"),
+            replacement_claim_index=replacement,
+        ))
+    return tuple(claims), tuple(updates)
+
+
 def parse_structured_discuss_review(
     text: str, *, reviewer: str, round_number: int = 1, research_mode: str | None = None
 ) -> ParsedDiscussReview | None:
@@ -2086,7 +2182,7 @@ def parse_structured_discuss_review(
         payload,
         context="discuss_review",
         required={"schema_version", "kind", "outcome", "rationale"},
-        optional={"split_proposals", "rebuttal", "analyzer_framing", "framing_note", "research"},
+        optional={"split_proposals", "rebuttal", "analyzer_framing", "framing_note", "research", "evidence"},
     )
     outcome = _expect_non_empty_string(payload["outcome"], context="discuss_review.outcome")
     if outcome not in DISCUSS_OUTCOME_VALUES:
@@ -2135,6 +2231,9 @@ def parse_structured_discuss_review(
     research_questions: tuple[str, ...] = ()
     if "research" in payload:
         research_status, sourced_facts, research_target, research_questions = _parse_discuss_research(payload["research"])
+    evidence_claims, evidence_updates = ((), ())
+    if "evidence" in payload:
+        evidence_claims, evidence_updates = _parse_discuss_evidence(payload["evidence"])
     if research_mode == "required":
         if research_status is None:
             raise AgentLoopError(
@@ -2158,6 +2257,8 @@ def parse_structured_discuss_review(
         sourced_facts=sourced_facts,
         research_target=research_target,
         research_questions=research_questions,
+        evidence_claims=evidence_claims,
+        evidence_updates=evidence_updates,
     )
 
 
@@ -2191,7 +2292,7 @@ def parse_structured_discuss_answer(
         payload,
         context="discuss_answer",
         required={"schema_version", "kind", "position", "rationale", "confidence", "open_questions"},
-        optional={"answer", "rebuttal", "analyzer_framing", "framing_note", "research"},
+        optional={"answer", "rebuttal", "analyzer_framing", "framing_note", "research", "evidence"},
     )
     position = _expect_non_empty_string(payload["position"], context="discuss_answer.position")
     if position not in DISCUSS_ANSWER_POSITION_VALUES:
@@ -2234,6 +2335,9 @@ def parse_structured_discuss_answer(
     research_questions: tuple[str, ...] = ()
     if "research" in payload:
         research_status, sourced_facts, research_target, research_questions = _parse_discuss_research(payload["research"])
+    evidence_claims, evidence_updates = ((), ())
+    if "evidence" in payload:
+        evidence_claims, evidence_updates = _parse_discuss_evidence(payload["evidence"])
     if research_mode == "required" and (research_status is None or research_status == "not-needed"):
         raise AgentLoopError("discuss_answer.research with sourced, unavailable, or inconclusive status is required.")
     return ParsedDiscussAnswer(
@@ -2242,6 +2346,7 @@ def parse_structured_discuss_answer(
         rebuttal=rebuttal, analyzer_framing=analyzer_framing, framing_note=framing_note,
         research_status=research_status, sourced_facts=sourced_facts,
         research_target=research_target, research_questions=research_questions,
+        evidence_claims=evidence_claims, evidence_updates=evidence_updates,
     )
 
 
@@ -2252,6 +2357,32 @@ def validate_structured_discuss_answer(
     if parsed is None:
         raise AgentLoopError("Discuss answer did not use the required structured format.")
     return parsed
+
+
+def validate_structured_discuss_evidence_reconciliation(
+    text: str, *, observation_ids: Sequence[str], observation_statuses: dict[str, str],
+) -> ParsedDiscussEvidenceReconciliation:
+    payload = _extract_structured_discuss_review_payload(text, context_label="Evidence reconciliation")
+    if payload is None:
+        raise AgentLoopError("Evidence reconciliation did not use the required structured format.")
+    _require_supported_schema_version(payload)
+    _expect_exact_keys(payload, context="discuss_evidence_reconciliation", required={"schema_version", "kind", "groups"})
+    if payload.get("kind") != "discuss_evidence_reconciliation" or not isinstance(payload["groups"], list):
+        raise AgentLoopError("Expected discuss_evidence_reconciliation groups.")
+    known = set(observation_ids)
+    used: set[str] = set()
+    groups: list[tuple[str, ...]] = []
+    for index, value in enumerate(payload["groups"]):
+        if not isinstance(value, list) or len(value) < 2 or not all(isinstance(item, str) and item for item in value):
+            raise AgentLoopError(f"evidence reconciliation group {index} must contain at least two observation IDs.")
+        group = tuple(value)
+        if any(item not in known for item in group) or any(item in used for item in group):
+            raise AgentLoopError("evidence reconciliation groups must use each supplied ID at most once.")
+        if len({observation_statuses[item] for item in group}) != 1:
+            raise AgentLoopError("evidence reconciliation can group only compatible active statuses.")
+        used.update(group)
+        groups.append(group)
+    return ParsedDiscussEvidenceReconciliation(groups=tuple(groups))
 
 
 DISCUSS_SEMANTIC_CLASSIFICATIONS = frozenset({
