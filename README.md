@@ -8,6 +8,16 @@ implementation vote. Answer-mode transcripts are mode-bound for repair and
 resume, while analyzer observations and sourced research remain clearly
 separate from debater-confirmed conclusions.
 
+When answer-mode final answers differ, semantic convergence is opt-in through
+`--discuss-analyzer`. The explicitly configured analyzer (never an implicit
+reviewer fallback) receives only the final answers and performs no research or
+repository work. Its comparison is advisory: equivalent answers can converge;
+material conflict fails closed to deadlock; and compatible answers get at most
+one extra, budget-exempt confirmation phase. Every debater must then confirm
+the canonical recommendation or refine it, and the effective answers must be
+identical after whitespace/case normalization. The summary preserves the
+analyzer classification separately for audit.
+
 Local command-line orchestration for a coding PR review loop.
 
 Run a local Claude/Codex/Gemini PR review loop using your existing CLI subscriptions.

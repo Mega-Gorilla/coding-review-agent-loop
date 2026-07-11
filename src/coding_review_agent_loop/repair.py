@@ -85,7 +85,7 @@ def strip_unknown_prior_item_dispositions(
 
 def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> str | None:
     """Trim envelope-only trailing material without changing structured JSON."""
-    if expected_kind not in {"pr_review", "plan_review", "plan_revision", "coder_followup", "discuss_review", "discuss_answer", "discuss_agenda"}:
+    if expected_kind not in {"pr_review", "plan_review", "plan_revision", "coder_followup", "discuss_review", "discuss_answer", "discuss_agenda", "discuss_semantic_comparison", "discuss_answer_confirmation"}:
         return None
 
     stripped = raw.lstrip()
@@ -100,7 +100,7 @@ def attempt_envelope_normalization(raw: str, *, expected_kind: str | None) -> st
 
     json_text = stripped[:json_end].rstrip()
     trailing = stripped[json_end:]
-    state_re = PLAN_STATE_RE if expected_kind in {"plan_review", "plan_revision", "discuss_review", "discuss_answer", "discuss_agenda"} else STATE_RE
+    state_re = PLAN_STATE_RE if expected_kind in {"plan_review", "plan_revision", "discuss_review", "discuss_answer", "discuss_agenda", "discuss_semantic_comparison", "discuss_answer_confirmation"} else STATE_RE
     state_match = state_re.search(trailing)
     if state_match is None:
         return None
@@ -931,7 +931,7 @@ Output ONLY the repaired response. No explanations.
 {raw_response}"""
 
 _REPAIR_MODEL = "gemini-3.1-flash-lite"
-_SUPPORTED_EXPECTED_KINDS = {"pr_review", "plan_review", "coder_followup", "plan_revision", "discuss_review", "discuss_answer", "discuss_agenda"}
+_SUPPORTED_EXPECTED_KINDS = {"pr_review", "plan_review", "coder_followup", "plan_revision", "discuss_review", "discuss_answer", "discuss_agenda", "discuss_semantic_comparison", "discuss_answer_confirmation"}
 RepairOutcome = Literal[
     "succeeded", "nonzero_exit", "empty_output", "timeout", "spawn_error", "invalid_output"
 ]
