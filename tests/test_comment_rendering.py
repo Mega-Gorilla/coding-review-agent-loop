@@ -1060,6 +1060,32 @@ def test_render_discuss_summary_non_final_uses_analyzer_agenda_with_attribution(
     assert "- Codex held `implement`: Mechanical rationale." not in rendered
 
 
+def test_render_discuss_answer_summary_non_final_uses_analyzer_agenda_with_attribution():
+    answer = ParsedDiscussAnswer(
+        position="answer",
+        rationale="An API has the clearest boundary.",
+        confidence="high",
+        open_questions=(),
+        reviewer="Codex",
+        answer="Use an API.",
+    )
+    rendered = render_discuss_round_summary_comment(
+        is_final=False,
+        subject="abc123",
+        round_number=1,
+        reviewer_votes=[answer],
+        analyzer_agenda=_rendering_agenda(),
+        analyzer_name="Anthropic Claude",
+        result_mode="answer",
+    )
+
+    assert "## Round 1 summary: Answer Pending" in rendered
+    assert "### Agenda for round 2 (analyzer: Anthropic Claude)" in rendered
+    assert "Analyzer-extracted consensus so far (not debater-confirmed):" in rendered
+    assert "**Scope of the change**" in rendered
+    assert "Question for next round: Would splitting resolve the scope objection?" in rendered
+
+
 def test_render_discuss_summary_non_final_without_agenda_keeps_mechanical_lines():
     rendered = render_discuss_round_summary_comment(
         is_final=False,
@@ -1084,18 +1110,18 @@ def test_render_discuss_summary_final_distinguishes_analyzer_consensus_from_vote
             _discuss_vote("do-not-implement", reviewer="Gemini"),
         ],
         split_proposals=[],
-        analyzer_agenda=_rendering_agenda(),
+        final_analyzer_agenda=_rendering_agenda(),
         analyzer_name="Anthropic Claude",
     )
     assert (
-        "### Analyzer-extracted consensus (analyzer: Anthropic Claude; not debater-confirmed)"
+        "### Final analyzer observations (analyzer: Anthropic Claude; not debater-confirmed)"
         in rendered
     )
-    assert "The debater vote table above is the authoritative consensus." in rendered
+    assert "The debater vote table above is authoritative." in rendered
     assert "| Codex |" in rendered
     assert "| Gemini |" in rendered
     # The analyzer section comes after the authoritative vote table.
-    assert rendered.index("| Codex |") < rendered.index("Analyzer-extracted consensus")
+    assert rendered.index("| Codex |") < rendered.index("Final analyzer observations")
 
 
 def test_render_discuss_summary_final_without_agenda_has_no_analyzer_section():
@@ -1118,9 +1144,9 @@ def test_render_discuss_summary_final_empty_agenda_renders_placeholder():
         subject="abc123",
         reviewer_votes=[_discuss_vote("implement", reviewer="Codex")],
         split_proposals=[],
-        analyzer_agenda=ParsedDiscussAgenda(consensus=(), disagreements=(), missing_facts=()),
+        final_analyzer_agenda=ParsedDiscussAgenda(consensus=(), disagreements=(), missing_facts=()),
     )
-    assert "### Analyzer-extracted consensus (not debater-confirmed)" in rendered
+    assert "### Final analyzer observations (not debater-confirmed)" in rendered
     assert "(the analyzer extracted no points)" in rendered
 
 
