@@ -28,6 +28,30 @@ def test_reconciliation_retracts_old_claim_and_combines_exact_contributors():
     assert ledger["history"][0]["action"] == "retract"
 
 
+def test_reconciliation_combines_semantic_paraphrases_and_contributors():
+    subject = "issue-535"
+    first = _vote("Codex", [DiscussEvidenceClaim(
+        "The renderer adds each sourced fact as a separate ledger entry.",
+        "reported-but-unverified", "src/comment_rendering.py:130",
+    )])
+    paraphrase = _vote("Antigravity", [DiscussEvidenceClaim(
+        "Every sourced fact is shown in its own final evidence ledger item.",
+        "reported-but-unverified", "src/comment_rendering.py:131",
+    )])
+    ledger = reconcile_evidence(
+        subject,
+        [[first, paraphrase]],
+        semantic_groups=[
+            ("issue-535-r1-Codex-c0", "issue-535-r1-Antigravity-c0"),
+        ],
+    )
+
+    assert len(ledger["entries"]) == 1
+    entry = ledger["entries"][0]
+    assert entry["contributors"] == ["Codex", "Antigravity"]
+    assert entry["ids"] == ["issue-535-r1-Codex-c0", "issue-535-r1-Antigravity-c0"]
+
+
 def test_reconciliation_keeps_reported_separate_from_missing_and_bounds_output():
     claims = [DiscussEvidenceClaim(f"fact {index}", "reported-but-unverified") for index in range(60)]
     claims.append(DiscussEvidenceClaim("implementation assertion", "missing"))

@@ -123,11 +123,15 @@ def reconcile_evidence(
             warnings.append(f"dangling update target: {target}")
             continue
         inactive[target] = update
-    aliases = {item: item for item in by_id}
+    # Keep semantic-group membership separate from the canonical ID mapping.
+    # An identity alias cannot tell a group leader from an observation that was
+    # never grouped, so using it as the condition would leave the leader in an
+    # exact-match bucket while its peers use the semantic bucket.
+    semantic_aliases: dict[str, str] = {}
     for group in semantic_groups:
         if group:
             for item in group:
-                aliases[item] = group[0]
+                semantic_aliases[item] = group[0]
     grouped: dict[tuple[str, str, str], dict[str, object]] = {}
     history: list[dict[str, object]] = []
     for item in observations:
@@ -140,8 +144,8 @@ def reconcile_evidence(
             continue
         # Analyzer grouping may merge paraphrases, but only after strict ID and
         # status validation in the protocol parser.
-        key = (("semantic", aliases[item.observation_id], item.status)
-               if aliases[item.observation_id] != item.observation_id
+        key = (("semantic", semantic_aliases[item.observation_id], item.status)
+               if item.observation_id in semantic_aliases
                else (_normalize(item.fact), _normalize(item.source), item.status))
         entry = grouped.setdefault(key, {"ids": [], "fact": _clip(item.fact, MAX_FACT_BYTES), "status": item.status,
                                          "sources": [], "contributors": [], "rounds": []})
