@@ -945,6 +945,7 @@ def render_discuss_round_summary_comment(
     research_mode: str | None = None,
     failed_debaters: Sequence[tuple[str, str]] = (),
     result_mode: str = "triage",
+    semantic_comparison: dict[str, object] | None = None,
 ) -> str:
     """Render the orchestrator/analyzer round-summary comment.
 
@@ -965,6 +966,7 @@ def render_discuss_round_summary_comment(
             round_history=round_history, analyzer_agenda=analyzer_agenda,
             analyzer_name=analyzer_name, research_mode=research_mode,
             failed_debaters=failed_debaters, outcome=outcome,
+            semantic_comparison=semantic_comparison,
         )
     if not is_final:
         lines: list[str] = [
@@ -1082,7 +1084,8 @@ def _render_discuss_answer_summary(*, is_final: bool, subject: str, round_number
     reviewer_votes: Sequence[ParsedDiscussAnswer], consensus_kind: str,
     round_history: Sequence[Sequence[ParsedDiscussAnswer]] | None,
     analyzer_agenda: ParsedDiscussAgenda | None, analyzer_name: str | None,
-    research_mode: str | None, failed_debaters: Sequence[tuple[str, str]], outcome: str | None) -> str:
+    research_mode: str | None, failed_debaters: Sequence[tuple[str, str]], outcome: str | None,
+    semantic_comparison: dict[str, object] | None = None) -> str:
     if not is_final:
         heading = f"## Round {round_number} summary: Answer Pending"
     elif outcome == "needs-human":
@@ -1095,7 +1098,8 @@ def _render_discuss_answer_summary(*, is_final: bool, subject: str, round_number
     if is_final and outcome not in {"needs-human", "deadlock"}:
         answers = [v.answer for v in reviewer_votes if v.answer]
         if answers:
-            lines.extend(["### Answer", "", answers[0], ""])
+            answer = semantic_comparison.get("confirmed_answer") or semantic_comparison.get("shared_recommendation") if semantic_comparison else answers[0]
+            lines.extend(["### Answer", "", str(answer), ""])
     lines.extend(["| Reviewer | Position | Confidence | Answer |", "| --- | --- | --- | --- |"])
     for vote in reviewer_votes:
         answer = (vote.answer or "(no asserted answer)").replace("|", "\\|").replace("\n", " ")
@@ -1107,6 +1111,25 @@ def _render_discuss_answer_summary(*, is_final: bool, subject: str, round_number
         lines.extend(["", "### Open questions", "", *[f"- {q}" for q in dict.fromkeys(questions)]])
     if outcome == "deadlock":
         lines.extend(["", "### Unresolved disagreement", "", "The debaters did not converge on one normalized answer."])
+    if semantic_comparison is not None:
+        lines.extend(["", "### Semantic comparison (advisory; not a debater vote)", "",
+            f"Analyzer: {semantic_comparison.get('analyzer', 'configured analyzer')}",
+            f"Classification: `{semantic_comparison.get('classification', 'failed')}`"])
+        if semantic_comparison.get("shared_recommendation"):
+            lines.extend(["", "Shared recommendation:", str(semantic_comparison["shared_recommendation"])])
+        decisions = semantic_comparison.get("remaining_decisions", ())
+        if decisions:
+            lines.extend(["", "Residual decisions:", *[f"- {item}" for item in decisions]])
+        evidence = semantic_comparison.get("evidence", ())
+        if evidence:
+            lines.extend(["", "Evidence:"])
+            for item in evidence:
+                reviewer = getattr(item, "reviewer", None)
+                supports = getattr(item, "supports", None)
+                if reviewer and supports:
+                    lines.append(f"- {reviewer}: {supports}")
+        if semantic_comparison.get("confirmed_answer"):
+            lines.extend(["", "The recommendation above was explicitly confirmed by every debater."])
     if analyzer_agenda is not None:
         lines.extend(["", "### Analyzer observations (not debater-confirmed)", "", "The analyzer is non-authoritative.", "", *_render_analyzer_agenda_lines(analyzer_agenda)])
     if research_mode is not None:

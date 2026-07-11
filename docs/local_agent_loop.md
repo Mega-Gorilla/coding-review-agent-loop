@@ -358,6 +358,18 @@ Analyzer observations remain non-authoritative and cited research remains a
 separate sourced-facts section. Repair and resume preserve the selected mode;
 transcripts cannot mix answer and triage responses.
 
+To enable semantic comparison for differently worded final answers, configure
+an independent `--discuss-analyzer`. There is no reviewer fallback when it is
+unset. The analyzer receives final-round answers only and is prohibited from
+research or repository work; its output is advisory and recorded separately in
+the summary. Equivalent answers may converge. Compatible answers receive one
+bounded, budget-exempt confirmation phase: each original debater confirms the
+canonical recommendation or supplies a refinement, and only exact normalized
+agreement among those effective answers finalizes. Invalid comparator output,
+comparison failure, failed confirmation, or material conflict safely remains a
+deadlock. This makes resumed finalization idempotent once a final summary is
+recorded.
+
 Discuss mode sends the issue title, body, and comments to all configured
 reviewers and asks each to return a `discuss_review` response with a single
 outcome vote. Instead of collapsing a round into one orchestrator comment,

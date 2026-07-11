@@ -2673,3 +2673,59 @@ Rules:
 <!-- AGENT_PLAN_STATE: approved -->
 -- {reviewer_signature}
 """
+
+
+def build_discuss_semantic_comparison_prompt(
+    issue_number: int, config: AgentLoopConfig, *, answers: Sequence[ParsedDiscussAnswer],
+) -> str:
+    """A bounded, advisory final-round comparator prompt (#528)."""
+    answer_lines = "\n".join(f"- {item.reviewer}: {item.answer}" for item in answers)
+    names = [item.reviewer for item in answers]
+    return f"""Compare only these completed final-round answers for GitHub issue #{issue_number} in {config.repo}.
+
+This is advisory only and must not create a debater consensus. Do not use web research, tools, repository inspection, or earlier discussion history. Do not decide unresolved product questions.
+
+Final-round answers:
+{answer_lines}
+
+Return exactly this JSON object followed by the plan-state footer:
+{{
+  "schema_version": 1,
+  "kind": "discuss_semantic_comparison",
+  "classification": "equivalent",
+  "shared_recommendation": "The common recommendation.",
+  "remaining_decisions": [],
+  "evidence": [{", ".join(json.dumps({'reviewer': name, 'supports': 'How this answer supports the classification.'}) for name in names)}]
+}}
+Rules: classification is exactly `equivalent`, `compatible_with_residual_decisions`, or `material_conflict`; equivalent has no remaining decisions; compatible has at least one. Evidence must contain exactly one non-empty entry for every listed reviewer.
+<!-- AGENT_PLAN_STATE: approved -->
+-- {agent_signature(config.discuss_analyzer, config) if config.discuss_analyzer else 'Analyzer'}
+"""
+
+
+def build_discuss_answer_confirmation_prompt(
+    issue_number: int, config: AgentLoopConfig, *, reviewer: AgentName,
+    shared_recommendation: str, remaining_decisions: Sequence[str],
+) -> str:
+    signature = agent_signature(reviewer, config)
+    decisions = "\n".join(f"- {item}" for item in remaining_decisions)
+    return f"""Confirm or refine an advisory semantic comparison for GitHub issue #{issue_number}.
+
+The comparator is not authoritative. Proposed canonical recommendation:
+{shared_recommendation}
+
+Residual decisions:
+{decisions}
+
+Do not research, use tools, or inspect the repository. Reply with exactly:
+{{
+  "schema_version": 1,
+  "kind": "discuss_answer_confirmation",
+  "reviewer": "{agent_display_name(reviewer)}",
+  "decision": "confirm",
+  "rationale": "Why the canonical recommendation is acceptable."
+}}
+For `confirm`, omit `answer`. For `refine`, include a non-empty replacement `answer`. The run converges only if every effective answer is identical after whitespace/case normalization.
+<!-- AGENT_PLAN_STATE: approved -->
+-- {signature}
+"""

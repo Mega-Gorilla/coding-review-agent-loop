@@ -275,6 +275,28 @@ class ParsedDiscussAnswer:
 
 
 @dataclass(frozen=True)
+class DiscussSemanticEvidence:
+    reviewer: str
+    supports: str
+
+
+@dataclass(frozen=True)
+class ParsedDiscussSemanticComparison:
+    classification: str
+    shared_recommendation: str
+    remaining_decisions: tuple[str, ...]
+    evidence: tuple[DiscussSemanticEvidence, ...]
+
+
+@dataclass(frozen=True)
+class ParsedDiscussAnswerConfirmation:
+    reviewer: str
+    decision: str
+    rationale: str
+    answer: str | None = None
+
+
+@dataclass(frozen=True)
 class ParsedFailedDiscussResponse:
     reviewer: str
     category: str
@@ -2230,6 +2252,75 @@ def validate_structured_discuss_answer(
     if parsed is None:
         raise AgentLoopError("Discuss answer did not use the required structured format.")
     return parsed
+
+
+DISCUSS_SEMANTIC_CLASSIFICATIONS = frozenset({
+    "equivalent", "compatible_with_residual_decisions", "material_conflict"
+})
+
+
+def validate_structured_discuss_semantic_comparison(
+    text: str, *, reviewers: Sequence[str]
+) -> ParsedDiscussSemanticComparison:
+    payload = _extract_structured_discuss_review_payload(text, context_label="Semantic comparison")
+    if payload is None:
+        raise AgentLoopError("Semantic comparison did not use the required structured format.")
+    _require_supported_schema_version(payload)
+    _expect_exact_keys(payload, context="discuss_semantic_comparison",
+        required={"schema_version", "kind", "classification", "shared_recommendation", "remaining_decisions", "evidence"})
+    if payload.get("kind") != "discuss_semantic_comparison":
+        raise AgentLoopError("Structured response kind mismatch: expected `discuss_semantic_comparison`.")
+    classification = _expect_non_empty_string(payload["classification"], context="discuss_semantic_comparison.classification")
+    if classification not in DISCUSS_SEMANTIC_CLASSIFICATIONS:
+        raise AgentLoopError("Unsupported semantic comparison classification.")
+    shared = _expect_non_empty_string(payload["shared_recommendation"], context="discuss_semantic_comparison.shared_recommendation")
+    decisions = _expect_string_list(payload["remaining_decisions"], context="discuss_semantic_comparison.remaining_decisions", item_context="discuss_semantic_comparison.remaining_decisions")
+    if len(set(item.casefold() for item in decisions)) != len(decisions):
+        raise AgentLoopError("Semantic comparison remaining_decisions must be deduplicated.")
+    if classification == "equivalent" and decisions:
+        raise AgentLoopError("Equivalent semantic comparisons cannot have remaining decisions.")
+    if classification == "compatible_with_residual_decisions" and not decisions:
+        raise AgentLoopError("Compatible semantic comparisons require remaining decisions.")
+    evidence_payload = payload["evidence"]
+    if not isinstance(evidence_payload, list) or not evidence_payload:
+        raise AgentLoopError("Semantic comparison evidence must be a non-empty list.")
+    evidence: list[DiscussSemanticEvidence] = []
+    for index, item in enumerate(evidence_payload):
+        item_payload = _expect_object(item, context=f"discuss_semantic_comparison.evidence[{index}]")
+        _expect_exact_keys(item_payload, context=f"discuss_semantic_comparison.evidence[{index}]", required={"reviewer", "supports"})
+        evidence.append(DiscussSemanticEvidence(
+            reviewer=_expect_non_empty_string(item_payload["reviewer"], context="semantic evidence reviewer"),
+            supports=_expect_non_empty_string(item_payload["supports"], context="semantic evidence supports"),
+        ))
+    expected = set(reviewers)
+    actual = {item.reviewer for item in evidence}
+    if actual != expected or len(evidence) != len(expected):
+        raise AgentLoopError("Semantic comparison evidence must cover exactly every final-round reviewer.")
+    return ParsedDiscussSemanticComparison(classification, shared, decisions, tuple(evidence))
+
+
+def validate_structured_discuss_answer_confirmation(text: str, *, reviewer: str) -> ParsedDiscussAnswerConfirmation:
+    payload = _extract_structured_discuss_review_payload(text, context_label="Answer confirmation")
+    if payload is None:
+        raise AgentLoopError("Answer confirmation did not use the required structured format.")
+    _require_supported_schema_version(payload)
+    _expect_exact_keys(payload, context="discuss_answer_confirmation",
+        required={"schema_version", "kind", "decision", "rationale", "reviewer"}, optional={"answer"})
+    if payload.get("kind") != "discuss_answer_confirmation":
+        raise AgentLoopError("Structured response kind mismatch: expected `discuss_answer_confirmation`.")
+    response_reviewer = _expect_non_empty_string(payload["reviewer"], context="discuss_answer_confirmation.reviewer")
+    if response_reviewer != reviewer:
+        raise AgentLoopError("Answer confirmation reviewer does not match the debater.")
+    decision = _expect_non_empty_string(payload["decision"], context="discuss_answer_confirmation.decision")
+    if decision not in {"confirm", "refine"}:
+        raise AgentLoopError("Answer confirmation decision must be `confirm` or `refine`.")
+    answer = payload.get("answer")
+    if decision == "confirm" and answer is not None:
+        raise AgentLoopError("Confirm responses must not include an answer.")
+    if decision == "refine":
+        answer = _expect_non_empty_string(answer, context="discuss_answer_confirmation.answer")
+    return ParsedDiscussAnswerConfirmation(response_reviewer, decision,
+        _expect_non_empty_string(payload["rationale"], context="discuss_answer_confirmation.rationale"), answer)
 
 
 def _parse_discuss_agenda_disagreement(

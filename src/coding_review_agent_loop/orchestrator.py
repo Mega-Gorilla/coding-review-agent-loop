@@ -88,6 +88,8 @@ from .prompts import (
     CompactPriorContext,
     CompactPrReviewTailContext,
     build_discuss_agenda_prompt,
+    build_discuss_answer_confirmation_prompt,
+    build_discuss_semantic_comparison_prompt,
     build_discuss_review_prompt,
     build_followup_prompt,
     build_issue_implementation_prompt,
@@ -110,6 +112,7 @@ from .protocol import (
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
     ParsedDiscussAgenda,
     ParsedDiscussAnswer,
+    ParsedDiscussSemanticComparison,
     ParsedDiscussResponse,
     ParsedDiscussReview,
     failed_discuss_review_category,
@@ -142,6 +145,8 @@ from .protocol import (
     validate_structured_discuss_agenda,
     validate_structured_discuss_review,
     validate_structured_discuss_answer,
+    validate_structured_discuss_answer_confirmation,
+    validate_structured_discuss_semantic_comparison,
 )
 from .protocol import parse_review
 from .repair import (
@@ -284,7 +289,7 @@ PUBLIC_RESPONSE_ARTIFACT_PREFIX_RE = re.compile(
     re.I,
 )
 STRUCTURED_PUBLIC_RESPONSE_KINDS = frozenset(
-    {"plan_review", "pr_review", "coder_followup", "plan_revision", "discuss_review", "discuss_answer"}
+    {"plan_review", "pr_review", "coder_followup", "plan_revision", "discuss_review", "discuss_answer", "discuss_semantic_comparison", "discuss_answer_confirmation"}
 )
 PLAN_REVISION_FOOTER_RE = re.compile(r"(?m)^<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*-->\s*$")
 STRUCTURED_FENCE_RE = re.compile(
@@ -5452,6 +5457,76 @@ def _run_discuss_debater_turn(
     )
 
 
+def _run_discuss_semantic_finalization(
+    runner: Runner, *, issue_number: int, config: AgentLoopConfig, answers: Sequence[ParsedDiscussAnswer],
+    configured_reviewers: Sequence[AgentName], usage_context: RunUsageContext,
+) -> tuple[str, str, dict[str, object] | None]:
+    """Fail-closed semantic answer evaluation. Exact equality is intentionally outside this helper."""
+    analyzer = config.discuss_analyzer
+    if analyzer is None or len(answers) != len(configured_reviewers):
+        return "deadlock", "deadlock", None
+    if any(item.position != "answer" or not item.answer for item in answers):
+        return "deadlock", "deadlock", None
+    names = [item.reviewer for item in answers]
+    try:
+        response = _run_validated_agent(
+            runner, agent=analyzer, config=config,
+            prompt=build_discuss_semantic_comparison_prompt(issue_number, config, answers=answers),
+            marker_description="<!-- AGENT_PLAN_STATE: approved -->",
+            validate=lambda text: validate_structured_discuss_semantic_comparison(text, reviewers=names),
+            usage_context=usage_context, use_repair=True,
+            repair_expected_kind="discuss_semantic_comparison", role="analyzer",
+            label="discuss-semantic-comparison", operation_description="semantic answer comparison",
+        )
+        comparison = response.marker_value
+        assert isinstance(comparison, ParsedDiscussSemanticComparison)
+    except (AgentLoopError, AgentInvocationError):
+        # Preserve an explicit audit record even when the comparator itself
+        # fails. This distinguishes its fail-closed deadlock from a purely
+        # textual disagreement in both the public summary and round metadata.
+        return "deadlock", "semantic-comparison-failed", {
+            "classification": "failed",
+            "analyzer": agent_display_name(analyzer),
+        }
+    audit: dict[str, object] = {
+        "classification": comparison.classification,
+        "shared_recommendation": comparison.shared_recommendation,
+        "remaining_decisions": comparison.remaining_decisions,
+        "evidence": comparison.evidence,
+        "analyzer": agent_display_name(analyzer),
+    }
+    if comparison.classification == "equivalent":
+        return "answer", "semantic-equivalent", audit
+    if comparison.classification == "material_conflict":
+        return "deadlock", "material-conflict", audit
+    confirmations = []
+    try:
+        for reviewer in configured_reviewers:
+            reviewer_name = agent_display_name(reviewer)
+            response = _run_validated_agent(
+                runner, agent=reviewer, config=config,
+                prompt=build_discuss_answer_confirmation_prompt(
+                    issue_number, config, reviewer=reviewer,
+                    shared_recommendation=comparison.shared_recommendation,
+                    remaining_decisions=comparison.remaining_decisions),
+                marker_description="<!-- AGENT_PLAN_STATE: approved -->",
+                validate=lambda text, name=reviewer_name: validate_structured_discuss_answer_confirmation(text, reviewer=name),
+                usage_context=usage_context, use_repair=True,
+                repair_expected_kind="discuss_answer_confirmation", role="reviewer",
+                label="discuss-answer-confirmation", timeout_seconds=config.discuss_debater_timeout,
+                operation_description="semantic answer confirmation",
+            )
+            confirmations.append(response.marker_value)
+    except (AgentLoopError, AgentInvocationError):
+        return "deadlock", "confirmation-failed", audit
+    effective = [comparison.shared_recommendation if item.decision == "confirm" else item.answer for item in confirmations]
+    audit["confirmations"] = tuple(confirmations)
+    if all(answer and _normalize_discuss_answer(answer) == _normalize_discuss_answer(effective[0] or "") for answer in effective):
+        audit["confirmed_answer"] = effective[0]
+        return "answer", "debater-confirmed", audit
+    return "deadlock", "confirmation-disagreement", audit
+
+
 def _post_discuss_debater_comment(
     runner: Runner,
     *,
@@ -5872,15 +5947,36 @@ def _run_discuss_loop(
         else:
             consensus = _detect_discuss_consensus(reviewer_votes)  # type: ignore[arg-type]
         is_final = consensus is not None or round_number == max_round_number
+        semantic_comparison: dict[str, object] | None = None
+        semantic_finalization_ran = False
+        # Keep normalized equality as the zero-call fast path.  Only a complete,
+        # final all-answer round is eligible for the configured independent analyzer.
+        if (
+            is_final and consensus is None and config.discuss_result_mode == "answer"
+            and not failed_debaters
+            and len(successful_votes) == len(configured_reviewers)
+            and all(isinstance(vote, ParsedDiscussAnswer) and vote.position == "answer" and vote.answer for vote in successful_votes)
+        ):
+            semantic_finalization_ran = True
+            outcome, semantic_kind, semantic_comparison = _run_discuss_semantic_finalization(
+                runner, issue_number=issue_number, config=config,
+                answers=[vote for vote in successful_votes if isinstance(vote, ParsedDiscussAnswer)],
+                configured_reviewers=configured_reviewers, usage_context=usage_context,
+            )
+            consensus_kind = semantic_kind
+            consensus = (outcome, []) if outcome == "answer" else None
         if consensus is None:
             outcome = "deadlock" if config.discuss_result_mode == "answer" else "needs-human"
             round_split_proposals: list[str] = (
                 [] if config.discuss_result_mode == "answer" else _merge_discuss_split_proposals(successful_votes)  # type: ignore[arg-type]
             )
-            consensus_kind = "deadlock" if is_final else None
+            consensus_kind = None if not is_final else (
+                semantic_kind if semantic_finalization_ran else "deadlock"
+            )
         else:
             outcome, round_split_proposals = consensus
-            consensus_kind = ("unanimous" if len(round_history) == 1 else "converged") if is_final else None
+            if semantic_comparison is None:
+                consensus_kind = ("unanimous" if len(round_history) == 1 else "converged") if is_final else None
         next_analyzer_agenda: ParsedDiscussAgenda | None = None
         analyzer_response_raw: str | None = None
         if not is_final and analyzer is not None:
@@ -5916,6 +6012,7 @@ def _run_discuss_loop(
             research_mode=config.discuss_research,
             failed_debaters=tuple(failed_debaters),
             result_mode=config.discuss_result_mode,
+            semantic_comparison=semantic_comparison,
         )
         agenda = () if is_final else tuple(_render_discuss_agenda_lines(successful_votes))
         post_issue_comment(

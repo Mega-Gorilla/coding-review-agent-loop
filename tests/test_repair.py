@@ -3247,3 +3247,19 @@ def test_build_repair_prompt_accepts_discuss_agenda_expected_kind():
     assert "question_for_next_round" in prompt
     assert "Never invent topics, debater positions, facts, or questions" in prompt
     assert "If no agenda content is recoverable" in prompt
+
+
+@pytest.mark.parametrize(
+    ("kind", "format_name", "field"),
+    [
+        ("discuss_semantic_comparison", "Valid Format H — Discuss Semantic Comparison", "remaining_decisions"),
+        ("discuss_answer_confirmation", "Valid Format I — Discuss Answer Confirmation", "decision"),
+    ],
+)
+def test_build_repair_prompt_includes_new_discuss_expected_kind_schemas(kind, format_name, field):
+    from coding_review_agent_loop.repair import _build_repair_prompt
+
+    prompt = _build_repair_prompt("garbage", expected_kind=kind)
+    assert f"You MUST repair this response as `{kind}`." in prompt
+    assert format_name in prompt
+    assert field in prompt
