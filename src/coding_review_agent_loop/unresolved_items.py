@@ -18,6 +18,7 @@ from .protocol import (
     validate_human_requirements_acknowledgement,
     validate_structured_coder_followup,
     validate_structured_human_requirements_acknowledgement,
+    validate_human_requirement_dispositions,
 )
 
 HUMAN_REQUIREMENTS_ACK_ITEM_ID = "item-human-requirements-acknowledgement"
@@ -443,8 +444,14 @@ def _validate_plan_review_response(
     reviewer: str,
     unresolved_items: Sequence[UnresolvedReviewItem],
     current_round_items: Sequence[UnresolvedReviewItem] = (),
+    surfaced_requirement_ids: Sequence[str] = (),
 ) -> ParsedPlanReview:
     parsed = parse_plan_review(text, reviewer=reviewer)
+    validate_human_requirement_dispositions(
+        parsed.human_requirement_dispositions,
+        surfaced_requirement_ids=surfaced_requirement_ids,
+        context="plan_review.human_requirement_dispositions",
+    )
 
     unresolved_by_id = {item.item_id: item for item in unresolved_items}
     dispositions = _maybe_fill_resolved_dispositions_from_prose(

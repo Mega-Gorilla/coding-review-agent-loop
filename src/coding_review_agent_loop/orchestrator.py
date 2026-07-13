@@ -148,6 +148,7 @@ from .protocol import (
     review_freeform_summary_text,
     normalize_response_file_structured_text,
     validate_human_requirements_acknowledgement,
+    validate_human_requirement_dispositions,
     validate_structured_coder_followup,
     validate_structured_plan_state,
     validate_structured_plan_revision,
@@ -2296,6 +2297,12 @@ def _validate_response_with_human_requirements(
         surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
         requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
     )
+    if hasattr(marker_value, "human_requirement_dispositions"):
+        validate_human_requirement_dispositions(
+            marker_value.human_requirement_dispositions,
+            surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
+            context=f"{getattr(marker_value, 'kind', 'structured')}.human_requirement_dispositions",
+        )
     return marker_value
 
 
@@ -3166,6 +3173,10 @@ def _run_plan_first_loop(
                         reviewer=reviewer_name,
                         unresolved_items=items,
                         current_round_items=round_new_unresolved_items,
+                        surfaced_requirement_ids=_surfaced_reviewer_requirement_ids(
+                            issue_context.human_requirements,
+                            requirement_scope="planning requirements",
+                        ),
                     ),
                     usage_context=usage_context,
                     use_repair=True,
@@ -3315,6 +3326,7 @@ def _run_plan_first_loop(
                             reviewer=reviewer_name,
                             unresolved_items=prior_unresolved_items,
                             current_round_items=round_new_unresolved_items,
+                            surfaced_requirement_ids=hr_ids,
                         ),
                         repair_kwargs={
                             "expected_kind": "plan_review",

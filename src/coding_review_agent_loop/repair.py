@@ -238,6 +238,9 @@ You are a format-repair assistant. An AI agent produced an initial plan state, c
   "future_followups": [],
   "prior_plan_item_dispositions": [
     {"item_id": "item-1", "disposition": "resolved"}
+  ],
+  "human_requirement_dispositions": [
+    {"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "Covered by the current plan."}
   ]
 }
 <!-- AGENT_PLAN_STATE: approved -->
@@ -401,7 +404,10 @@ Notes:
   "kind": "plan_state",
   "state": "blocking",
   "summary": "<short implementation summary>",
-  "plan_steps": ["Update the parser.", "Add regression tests."]
+  "plan_steps": ["Update the parser.", "Add regression tests."],
+  "human_requirement_dispositions": [
+    {"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "Covered by the current plan."}
+  ]
 }
 <!-- HUMAN_REQUIREMENTS_ADDRESSED -->
 
@@ -428,6 +434,9 @@ the `### Human requirements` section from Format D.
     {"item_id": "item-1", "disposition": "resolved", "note": "covered by the revised plan"}
   ],
   "plan_steps": ["Update the parser.", "Add regression tests."]
+  ,"human_requirement_dispositions": [
+    {"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "Covered by the revised plan."}
+  ]
 }
 <!-- HUMAN_REQUIREMENTS_ADDRESSED -->
 
@@ -1268,6 +1277,7 @@ def _reviewer_human_requirements_instruction(
         "This approved review is missing <!-- HUMAN_REQUIREMENTS_RESOLVED -->.\n"
         f"Surfaced signed human requirements:\n{rendered_ids}\n"
         "For each listed requirement, confirm whether the current plan/PR satisfies it.\n"
+        "The JSON must include one `human_requirement_dispositions` object per listed requirement, with exact `Requirement N` ID, disposition `addressed`, `blocked`, or `not-applicable`, and non-empty evidence.\n"
         "If ALL requirements are satisfied: keep state `approved` and add "
         f"`<!-- HUMAN_REQUIREMENTS_RESOLVED -->` after the JSON and before the `<!-- {state_marker}: approved -->` footer.\n"
         "If ANY requirement is NOT satisfied: change state to `blocking` and add a concrete "

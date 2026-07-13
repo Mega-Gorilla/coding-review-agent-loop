@@ -150,6 +150,7 @@ class ParsedPlanReview:
     items: PlanReviewItems
     dispositions: tuple[ReviewItemDisposition, ...]
     raw_dispositions_text: str = ""
+    human_requirement_dispositions: tuple["HumanRequirementDisposition", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -174,12 +175,25 @@ class StructuredPlanReview:
     same_plan_followups: tuple[str, ...]
     future_followups: tuple[str, ...]
     prior_plan_item_dispositions: tuple[ReviewItemDisposition, ...]
+    human_requirement_dispositions: tuple["HumanRequirementDisposition", ...] = ()
 
 
 @dataclass(frozen=True)
 class StructuredHumanRequirementsPayload:
     addressed_ids: tuple[str, ...]
     checked_discussion_directly: bool
+
+
+@dataclass(frozen=True)
+class HumanRequirementDisposition:
+    requirement_id: str
+    disposition: str
+    evidence: str
+
+
+HUMAN_REQUIREMENT_DISPOSITION_VALUES = frozenset(
+    {"addressed", "blocked", "not-applicable"}
+)
 
 
 @dataclass(frozen=True)
@@ -219,6 +233,7 @@ class StructuredPlanRevision:
     prior_plan_item_dispositions: tuple[ReviewItemDisposition, ...]
     plan_steps: tuple[str, ...]
     deferred_stages: tuple[DeferredStage, ...] = ()
+    human_requirement_dispositions: tuple[HumanRequirementDisposition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -229,6 +244,7 @@ class StructuredPlanState:
     summary: str
     plan_steps: tuple[str, ...]
     deferred_stages: tuple[DeferredStage, ...] = ()
+    human_requirement_dispositions: tuple[HumanRequirementDisposition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -895,6 +911,60 @@ def _expect_requirement_id_list(value: object, *, context: str) -> tuple[str, ..
     return tuple(rendered)
 
 
+def _expect_human_requirement_dispositions(
+    value: object,
+    *,
+    context: str,
+) -> tuple[HumanRequirementDisposition, ...]:
+    if not isinstance(value, list):
+        raise AgentLoopError(f"{context} must be a JSON array.")
+    result: list[HumanRequirementDisposition] = []
+    for index, item in enumerate(value):
+        item_context = f"{context}[{index}]"
+        payload = _expect_object(item, context=item_context)
+        _expect_exact_keys(
+            payload,
+            context=item_context,
+            required={"requirement_id", "disposition", "evidence"},
+        )
+        requirement_id = _normalize_requirement_label(
+            _expect_non_empty_string(payload["requirement_id"], context=f"{item_context}.requirement_id")
+        )
+        disposition = _expect_non_empty_string(
+            payload["disposition"], context=f"{item_context}.disposition"
+        )
+        if disposition not in HUMAN_REQUIREMENT_DISPOSITION_VALUES:
+            raise AgentLoopError(
+                f"{item_context}.disposition must be one of: addressed, blocked, not-applicable"
+            )
+        evidence = _expect_non_empty_string(
+            payload["evidence"], context=f"{item_context}.evidence"
+        )
+        result.append(HumanRequirementDisposition(requirement_id, disposition, evidence))
+    return tuple(result)
+
+
+def validate_human_requirement_dispositions(
+    dispositions: Sequence[HumanRequirementDisposition],
+    *,
+    surfaced_requirement_ids: Sequence[str],
+    context: str = "human_requirement_dispositions",
+) -> None:
+    expected = tuple(_normalize_requirement_label(item) for item in surfaced_requirement_ids)
+    actual = [item.requirement_id for item in dispositions]
+    duplicates = sorted({item for item in actual if actual.count(item) > 1})
+    if duplicates:
+        raise AgentLoopError(f"{context} contains duplicate requirement ID(s): {', '.join(duplicates)}")
+    unknown = sorted(set(actual) - set(expected))
+    if unknown:
+        raise AgentLoopError(f"{context} contains unknown requirement ID(s): {', '.join(unknown)}")
+    missing = sorted(set(expected) - set(actual))
+    if missing:
+        raise AgentLoopError(f"{context} is missing requirement ID(s): {', '.join(missing)}")
+    if not expected and actual:
+        raise AgentLoopError(f"{context} must be empty when no signed human requirements are surfaced.")
+
+
 def _extract_structured_response_object(text: str) -> dict[str, object] | None:
     stripped = text.strip()
     if not stripped:
@@ -1246,6 +1316,7 @@ def _finalize_parsed_plan_review(
     items: PlanReviewItems,
     dispositions: tuple[ReviewItemDisposition, ...],
     raw_dispositions_text: str = "",
+    human_requirement_dispositions: tuple[HumanRequirementDisposition, ...] = (),
 ) -> ParsedPlanReview:
     if state == "blocking" and items.future:
         items = PlanReviewItems(blocking=items.blocking, same_plan=items.same_plan, future=())
@@ -1269,6 +1340,7 @@ def _finalize_parsed_plan_review(
         items=items,
         dispositions=dispositions,
         raw_dispositions_text=raw_dispositions_text,
+        human_requirement_dispositions=human_requirement_dispositions,
     )
 
 
@@ -1406,7 +1478,7 @@ def parse_structured_plan_review(text: str, *, reviewer: str) -> ParsedPlanRevie
             "summary",
             "prior_plan_item_dispositions",
         },
-        optional={"blocking_plan_issues", "same_plan_followups", "future_followups"},
+        optional={"blocking_plan_issues", "same_plan_followups", "future_followups", "human_requirement_dispositions"},
     )
     state = _expect_state(payload["state"], context="plan_review.state")
     summary = review_freeform_summary_text(
@@ -1437,6 +1509,10 @@ def parse_structured_plan_review(text: str, *, reviewer: str) -> ParsedPlanRevie
         allowed_same_status="same-plan",
         is_plan_review=True,
     )
+    human_requirement_dispositions = _expect_human_requirement_dispositions(
+        payload.get("human_requirement_dispositions", []),
+        context="plan_review.human_requirement_dispositions",
+    )
     items = _dedupe_plan_review_items(
         PlanReviewItems(
             blocking=_structured_followups(blocking_items, reviewer=reviewer),
@@ -1449,6 +1525,7 @@ def parse_structured_plan_review(text: str, *, reviewer: str) -> ParsedPlanRevie
         summary=summary,
         items=items,
         dispositions=dispositions,
+        human_requirement_dispositions=human_requirement_dispositions,
     )
 
 
@@ -1586,7 +1663,7 @@ def validate_structured_plan_revision(text: str) -> StructuredPlanRevision | Non
             "prior_plan_item_dispositions",
             "plan_steps",
         },
-        optional={"deferred_stages"},
+        optional={"deferred_stages", "human_requirement_dispositions"},
     )
     state = _expect_non_empty_string(payload["state"], context="plan_revision.state")
     if state != "blocking":
@@ -1608,6 +1685,10 @@ def validate_structured_plan_revision(text: str) -> StructuredPlanRevision | Non
     deferred_stages = _expect_deferred_stage_list(
         payload, "deferred_stages", context="plan_revision.deferred_stages"
     )
+    human_requirement_dispositions = _expect_human_requirement_dispositions(
+        payload.get("human_requirement_dispositions", []),
+        context="plan_revision.human_requirement_dispositions",
+    )
     return StructuredPlanRevision(
         schema_version=1,
         kind="plan_revision",
@@ -1616,6 +1697,7 @@ def validate_structured_plan_revision(text: str) -> StructuredPlanRevision | Non
         prior_plan_item_dispositions=dispositions,
         plan_steps=plan_steps,
         deferred_stages=deferred_stages,
+        human_requirement_dispositions=human_requirement_dispositions,
     )
 
 
@@ -1631,7 +1713,7 @@ def validate_structured_plan_state(text: str) -> StructuredPlanState | None:
         payload,
         context="plan_state",
         required={"schema_version", "kind", "state", "summary", "plan_steps"},
-        optional={"deferred_stages"},
+        optional={"deferred_stages", "human_requirement_dispositions"},
     )
     state = _expect_state(payload["state"], context="plan_state.state")
     if state != "blocking":
@@ -1649,6 +1731,10 @@ def validate_structured_plan_state(text: str) -> StructuredPlanState | None:
         ),
         deferred_stages=_expect_deferred_stage_list(
             payload, "deferred_stages", context="plan_state.deferred_stages"
+        ),
+        human_requirement_dispositions=_expect_human_requirement_dispositions(
+            payload.get("human_requirement_dispositions", []),
+            context="plan_state.human_requirement_dispositions",
         ),
     )
 
