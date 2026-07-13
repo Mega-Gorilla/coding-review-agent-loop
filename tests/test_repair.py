@@ -21,7 +21,9 @@ def _initial_plan_with_human_requirements() -> str:
         "### Human requirements\n"
         "- Requirement 1: keep the public API unchanged."
     )
-    return structured_plan_state().replace(
+    return structured_plan_state(human_requirement_dispositions=[
+        {"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "The plan preserves the public API."}
+    ]).replace(
         "\n<!-- AGENT_PLAN_STATE: blocking -->",
         acknowledgement + "\n<!-- AGENT_PLAN_STATE: blocking -->",
         1,
@@ -1047,7 +1049,9 @@ def test_recover_plan_revision_ack_text_override_uses_stripped_as_base(tmp_path)
     dirty_text = structured_plan_revision(
         prior_plan_item_dispositions=[{"item_id": "unknown-prior-item-1", "disposition": "resolved"}],
     )
-    stripped_text = structured_plan_revision()
+    stripped_text = structured_plan_revision(human_requirement_dispositions=[
+        {"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "The revised plan covers the stripped-base case."}
+    ])
     message_text = structured_plan_revision(human_requirements=ack)
 
     result = AgentResult(
@@ -1750,11 +1754,13 @@ def test_plan_loop_repair_missing_hr_marker_recovers_approved(tmp_path):
         state="approved",
         reviewer="OpenAI Codex",
         human_requirements_resolved=False,
+        human_requirement_dispositions=[{"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "The canonical plan preserves the API."}],
     )
     repaired_with_marker = structured_plan_review(
         state="approved",
         reviewer="OpenAI Codex",
         human_requirements_resolved=True,
+        human_requirement_dispositions=[{"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "The canonical plan preserves the API."}],
     )
     runner = FakeRunner(
         issue_payload=_issue_with_human_requirement(),
@@ -1787,12 +1793,14 @@ def test_plan_loop_repair_missing_hr_marker_returns_blocking_not_synthetic(tmp_p
         state="approved",
         reviewer="OpenAI Codex",
         human_requirements_resolved=False,
+        human_requirement_dispositions=[{"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "The canonical plan preserves the API."}],
     )
     repaired_blocking = structured_plan_review(
         state="blocking",
         summary="Requirement 1 not satisfied: plan changes the public API.",
         blocking_plan_issues=["Requirement 1 not satisfied: plan changes the public API."],
         reviewer="OpenAI Codex",
+        human_requirement_dispositions=[{"requirement_id": "Requirement 1", "disposition": "blocked", "evidence": "The plan changes the public API."}],
     )
     revision = structured_plan_revision(
         summary="Revised plan preserving the public API.",
@@ -1812,6 +1820,7 @@ def test_plan_loop_repair_missing_hr_marker_returns_blocking_not_synthetic(tmp_p
                 summary="Plan looks sound.",
                 human_requirements_resolved=True,
                 prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+                human_requirement_dispositions=[{"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "The revised canonical plan preserves the API."}],
             ),
         ],
     )
@@ -1844,6 +1853,7 @@ def test_plan_loop_repair_missing_hr_marker_failure_uses_synthetic(tmp_path):
         state="approved",
         reviewer="OpenAI Codex",
         human_requirements_resolved=False,
+        human_requirement_dispositions=[{"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "The canonical plan preserves the API."}],
     )
     revision = structured_plan_revision(
         summary="Revised plan.",
@@ -1863,6 +1873,7 @@ def test_plan_loop_repair_missing_hr_marker_failure_uses_synthetic(tmp_path):
                 summary="Plan looks sound.",
                 human_requirements_resolved=True,
                 prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+                human_requirement_dispositions=[{"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "The revised canonical plan preserves the API."}],
             ),
         ],
     )
@@ -2036,11 +2047,13 @@ def test_plan_loop_repair_blocking_records_same_plan_followups(tmp_path):
         state="approved",
         reviewer="OpenAI Codex",
         human_requirements_resolved=False,
+        human_requirement_dispositions=[{"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "The canonical plan preserves the API."}],
     )
     repaired_blocking = structured_plan_review(
         state="blocking",
         same_plan_followups=["Add a regression test for the parser edge case."],
         reviewer="OpenAI Codex",
+        human_requirement_dispositions=[{"requirement_id": "Requirement 1", "disposition": "blocked", "evidence": "A parser regression test is required."}],
     )
     revision = structured_plan_revision(
         summary="Revised plan with regression test.",
@@ -2060,6 +2073,7 @@ def test_plan_loop_repair_blocking_records_same_plan_followups(tmp_path):
                 summary="Plan looks sound.",
                 human_requirements_resolved=True,
                 prior_plan_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+                human_requirement_dispositions=[{"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "The revised canonical plan preserves the API."}],
             ),
         ],
     )

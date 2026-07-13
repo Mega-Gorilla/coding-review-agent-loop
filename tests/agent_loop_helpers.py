@@ -914,6 +914,7 @@ def structured_plan_review(
     prior_plan_item_dispositions: list[dict[str, str]] | None = None,
     reviewer: str = "OpenAI Codex",
     human_requirements_resolved: bool = False,
+    human_requirement_dispositions: list[dict[str, str]] | None = None,
 ) -> str:
     return (
         json.dumps(
@@ -926,6 +927,7 @@ def structured_plan_review(
                 "same_plan_followups": same_plan_followups or [],
                 "future_followups": future_followups or [],
                 "prior_plan_item_dispositions": prior_plan_item_dispositions or [],
+                "human_requirement_dispositions": human_requirement_dispositions or [],
             }
         )
         + ("\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->" if human_requirements_resolved else "")
@@ -940,6 +942,7 @@ def structured_plan_revision(
     plan_steps: list[str] | None = None,
     reviewer: str = "Anthropic Claude",
     human_requirements: str = "",
+    human_requirement_dispositions: list[dict[str, str]] | None = None,
     deferred_stages: list[dict[str, str]] | None = None,
 ) -> str:
     payload = {
@@ -949,6 +952,10 @@ def structured_plan_revision(
         "summary": summary,
         "prior_plan_item_dispositions": prior_plan_item_dispositions or [],
         "plan_steps": plan_steps or ["Update the plan.", "Run the relevant tests."],
+        "human_requirement_dispositions": human_requirement_dispositions or (
+            [{"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "The plan covers the signed requirement."}]
+            if human_requirements else []
+        ),
     }
     if deferred_stages is not None:
         payload["deferred_stages"] = deferred_stages
@@ -967,6 +974,7 @@ def structured_plan_state(
     plan_steps: list[str] | None = None,
     reviewer: str = "Anthropic Claude",
     deferred_stages: list[dict[str, str]] | None = None,
+    human_requirement_dispositions: list[dict[str, str]] | None = None,
 ) -> str:
     payload = {
         "schema_version": 1,
@@ -974,6 +982,7 @@ def structured_plan_state(
         "state": state,
         "summary": summary,
         "plan_steps": plan_steps or ["Update the code.", "Run the relevant tests."],
+        "human_requirement_dispositions": human_requirement_dispositions or [],
     }
     if deferred_stages is not None:
         payload["deferred_stages"] = deferred_stages

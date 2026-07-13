@@ -956,7 +956,7 @@ def _recover_plan_revision_human_requirements_acknowledgement(
         )
         return None
 
-    valid_blocks: list[tuple[str, str]] = []
+    valid_blocks: list[tuple[str, str, tuple[object, ...]]] = []
     invalid_count = 0
     incomplete_count = 0
     for source, source_text in _candidate_source_texts(result):
@@ -971,18 +971,26 @@ def _recover_plan_revision_human_requirements_acknowledgement(
                     surfaced_requirement_ids=context.surfaced_requirement_ids,
                     requires_direct_discussion_ack=context.requires_direct_discussion_ack,
                 )
+                source_plan = validate_structured_plan_revision(source_text)
+                if source_plan is None:
+                    raise AgentLoopError("captured response was not a structured plan revision")
+                validate_human_requirement_dispositions(
+                    source_plan.human_requirement_dispositions,
+                    surfaced_requirement_ids=context.surfaced_requirement_ids,
+                    context="plan_revision.human_requirement_dispositions",
+                )
             except AgentLoopError:
                 invalid_count += 1
                 continue
-            valid_blocks.append((source, block))
+            valid_blocks.append((source, block, source_plan.human_requirement_dispositions))
 
-    unique_valid: list[tuple[str, str]] = []
+    unique_valid: list[tuple[str, str, tuple[object, ...]]] = []
     seen_blocks: set[str] = set()
-    for source, block in valid_blocks:
+    for source, block, dispositions in valid_blocks:
         if block in seen_blocks:
             continue
         seen_blocks.add(block)
-        unique_valid.append((source, block))
+        unique_valid.append((source, block, dispositions))
 
     if len(unique_valid) != 1:
         if len(unique_valid) > 1:
@@ -997,7 +1005,17 @@ def _recover_plan_revision_human_requirements_acknowledgement(
         return None
 
     json_prefix, footer_and_signature = split
-    source, block = unique_valid[0]
+    source, block, dispositions = unique_valid[0]
+    payload = json.loads(json_prefix)
+    payload["human_requirement_dispositions"] = [
+        {
+            "requirement_id": item.requirement_id,
+            "disposition": item.disposition,
+            "evidence": item.evidence,
+        }
+        for item in dispositions
+    ]
+    json_prefix = json.dumps(payload)
     recovered_text = f"{json_prefix}\n{block}\n{footer_and_signature}"
     try:
         marker_value = validate(recovered_text)

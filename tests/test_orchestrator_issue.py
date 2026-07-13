@@ -90,7 +90,7 @@ def _add_default_requirement_disposition(output: str) -> str:
         "plan_state", "plan_revision", "plan_review"
     }:
         return output
-    if "human_requirement_dispositions" in payload:
+    if payload.get("human_requirement_dispositions"):
         return output
     payload["human_requirement_dispositions"] = [{
         "requirement_id": "Requirement 1",
