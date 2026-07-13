@@ -2494,9 +2494,6 @@ Respond using this mandatory structured JSON format:
       "question_for_next_round": "Would splitting the API boundary into its own issue resolve the scope objection?"
     }}
   ],
-  "human_requirement_dispositions": [
-    {{"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "Step 2 names the requested integration artifact."}}
-  ],
   "missing_facts": ["Whether the API boundary is already specified."]{research_example}
 }}
 <!-- AGENT_PLAN_STATE: approved -->

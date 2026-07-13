@@ -2143,6 +2143,7 @@ def test_build_discuss_agenda_prompt_includes_every_round_of_history(tmp_path):
     assert "never invent positions" in prompt
     assert "Carry forward unresolved `missing_facts`" in prompt
     assert '"kind": "discuss_agenda"' in prompt
+    assert '"human_requirement_dispositions"' not in prompt
 
 
 def test_build_discuss_agenda_prompt_supports_answer_history(tmp_path):
