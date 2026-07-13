@@ -148,6 +148,7 @@ from .protocol import (
     review_freeform_summary_text,
     normalize_response_file_structured_text,
     validate_human_requirements_acknowledgement,
+    validate_human_requirement_dispositions,
     validate_structured_coder_followup,
     validate_structured_plan_state,
     validate_structured_plan_revision,
@@ -955,7 +956,7 @@ def _recover_plan_revision_human_requirements_acknowledgement(
         )
         return None
 
-    valid_blocks: list[tuple[str, str]] = []
+    valid_blocks: list[tuple[str, str, tuple[object, ...]]] = []
     invalid_count = 0
     incomplete_count = 0
     for source, source_text in _candidate_source_texts(result):
@@ -970,18 +971,26 @@ def _recover_plan_revision_human_requirements_acknowledgement(
                     surfaced_requirement_ids=context.surfaced_requirement_ids,
                     requires_direct_discussion_ack=context.requires_direct_discussion_ack,
                 )
+                source_plan = validate_structured_plan_revision(source_text)
+                if source_plan is None:
+                    raise AgentLoopError("captured response was not a structured plan revision")
+                validate_human_requirement_dispositions(
+                    source_plan.human_requirement_dispositions,
+                    surfaced_requirement_ids=context.surfaced_requirement_ids,
+                    context="plan_revision.human_requirement_dispositions",
+                )
             except AgentLoopError:
                 invalid_count += 1
                 continue
-            valid_blocks.append((source, block))
+            valid_blocks.append((source, block, source_plan.human_requirement_dispositions))
 
-    unique_valid: list[tuple[str, str]] = []
+    unique_valid: list[tuple[str, str, tuple[object, ...]]] = []
     seen_blocks: set[str] = set()
-    for source, block in valid_blocks:
+    for source, block, dispositions in valid_blocks:
         if block in seen_blocks:
             continue
         seen_blocks.add(block)
-        unique_valid.append((source, block))
+        unique_valid.append((source, block, dispositions))
 
     if len(unique_valid) != 1:
         if len(unique_valid) > 1:
@@ -996,7 +1005,17 @@ def _recover_plan_revision_human_requirements_acknowledgement(
         return None
 
     json_prefix, footer_and_signature = split
-    source, block = unique_valid[0]
+    source, block, dispositions = unique_valid[0]
+    payload = json.loads(json_prefix)
+    payload["human_requirement_dispositions"] = [
+        {
+            "requirement_id": item.requirement_id,
+            "disposition": item.disposition,
+            "evidence": item.evidence,
+        }
+        for item in dispositions
+    ]
+    json_prefix = json.dumps(payload)
     recovered_text = f"{json_prefix}\n{block}\n{footer_and_signature}"
     try:
         marker_value = validate(recovered_text)
@@ -2268,7 +2287,7 @@ def _require_pr_number_or_clarification(text: str) -> int | str:
     )
 
 
-def _require_plan_state_or_clarification(text: str) -> str:
+def _require_plan_state_or_clarification(text: str) -> StructuredPlanState | str:
     if is_clarification_request(text):
         return "clarification"
     structured_plan = validate_structured_plan_state(text)
@@ -2276,7 +2295,7 @@ def _require_plan_state_or_clarification(text: str) -> str:
         raise AgentLoopError(
             "Initial planning response must include a structured `plan_state` JSON object."
         )
-    return structured_plan.state
+    return structured_plan
 def _validate_response_with_human_requirements(
     text: str,
     *,
@@ -2296,7 +2315,42 @@ def _validate_response_with_human_requirements(
         surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
         requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
     )
+    if hasattr(marker_value, "human_requirement_dispositions"):
+        validate_human_requirement_dispositions(
+            marker_value.human_requirement_dispositions,
+            surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
+            context=f"{getattr(marker_value, 'kind', 'structured')}.human_requirement_dispositions",
+        )
     return marker_value
+
+
+def _current_plan_has_complete_human_requirement_dispositions(
+    coder_output: str | None,
+    *,
+    surfaced_requirement_ids: Sequence[str],
+) -> bool:
+    """Return whether the current coder plan has the required attestation.
+
+    The raw structured coder response is retained in round metadata specifically
+    so resume can apply this same gate to a canonical markdown revision.
+    """
+    if coder_output is None:
+        return False
+    try:
+        try:
+            parsed = validate_structured_plan_state(coder_output)
+        except AgentLoopError:
+            parsed = validate_structured_plan_revision(coder_output)
+        if parsed is None:
+            return False
+        validate_human_requirement_dispositions(
+            parsed.human_requirement_dispositions,
+            surfaced_requirement_ids=surfaced_requirement_ids,
+            context=f"{parsed.kind}.human_requirement_dispositions",
+        )
+    except AgentLoopError:
+        return False
+    return True
 
 
 def _merge_human_requirements(
@@ -3067,8 +3121,10 @@ def _run_plan_first_loop(
         )
         start_round_number = 1
         resumed_round: ResumedReviewRound | None = None
+        current_coder_output = plan_output
     else:
         current_plan, resumed_round = resume_state
+        current_coder_output = resumed_round.coder_output
         unresolved_items = list(resumed_round.prior_items)
         compact_prior_summaries = list(resumed_round.compact_prior_summaries)
         next_unresolved_item_number = resumed_round.next_unresolved_item_number
@@ -3166,6 +3222,10 @@ def _run_plan_first_loop(
                         reviewer=reviewer_name,
                         unresolved_items=items,
                         current_round_items=round_new_unresolved_items,
+                        surfaced_requirement_ids=_surfaced_reviewer_requirement_ids(
+                            issue_context.human_requirements,
+                            requirement_scope="planning requirements",
+                        ),
                     ),
                     usage_context=usage_context,
                     use_repair=True,
@@ -3286,16 +3346,60 @@ def _run_plan_first_loop(
         unresolved_items = [*unresolved_items, *round_new_unresolved_items]
         must_fix_items = [item for item in unresolved_items if item.status in {"blocking", "same-plan"}]
         if all_approved and not must_fix_items and issue_context.human_requirements:
-            missing_acknowledgements = [
-                reviewer_name
-                for reviewer_name, review_output in approved_review_outputs
-                if not human_requirements_resolved(review_output)
-            ]
+            hr_ids = _surfaced_reviewer_requirement_ids(
+                issue_context.human_requirements,
+                requirement_scope="planning requirements",
+            )
+            coder_dispositions_complete = _current_plan_has_complete_human_requirement_dispositions(
+                current_coder_output,
+                surfaced_requirement_ids=hr_ids,
+            )
+            missing_acknowledgements = (
+                [reviewer_name for reviewer_name, _review_output in approved_review_outputs]
+                if not coder_dispositions_complete
+                else [
+                    reviewer_name
+                    for reviewer_name, review_output in approved_review_outputs
+                    if not human_requirements_resolved(review_output)
+                ]
+            )
             if missing_acknowledgements:
-                hr_ids = _surfaced_reviewer_requirement_ids(
-                    issue_context.human_requirements,
-                    requirement_scope="planning requirements",
-                )
+                if not coder_dispositions_complete:
+                    log(
+                        config,
+                        f"Planning round {round_number}: current coder plan lacks complete "
+                        "human requirement dispositions; re-injecting as blocking plan item",
+                    )
+                    synthetic_review = (
+                        "Orchestrator plan review:\n\n"
+                        "The current canonical coder plan lacks complete structured dispositions "
+                        "for the signed human requirements. Coder must provide one valid "
+                        "disposition with evidence for every surfaced requirement before a "
+                        "reviewer approval marker can be accepted."
+                    )
+                    blocking_reviews.append(("Orchestrator", synthetic_review))
+                    round_new_unresolved_items.append(
+                        _next_unresolved_item(
+                            item_number=next_unresolved_item_number,
+                            reviewer="Orchestrator",
+                            source_round=round_number,
+                            text=(
+                                "The current canonical coder plan lacks complete structured "
+                                "dispositions for the signed human requirements. Coder must provide "
+                                "one valid disposition with evidence for every surfaced requirement "
+                                "before a reviewer approval marker can be accepted."
+                            ),
+                            status="blocking",
+                        )
+                    )
+                    next_unresolved_item_number += 1
+                    unresolved_items = [*unresolved_items, round_new_unresolved_items[-1]]
+                    must_fix_items = [
+                        item for item in unresolved_items if item.status in {"blocking", "same-plan"}
+                    ]
+                    all_approved = False
+                    # A reviewer cannot repair a missing coder attestation.
+                    missing_acknowledgements = []
                 still_missing = []
                 for reviewer_name, review_output in approved_review_outputs:
                     if human_requirements_resolved(review_output):
@@ -3315,6 +3419,7 @@ def _run_plan_first_loop(
                             reviewer=reviewer_name,
                             unresolved_items=prior_unresolved_items,
                             current_round_items=round_new_unresolved_items,
+                            surfaced_requirement_ids=hr_ids,
                         ),
                         repair_kwargs={
                             "expected_kind": "plan_review",
@@ -3736,6 +3841,7 @@ def _run_plan_first_loop(
                 plan_response.marker_value, must_fix_items, config
             )
             current_plan = canonical_plan
+            current_coder_output = plan_response.text
             public_comment = render_public_agent_comment(
                 kind="plan_revision",
                 parsed=plan_response.marker_value,
@@ -3747,6 +3853,7 @@ def _run_plan_first_loop(
             )
         else:
             current_plan = plan_response.text
+            current_coder_output = plan_response.text
             public_comment = normalize_freeform_signature(
                 plan_response.text, agent=config.coder, config=config, model_used=plan_response.model_used
             )

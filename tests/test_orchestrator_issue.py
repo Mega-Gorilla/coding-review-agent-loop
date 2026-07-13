@@ -65,8 +65,40 @@ class FakeRunner(_FakeRunner):
                 else output
                 for output in outputs
             ]
+        # Signed-requirement tests written before the typed disposition
+        # contract focus on their named acknowledgement behavior. Supply the
+        # otherwise-irrelevant complete attestation to their structured plan
+        # fixtures, while preserving intentionally missing acknowledgement
+        # markers for the tests that reject those.
+        issue_body = str((kwargs.get("issue_payload") or {}).get("body") or "")
+        if "-- Human Reviewer" in issue_body:
+            for output_key in ("claude_outputs", "codex_outputs", "gemini_outputs", "antigravity_outputs"):
+                outputs = kwargs.get(output_key)
+                if outputs is None:
+                    continue
+                kwargs[output_key] = [_add_default_requirement_disposition(output) for output in outputs]
         kwargs.setdefault("pr_payload", {"body": "Fixes #56"})
         super().__init__(**kwargs)
+
+
+def _add_default_requirement_disposition(output: str) -> str:
+    try:
+        payload, end = json.JSONDecoder().raw_decode(output.lstrip())
+    except (json.JSONDecodeError, ValueError):
+        return output
+    if not isinstance(payload, dict) or payload.get("kind") not in {
+        "plan_state", "plan_revision", "plan_review"
+    }:
+        return output
+    if payload.get("human_requirement_dispositions"):
+        return output
+    payload["human_requirement_dispositions"] = [{
+        "requirement_id": "Requirement 1",
+        "disposition": "addressed",
+        "evidence": "The structured plan covers the signed requirement.",
+    }]
+    prefix = output[: len(output) - len(output.lstrip())]
+    return prefix + json.dumps(payload) + output.lstrip()[end:]
 
 
 def _initial_plan_state(*, summary: str = "Initial plan.", human_requirements: str = "") -> str:
@@ -74,6 +106,62 @@ def _initial_plan_state(*, summary: str = "Initial plan.", human_requirements: s
         "\n<!-- AGENT_PLAN_STATE: blocking -->",
         human_requirements + "\n<!-- AGENT_PLAN_STATE: blocking -->",
         1,
+    )
+
+
+def _plan_with_requirement_disposition(
+    *,
+    kind: str,
+    summary: str,
+    plan_steps: list[str],
+    evidence: str,
+    state: str = "blocking",
+) -> str:
+    payload = {
+        "schema_version": 1,
+        "kind": kind,
+        "state": state,
+        "summary": summary,
+        "plan_steps": plan_steps,
+        "human_requirement_dispositions": [{
+            "requirement_id": "Requirement 1",
+            "disposition": "addressed",
+            "evidence": evidence,
+        }],
+    }
+    if kind == "plan_revision":
+        payload["prior_plan_item_dispositions"] = []
+    return (
+        json.dumps(payload)
+        + "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n\n### Human requirements\n"
+        + f"- Requirement 1: {evidence}\n"
+        + f"<!-- AGENT_PLAN_STATE: {state} -->\n-- Anthropic Claude"
+    )
+
+
+def _plan_review_with_requirement_disposition(
+    *, state: str, summary: str, marker: bool = False, prior_dispositions: list[dict[str, str]] | None = None
+) -> str:
+    return (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "plan_review",
+                "state": state,
+                "summary": summary,
+                "blocking_plan_issues": [summary] if state == "blocking" else [],
+                "same_plan_followups": [],
+                "future_followups": [],
+                "prior_plan_item_dispositions": prior_dispositions or [],
+                "human_requirement_dispositions": [{
+                    "requirement_id": "Requirement 1",
+                    "disposition": "addressed",
+                    "evidence": summary,
+                }],
+            }
+        )
+        + ("\n<!-- HUMAN_REQUIREMENTS_RESOLVED -->" if marker else "")
+        + f"\n<!-- AGENT_PLAN_STATE: {state} -->\n-- OpenAI Codex"
     )
 
 
@@ -560,7 +648,7 @@ def test_issue_loop_plan_revision_repair_preserves_signed_human_requirements(tmp
         "- Requirement 1: the revised plan preserves backward compatibility.\n\n"
         "<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
     )
-    repaired_revision = structured_plan_revision(
+    repaired_revision = _add_default_requirement_disposition(structured_plan_revision(
         summary="Revised plan with compatibility tests.",
         prior_plan_item_dispositions=[
             {
@@ -575,7 +663,7 @@ def test_issue_loop_plan_revision_repair_preserves_signed_human_requirements(tmp
             "### Human requirements\n"
             "- Requirement 1: the revised plan preserves backward compatibility.\n"
         ),
-    )
+    ))
     runner = FakeRunner(
         issue_payload={
             "author": {"login": "maintainer"},
@@ -970,6 +1058,64 @@ def test_issue_loop_plan_first_requires_reviewer_human_requirements_resolution(t
     assert "<!-- HUMAN_REQUIREMENTS_RESOLVED -->" in runner.comments[-2]
     captured = capsys.readouterr()
     assert "approved without acknowledging signed human requirements" in captured.err
+
+
+def test_plan_first_grafana_requirement_blocks_admin_html_only_plan_then_accepts_integration(tmp_path):
+    """A reviewer must reject a lookalike local UI until the named integration is planned."""
+    runner = FakeRunner(
+        issue_payload={
+            "body": "Provision a Grafana dashboard for verification attribution.\n\n-- Human Reviewer",
+        },
+        claude_outputs=[
+            _plan_with_requirement_disposition(
+                kind="plan_state",
+                summary="Add verification attribution to the operations UI.",
+                plan_steps=["Add verification attribution to admin.html."],
+                evidence="admin.html will display verification attribution.",
+            ),
+            _plan_with_requirement_disposition(
+                kind="plan_revision",
+                summary="Provision the requested Grafana dashboard.",
+                plan_steps=[
+                    "Add Grafana dashboard provisioning for verification attribution.",
+                    "Test the dashboard provisioning artifact.",
+                ],
+                evidence="The plan names Grafana dashboard provisioning and its artifact.",
+            ),
+        ],
+        codex_outputs=[
+            _plan_review_with_requirement_disposition(
+                state="blocking",
+                summary="admin.html does not cover the requested Grafana dashboard provisioning.",
+            ),
+            _plan_review_with_requirement_disposition(
+                state="approved",
+                summary="The revised canonical plan covers the Grafana provisioning artifact.",
+                marker=True,
+                prior_dispositions=[
+                    {"item_id": "item-1", "disposition": "resolved", "note": "Grafana is now planned."}
+                ],
+            ),
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        coder="claude",
+        reviewer=("codex",),
+        max_rounds=2,
+        plan_execution_mode="plan-only",
+    )
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    review_prompts = [
+        command[-1]
+        for command, _cwd in runner.commands
+        if command[:2] == ["codex", "exec"]
+    ]
+    assert any("admin.html" in prompt and "Grafana" in prompt for prompt in review_prompts)
+    assert "admin.html does not cover the requested Grafana" in runner.comments[1]
+    assert "Provision the requested Grafana dashboard" in runner.comments[-1]
 
 def test_issue_loop_plan_first_uses_full_context_when_plan_ledger_incomplete(tmp_path, capsys):
     old_plan = "Old plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"

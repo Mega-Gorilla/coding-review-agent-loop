@@ -427,6 +427,7 @@ def _coder_human_requirements_guidance(
     context: CoderHumanRequirementsPromptContext,
     *,
     requirement_label: str = "next-revision requirements",
+    include_disposition_json: bool = False,
     surfaced_requirement_instruction: str = (
         "Each bullet must explain how you addressed that item or why it could not be satisfied safely."
     ),
@@ -443,6 +444,10 @@ def _coder_human_requirements_guidance(
         "",
         "Then add a `### Human requirements` section.",
     ]
+    if include_disposition_json:
+        lines.append(
+            "In the structured JSON, also include `human_requirement_dispositions`: one object for every surfaced `Requirement N`, with `requirement_id`, `disposition` (`addressed`, `blocked`, or `not-applicable`), and a concise non-empty `evidence` note."
+        )
     if context.surfaced_requirement_ids:
         surfaced = ", ".join(f"`{item}`" for item in context.surfaced_requirement_ids)
         lines.append(
@@ -462,19 +467,28 @@ def _human_requirements_review_guidance(
     human_requirements: Sequence[HumanReviewRequirement] | None,
     *,
     requirement_label: str = "signed human reviewer requirements",
+    require_plan_dispositions: bool = False,
 ) -> str:
     if not human_requirements:
         return ""
     return f"""{requirement_label.capitalize()} override AI reviewer preferences unless they
 are unsafe, impossible, or contradicted by a later signed human instruction.
-Verify each requirement in this set before approving. If all surfaced signed
-human requirements are addressed or explicitly resolved, an approved
-review must include exactly:
+Verify each requirement in this set before approving. An approved review must
+include exactly:
 
 <!-- HUMAN_REQUIREMENTS_RESOLVED -->
 
 If any signed human requirement in this set is unresolved, return blocking.
-"""
+""" + ("""For every surfaced requirement, the JSON must include exactly one
+`human_requirement_dispositions` object with its `Requirement N` ID, an
+`addressed`, `blocked`, or `not-applicable` disposition, and non-empty evidence.
+For an `addressed` disposition, compare the evidence to the canonical plan and
+return blocking when it lacks concrete coverage. A named external integration
+is distinct from a similarly purposed local UI: a Grafana request requires the
+Grafana dashboard/provisioning or another named integration artifact, not merely
+an `admin.html` view. Use `blocked` or `not-applicable` only with a visible
+reason that you explicitly accept before approving.
+""" if require_plan_dispositions else "")
 
 
 def _structured_coder_followup_guidance(
@@ -695,16 +709,26 @@ Use this mandatory structured JSON response format:
   "future_followups": ["Consider a later cleanup pass."],
   "prior_plan_item_dispositions": [
     {"item_id": "item-1", "disposition": "resolved", "note": "Covered by the revised tests."}
+  ],
+  "human_requirement_dispositions": [
+    {"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "The canonical plan names the requested artifact."}
   ]
 }
 <!-- AGENT_PLAN_STATE: approved -->
 -- reviewer signature shown in the volatile tail
 
 If signed human requirements are present in the stable prefix and are fully
-addressed or explicitly resolved, include exactly this marker before the
+addressed or explicitly resolved with complete dispositions and concrete
+canonical-plan coverage, include exactly this marker before the
 `AGENT_PLAN_STATE` footer:
 
 <!-- HUMAN_REQUIREMENTS_RESOLVED -->
+
+Compare every `addressed` evidence note with the current canonical plan. A
+named external integration such as Grafana requires its dashboard,
+provisioning, or other named integration artifact in the plan; an `admin.html`
+view alone is not coverage. If the plan cannot satisfy the request, record a
+visible `blocked` or `not-applicable` reason and approve only if you accept it.
 
 Blocking plan issues and Same-plan follow-ups both prevent approval. Same-plan
 follow-ups are small current-plan refinements that must be incorporated before
@@ -965,11 +989,16 @@ For a plan (rather than a clarification), respond with exactly one structured JS
   "kind": "plan_state",
   "state": "blocking",
   "summary": "<non-empty concise implementation summary>",
-  "plan_steps": ["<non-empty step>"]
+  "plan_steps": ["<non-empty step>"],
+  "human_requirement_dispositions": [
+    {{"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "Step 1 names the requested deliverable."}}
+  ]
 }}
 
 `plan_steps` must be a non-empty list of non-empty strings and should cover the
 intended approach, key files or areas to change, edge cases, and test strategy.
+When signed requirements are surfaced, the disposition array must contain every
+generated `Requirement N` exactly once; when none are surfaced, it must be empty.
 The optional `deferred_stages` field is a list of objects with non-empty `title`
 and `summary` strings.
 Do not substitute a generic `implementation_plan` object or markdown plan for this
@@ -982,6 +1011,7 @@ prose between the JSON object and footer.
 {human_requirements_context.block}{_coder_human_requirements_guidance(
     human_requirements_context,
     requirement_label="planning requirements",
+    include_disposition_json=True,
     surfaced_requirement_instruction=(
         "Each bullet must explain how the plan covers that item or what remains risky or blocked."
     ),
@@ -1045,6 +1075,7 @@ def build_plan_review_prompt(
     human_requirements_guidance = _human_requirements_review_guidance(
         issue_context.human_requirements if issue_context is not None else (),
         requirement_label="signed human issue requirements",
+        require_plan_dispositions=True,
     )
     if unresolved_items:
         unresolved_items_guidance = """Prior unresolved plan items are present. Disposition every listed item
@@ -1087,6 +1118,9 @@ strategy, and ambiguity. Use this mandatory structured JSON response format:
   "future_followups": ["Consider a later cleanup pass."],
   "prior_plan_item_dispositions": [
     {{"item_id": "item-1", "disposition": "resolved", "note": "Covered by the revised tests."}}
+  ],
+  "human_requirement_dispositions": [
+    {{"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "Step 2 names the requested integration artifact."}}
   ]
 }}
 <!-- AGENT_PLAN_STATE: approved -->
@@ -1164,6 +1198,7 @@ def _build_compact_plan_review_prompt(
     human_requirements_guidance = _human_requirements_review_guidance(
         issue_context.human_requirements if issue_context is not None else (),
         requirement_label="signed human issue requirements",
+        require_plan_dispositions=True,
     )
     if unresolved_items:
         unresolved_items_guidance = """Prior unresolved plan items are present. Disposition every listed item
@@ -1344,6 +1379,7 @@ branch, commit, push, or open a pull request during this planning stage.
 {human_requirements_context.block}{_coder_human_requirements_guidance(
     human_requirements_context,
     requirement_label="planning requirements",
+    include_disposition_json=True,
     surfaced_requirement_instruction=(
         "Each bullet must explain how the revised plan covers that item or what remains risky or blocked."
     ),
@@ -1442,6 +1478,7 @@ def _build_compact_plan_revision_prompt(
         human_requirements_guidance=_coder_human_requirements_guidance(
             human_requirements_context,
             requirement_label="planning requirements",
+            include_disposition_json=True,
             surfaced_requirement_instruction=(
                 "Each bullet must explain how the revised plan covers that item or what remains risky or blocked."
             ),

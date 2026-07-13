@@ -18,6 +18,7 @@ from .protocol import (
     PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE,
     SIGNATURE_RE,
     DeferredStage,
+    HumanRequirementDisposition,
     ParsedDiscussAgenda,
     ParsedDiscussAnswer,
     ParsedFailedDiscussResponse,
@@ -212,6 +213,22 @@ def render_canonical_plan_steps(plan_steps: Sequence[str]) -> str:
     return "\n".join(f"{index}. {step}" for index, step in enumerate(plan_steps, start=1))
 
 
+def render_human_requirement_dispositions(
+    dispositions: Sequence[HumanRequirementDisposition],
+    *,
+    heading: str = "### Human requirement dispositions",
+) -> str | None:
+    if not dispositions:
+        return None
+    return "\n".join(
+        [heading]
+        + [
+            f"- **{item.requirement_id}** — `{item.disposition}`: {item.evidence}"
+            for item in dispositions
+        ]
+    )
+
+
 def render_deferred_stages_section(deferred_stages: Sequence[DeferredStage]) -> str | None:
     """Render declared deferred stages so they carry into the plan's markdown.
 
@@ -290,6 +307,9 @@ def render_canonical_plan_revision(
             ]
         )
     )
+    human_section = render_human_requirement_dispositions(parsed_revision.human_requirement_dispositions)
+    if human_section:
+        sections.append(human_section)
     deferred_section = render_deferred_stages_section(parsed_revision.deferred_stages)
     if deferred_section:
         sections.append(deferred_section)
@@ -433,6 +453,11 @@ def _render_public_plan_review_comment(
                 config=config,
             )
         )
+    human_section = render_human_requirement_dispositions(
+        parsed_review.human_requirement_dispositions
+    )
+    if human_section:
+        sections.append(human_section)
     footer: list[str] = []
     if human_requirements_resolved_flag:
         footer.append("<!-- HUMAN_REQUIREMENTS_RESOLVED -->")
@@ -568,6 +593,9 @@ def _render_public_plan_state_comment(
         parsed_plan.summary.strip(),
         "\n".join(["### Plan steps", render_canonical_plan_steps(parsed_plan.plan_steps)]),
     ]
+    human_section = render_human_requirement_dispositions(parsed_plan.human_requirement_dispositions)
+    if human_section:
+        sections.append(human_section)
     deferred_section = render_deferred_stages_section(parsed_plan.deferred_stages)
     if deferred_section:
         sections.append(deferred_section)
