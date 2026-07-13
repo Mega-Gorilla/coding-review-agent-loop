@@ -2,7 +2,9 @@ import json
 
 import pytest
 
+import coding_review_agent_loop.orchestrator as orchestrator
 from coding_review_agent_loop.errors import AgentLoopError
+from coding_review_agent_loop.github import HumanReviewRequirement
 from coding_review_agent_loop.protocol import (
     validate_human_requirement_dispositions,
     validate_structured_plan_state,
@@ -71,4 +73,35 @@ def test_no_signed_requirements_requires_empty_collection():
     validate_human_requirement_dispositions(
         parsed.human_requirement_dispositions,
         surfaced_requirement_ids=(),
+    )
+
+
+def test_initial_plan_validator_checks_coder_dispositions():
+    with pytest.raises(AgentLoopError, match="missing requirement ID"):
+        orchestrator._validate_response_with_human_requirements(
+            _plan([]).replace(
+                "\n<!-- AGENT_PLAN_STATE: blocking -->",
+                "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n\n### Human requirements\n"
+                "- Requirement 1: Grafana is planned.\n"
+                "<!-- AGENT_PLAN_STATE: blocking -->",
+            ),
+            marker_validator=orchestrator._require_plan_state_or_clarification,
+            human_requirements=(
+                HumanReviewRequirement(
+                    source_type="Issue body",
+                    author="maintainer",
+                    created_at=None,
+                    url=None,
+                    body="Provide Grafana.",
+                ),
+            ),
+            requirement_scope="planning requirements",
+            full_omission_fallback="Fetch the discussion.",
+        )
+
+
+def test_current_plan_gate_rejects_missing_coder_dispositions():
+    assert not orchestrator._current_plan_has_complete_human_requirement_dispositions(
+        _plan([]),
+        surfaced_requirement_ids=("Requirement 1",),
     )

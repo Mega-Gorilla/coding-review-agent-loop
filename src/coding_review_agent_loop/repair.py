@@ -433,8 +433,8 @@ the `### Human requirements` section from Format D.
   "prior_plan_item_dispositions": [
     {"item_id": "item-1", "disposition": "resolved", "note": "covered by the revised plan"}
   ],
-  "plan_steps": ["Update the parser.", "Add regression tests."]
-  ,"human_requirement_dispositions": [
+  "plan_steps": ["Update the parser.", "Add regression tests."],
+  "human_requirement_dispositions": [
     {"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "Covered by the revised plan."}
   ]
 }
