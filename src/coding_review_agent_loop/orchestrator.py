@@ -5098,9 +5098,16 @@ def _recover_final_discuss_split_proposals(
         record = by_name.get(name)
         if record is None:
             continue
-        final_votes.append(
-            _decode_discuss_vote(record, round_number=final_round_number, reviewer_workdirs=reviewer_workdirs)
+        vote = _decode_discuss_vote(
+            record,
+            round_number=final_round_number,
+            reviewer_workdirs=reviewer_workdirs,
         )
+        # This is triage-only legacy recovery. A mixed or malformed transcript
+        # must not be interpreted as a split consensus.
+        if not isinstance(vote, ParsedDiscussReview):
+            return None
+        final_votes.append(vote)
     if not final_votes:
         return None
     consensus = _detect_discuss_consensus(final_votes)

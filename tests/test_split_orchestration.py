@@ -464,6 +464,91 @@ def _legacy_split_final_summary_comment() -> dict:
     }
 
 
+def _answer_mode_final_summary_comment() -> dict:
+    """A current open-ended summary must not enter triage split recovery."""
+    return {
+        "author": {"login": "bot"},
+        "createdAt": "2026-07-12T00:00:01Z",
+        "body": _attach_round_metadata(
+            "Discuss answer consensus.\n-- coding-review-agent-loop",
+            PostedRoundMetadata(
+                flow="discuss",
+                role="summary",
+                agent="coding-review-agent-loop",
+                round_number=6,
+                subject="prior-discuss-subject",
+                is_final=True,
+                result_mode="answer",
+            ),
+        ),
+    }
+
+
+def _answer_mode_debater_comment() -> dict:
+    """An answer-mode vote as `_post_discuss_debater_comment` persists it."""
+    response = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "discuss_answer",
+                "position": "answer",
+                "rationale": "The proposal is sufficiently scoped.",
+                "confidence": "high",
+                "unresolved_items": [],
+                "answer": "Proceed with the proposal.",
+                "rebuttal": "No triage outcome applies to answer-mode discussion.",
+            }
+        )
+        + "\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex"
+    )
+    return {
+        "author": {"login": "bot"},
+        "createdAt": "2026-07-12T00:00:00Z",
+        "body": _attach_round_metadata(
+            "Proceed with the proposal.\n-- Codex",
+            PostedRoundMetadata(
+                flow="discuss",
+                role="debater",
+                agent="Codex",
+                round_number=6,
+                subject="prior-discuss-subject",
+                raw_structured_coder_response=response,
+                result_mode="answer",
+            ),
+        ),
+    }
+
+
+def test_plan_first_skips_split_recovery_for_answer_mode_discuss_summary(tmp_path):
+    """An answer-mode summary has no triage outcome to recover.
+
+    Plan-first must proceed to implementation instead of assuming every
+    persisted discuss response has `ParsedDiscussReview.outcome` (#335).
+    """
+    runner = FakeRunner(
+        pr_payload={"body": "Fixes #56"},
+        claude_outputs=[
+            structured_plan_state(state="blocking", summary="Implement the approved design."),
+            "Implemented approved plan.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            structured_plan_review(state="approved"),
+            structured_pr_review(state="approved", summary="LGTM."),
+        ],
+        issue_comments=[_answer_mode_debater_comment(), _answer_mode_final_summary_comment()],
+    )
+    config = make_config(tmp_path)
+
+    assert (
+        run_issue_loop(
+            runner, issue_number=56, config=config, plan_first=True, implement_after_approval=True
+        )
+        == 0
+    )
+    assert not runner.issues
+    assert any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+
+
 def test_plan_first_recovers_legacy_split_proposals_with_valid_checkout_inspected_claim(tmp_path):
     """`_prior_discuss_split_proposals`'s legacy fallback
     (`_recover_final_discuss_split_proposals`) must checkout-validate a
