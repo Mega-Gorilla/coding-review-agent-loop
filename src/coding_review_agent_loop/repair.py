@@ -1272,13 +1272,21 @@ def _reviewer_human_requirements_instruction(
         rendered_ids = "- (none)"
     state_marker = "AGENT_STATE" if expected_kind == "pr_review" else "AGENT_PLAN_STATE"
     blocking_field = "blocking_items" if expected_kind == "pr_review" else "blocking_plan_issues"
+    disposition_instruction = ""
+    if expected_kind == "plan_review":
+        disposition_instruction = (
+            "The JSON must include one `human_requirement_dispositions` object per listed requirement, "
+            "with exact `Requirement N` ID, disposition `addressed`, `blocked`, or `not-applicable`, "
+            "and non-empty evidence.\n"
+        )
+    target = "current canonical plan" if expected_kind == "plan_review" else "current PR"
     return (
         "## Signed human requirements missing acknowledgement:\n"
         "This approved review is missing <!-- HUMAN_REQUIREMENTS_RESOLVED -->.\n"
         f"Surfaced signed human requirements:\n{rendered_ids}\n"
-        "For each listed requirement, confirm whether the current plan/PR satisfies it.\n"
-        "The JSON must include one `human_requirement_dispositions` object per listed requirement, with exact `Requirement N` ID, disposition `addressed`, `blocked`, or `not-applicable`, and non-empty evidence.\n"
-        "If ALL requirements are satisfied: keep state `approved` and add "
+        f"For each listed requirement, confirm whether the {target} satisfies it.\n"
+        + disposition_instruction
+        + "If ALL requirements are satisfied: keep state `approved` and add "
         f"`<!-- HUMAN_REQUIREMENTS_RESOLVED -->` after the JSON and before the `<!-- {state_marker}: approved -->` footer.\n"
         "If ANY requirement is NOT satisfied: change state to `blocking` and add a concrete "
         f"`{blocking_field}` entry naming the unresolved requirement. "

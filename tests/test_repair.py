@@ -1516,6 +1516,8 @@ def test_reviewer_human_requirements_instruction_pr_review():
     assert "Requirement 2" in result
     assert "AGENT_STATE" in result
     assert "blocking_items" in result
+    assert "human_requirement_dispositions" not in result
+    assert "canonical plan" not in result
 
 def test_reviewer_human_requirements_instruction_plan_review():
     result = _reviewer_human_requirements_instruction("plan_review", ["Requirement 1"])
@@ -1523,6 +1525,8 @@ def test_reviewer_human_requirements_instruction_plan_review():
     assert "Requirement 1" in result
     assert "AGENT_PLAN_STATE" in result
     assert "blocking_plan_issues" in result
+    assert "human_requirement_dispositions" in result
+    assert "canonical plan" in result
 
 def test_reviewer_human_requirements_instruction_empty_ids():
     result = _reviewer_human_requirements_instruction("pr_review", [])

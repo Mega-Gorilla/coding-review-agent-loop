@@ -1258,6 +1258,41 @@ def test_followup_prompt_with_no_human_requirements_guides_empty_addressed_ids(t
     assert "issue acceptance criteria" in prompt
     assert "reviewer item IDs" in prompt
 
+def test_non_plan_prompts_do_not_request_plan_disposition_json(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex",))
+    requirements = (
+        HumanReviewRequirement(
+            source_type="Issue comment",
+            author="maintainer",
+            created_at="2026-05-17T11:00:00Z",
+            url="https://github.com/OWNER/REPO/issues/56#issuecomment-1",
+            body="Preserve backward compatibility.",
+        ),
+    )
+    issue_context = IssueContext(
+        number=56,
+        repo="OWNER/REPO",
+        title="Support issue comments",
+        body="Original request.",
+        url="https://github.com/OWNER/REPO/issues/56",
+        comments=(),
+        human_requirements=requirements,
+    )
+    prompts = [
+        build_followup_prompt(77, 1, "Needs tests.", config, human_requirements=requirements),
+        build_same_pr_followup_prompt(77, 1, "Needs tests.", config, human_requirements=requirements),
+        build_review_prompt(77, 1, config, reviewer="codex", human_requirements=requirements),
+        build_review_prompt(
+            77, 1, config, reviewer="codex", human_requirements=requirements, compact_context=True
+        ),
+        build_issue_prompt(56, config, issue_context=issue_context),
+        build_issue_implementation_prompt(56, "Approved plan.", config, issue_context=issue_context),
+    ]
+
+    for prompt in prompts:
+        assert '"human_requirement_dispositions"' not in prompt
+
+
 def test_plan_review_prompt_surfaces_signed_issue_requirements_as_approval_critical(tmp_path):
     config = make_config(tmp_path, reviewer=("codex", "gemini"))
     issue_context = IssueContext(
