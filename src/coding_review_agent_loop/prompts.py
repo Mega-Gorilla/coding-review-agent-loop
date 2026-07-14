@@ -407,12 +407,6 @@ def render_coder_human_requirements_prompt_context(
             full_omission_fallback=full_omission_fallback,
         )}\n"
     )
-    if not block:
-        return CoderHumanRequirementsPromptContext(
-            block="",
-            surfaced_requirement_ids=(),
-            requires_direct_discussion_ack=False,
-        )
     surfaced_requirement_ids = tuple(
         f"Requirement {match.group(1)}"
         for match in re.finditer(r"(?m)^Requirement (\d+):$", block)
@@ -1132,9 +1126,7 @@ strategy, and ambiguity. Use this mandatory structured JSON response format:
   "prior_plan_item_dispositions": [
     {{"item_id": "item-1", "disposition": "resolved", "note": "Covered by the revised tests."}}
   ],
-  "human_requirement_dispositions": [
-    {{"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "Step 2 names the requested integration artifact."}}
-  ]
+  "human_requirement_dispositions": []
 }}
 <!-- AGENT_PLAN_STATE: approved -->
 -- {reviewer_signature}

@@ -1361,6 +1361,8 @@ def test_empty_signed_requirements_are_separate_from_issue_acceptance_criteria(t
         assert "HUMAN_REQUIREMENTS_RESOLVED" not in prompt or "Do not emit" in prompt or "prohibited" in prompt
 
     assert '"human_requirement_dispositions": []' in prompts[1]
+    assert '"human_requirement_dispositions": []' in prompts[3]
+    assert '"human_requirement_dispositions": []' in prompts[4]
 
 @pytest.mark.parametrize("builder", [build_followup_prompt, build_same_pr_followup_prompt])
 def test_coder_followup_prompts_require_human_requirements_acknowledgement_only_when_present(
