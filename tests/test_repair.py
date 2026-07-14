@@ -1581,6 +1581,16 @@ def test_repair_prompt_plan_revision_preserves_human_requirements_acknowledgemen
     assert "preserve the acknowledgement only when it requires surfaced signed requirements" in _REPAIR_PROMPT
     assert "If the original plan revision includes <!-- HUMAN_REQUIREMENTS_ADDRESSED -->" not in _REPAIR_PROMPT
 
+
+def test_repair_prompt_empty_initial_plan_state_has_no_human_requirements_acknowledgement():
+    example = _REPAIR_PROMPT.split("## Valid Format J — Initial Plan State:", 1)[1].split(
+        "## Valid Format D — Plan Revision:", 1
+    )[0]
+    assert '"human_requirement_dispositions": []' in example
+    assert "<!-- HUMAN_REQUIREMENTS_ADDRESSED -->" not in example
+    assert "### Human requirements" not in example
+
+
 def test_repair_prompt_does_not_suggest_ack_pseudo_item_in_addressed_items():
     """The ack pseudo-item must never be suggested as a value for addressed_items.
 
@@ -1658,6 +1668,17 @@ def test_reviewer_human_requirements_instruction_empty_ids():
     result = _reviewer_human_requirements_instruction("pr_review", [])
     assert "(none)" in result
     assert "HUMAN_REQUIREMENTS_RESOLVED" in result
+
+
+def test_reviewer_human_requirements_empty_context_removes_fabricated_acknowledgements():
+    plan_prompt = _reviewer_human_requirements_instruction("plan_review", ())
+    pr_prompt = _reviewer_human_requirements_instruction("pr_review", ())
+    for prompt in (plan_prompt, pr_prompt):
+        assert "acceptance criteria" in prompt
+        assert "not signed-requirement IDs" in prompt
+        assert "marker" in prompt and "prohibited" in prompt
+    assert "human_requirement_dispositions" in plan_prompt and "[]" in plan_prompt
+    assert "Remove or omit" in pr_prompt
 
 def test_reviewer_human_requirements_instruction_returns_empty_for_none():
     assert _reviewer_human_requirements_instruction("pr_review", None) == ""

@@ -1328,6 +1328,42 @@ def test_plan_review_prompt_surfaces_signed_issue_requirements_as_approval_criti
     assert "Verify each requirement in this set before approving." in prompt
     assert prompt.index("Signed Human Reviewer Requirements") < prompt.index("Issue context from GitHub")
 
+
+def test_empty_signed_requirements_are_separate_from_issue_acceptance_criteria(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex",))
+    issue_context = IssueContext(
+        number=561,
+        repo="OWNER/REPO",
+        title="Separate requirements",
+        body="Acceptance criteria: preserve the response shape.",
+        url="https://github.com/OWNER/REPO/issues/561",
+        comments=(),
+        human_requirements=(),
+    )
+    prompts = (
+        build_issue_prompt(561, config, issue_context=issue_context),
+        build_issue_plan_prompt(561, config, issue_context=issue_context),
+        build_issue_implementation_prompt(561, "Approved plan.", config, issue_context=issue_context),
+        build_plan_review_prompt(561, 1, "Plan.", config, reviewer="codex", issue_context=issue_context),
+        build_plan_review_prompt(
+            561, 1, "Plan.", config, reviewer="codex", issue_context=issue_context, compact_context=True
+        ),
+        build_review_prompt(561, 1, config, reviewer="codex", issue_context=issue_context),
+        build_review_prompt(
+            561, 1, config, reviewer="codex", issue_context=issue_context, compact_context=True
+        ),
+    )
+    for prompt in prompts:
+        assert "Signed human requirements" in prompt
+        assert "No signed human requirements were surfaced" in prompt
+        assert "acceptance criteria" in prompt
+        assert "must not be used as signed-requirement IDs" in prompt
+        assert "HUMAN_REQUIREMENTS_RESOLVED" not in prompt or "Do not emit" in prompt or "prohibited" in prompt
+
+    assert '"human_requirement_dispositions": []' in prompts[1]
+    assert '"human_requirement_dispositions": []' in prompts[3]
+    assert '"human_requirement_dispositions": []' in prompts[4]
+
 @pytest.mark.parametrize("builder", [build_followup_prompt, build_same_pr_followup_prompt])
 def test_coder_followup_prompts_require_human_requirements_acknowledgement_only_when_present(
     tmp_path, builder
