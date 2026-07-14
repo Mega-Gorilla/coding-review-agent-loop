@@ -210,6 +210,7 @@ class StructuredCoderFollowup:
     tests_run: tuple[str, ...] | None = None
     disputed_items: tuple[str, ...] = ()
     dispute_evidence: dict[str, str] = field(default_factory=dict)
+    human_requirement_dispositions: tuple[HumanRequirementDisposition, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -661,6 +662,11 @@ def validate_structured_human_requirements_acknowledgement(
                 "requirements were surfaced. Use `human_requirements.addressed_ids: []`; issue "
                 "acceptance criteria, reviewer item IDs, reviewer comments, and arbitrary labels "
                 "are not signed human requirements."
+            )
+        if checked_discussion_directly:
+            raise AgentLoopError(
+                "Coder response must set `human_requirements.checked_discussion_directly` to false "
+                "when no signed human requirements are surfaced and direct discussion acknowledgement is not required."
             )
         return
 
@@ -1548,6 +1554,7 @@ def validate_structured_coder_followup(text: str) -> StructuredCoderFollowup | N
             "addressed_items",
             "remaining_items",
             "human_requirements",
+            "human_requirement_dispositions",
         },
         optional={
             "addressed_item_notes",
@@ -1560,6 +1567,10 @@ def validate_structured_coder_followup(text: str) -> StructuredCoderFollowup | N
     human_requirements_payload = _expect_object(
         payload["human_requirements"],
         context="coder_followup.human_requirements",
+    )
+    human_requirement_dispositions = _expect_human_requirement_dispositions(
+        payload["human_requirement_dispositions"],
+        context="coder_followup.human_requirement_dispositions",
     )
     _expect_exact_keys(
         human_requirements_payload,
@@ -1636,6 +1647,7 @@ def validate_structured_coder_followup(text: str) -> StructuredCoderFollowup | N
                 context="coder_followup.human_requirements.checked_discussion_directly",
             ),
         ),
+        human_requirement_dispositions=human_requirement_dispositions,
         addressed_item_notes=addressed_item_notes,
         remaining_item_notes=remaining_item_notes,
         tests_run=tests_run,

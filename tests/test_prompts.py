@@ -1289,7 +1289,9 @@ def test_non_plan_prompts_do_not_request_plan_disposition_json(tmp_path):
         build_issue_implementation_prompt(56, "Approved plan.", config, issue_context=issue_context),
     ]
 
-    for prompt in prompts:
+    assert '"human_requirement_dispositions"' in prompts[0]
+    assert '"human_requirement_dispositions"' in prompts[1]
+    for prompt in prompts[2:]:
         assert '"human_requirement_dispositions"' not in prompt
 
 

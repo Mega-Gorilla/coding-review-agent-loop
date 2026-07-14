@@ -80,6 +80,7 @@ def test_validate_coder_followup_response_accepts_structured_item_partition():
                 "summary": "Addressed the test, helper rename still pending.",
                 "addressed_items": ["item-1"],
                 "remaining_items": ["item-2"],
+                "human_requirement_dispositions": [],
                 "human_requirements": {
                     "addressed_ids": [],
                     "checked_discussion_directly": False,
@@ -128,6 +129,7 @@ def test_validate_coder_followup_response_rejects_requirement_label_when_none_su
         addressed_items=["item-1"],
         remaining_items=[],
         human_requirement_ids=["Requirement 1"],
+        human_requirement_dispositions=[],
         reviewer="OpenAI Codex",
     )
 
@@ -249,6 +251,7 @@ def test_validate_coder_followup_response_rejects_invalid_structured_item_partit
                 "summary": "Status update.",
                 "addressed_items": addressed_items,
                 "remaining_items": remaining_items,
+                "human_requirement_dispositions": [],
                 "human_requirements": {
                     "addressed_ids": [],
                     "checked_discussion_directly": False,
@@ -554,6 +557,7 @@ def test_validate_coder_followup_response_accepts_disputed_items():
                 "summary": "Disputed item-1 with evidence; fixed item-2.",
                 "addressed_items": ["item-2"],
                 "remaining_items": [],
+                "human_requirement_dispositions": [],
                 "disputed_items": ["item-1"],
                 "dispute_evidence": {
                     "item-1": "Checked Google pricing page: $1.50/1M tokens is correct per official docs."
@@ -605,6 +609,7 @@ def test_validate_coder_followup_response_rejects_missing_item_when_disputed_not
                 "summary": "Only addressed one item.",
                 "addressed_items": ["item-1"],
                 "remaining_items": [],
+                "human_requirement_dispositions": [],
                 "disputed_items": [],
                 "human_requirements": {
                     "addressed_ids": [],

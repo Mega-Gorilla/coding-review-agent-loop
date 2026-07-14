@@ -1067,7 +1067,9 @@ def _build_repair_prompt(
         expected_kind, unresolved_item_ids
     )
     coder_followup_human_requirements_instruction = (
-        _coder_followup_human_requirements_instruction(expected_kind, surfaced_requirement_ids)
+        _coder_followup_human_requirements_instruction(
+            expected_kind, surfaced_requirement_ids, requires_direct_discussion_ack
+        )
         if expected_kind == "coder_followup"
         else ""
     )
@@ -1288,21 +1290,32 @@ def _coder_followup_required_items_instruction(
 def _coder_followup_human_requirements_instruction(
     expected_kind: str | None,
     surfaced_requirement_ids: Sequence[str] | None,
+    requires_direct_discussion_ack: bool,
 ) -> str:
-    if surfaced_requirement_ids is None:
+    if surfaced_requirement_ids is None and not requires_direct_discussion_ack:
         return ""
     if expected_kind != "coder_followup":
         raise ValueError("surfaced_requirement_ids may only be used for coder_followup repair")
-    rendered_ids = "\n".join(f"- `{item_id}`" for item_id in surfaced_requirement_ids)
-    if not surfaced_requirement_ids:
+    ids = tuple(surfaced_requirement_ids or ())
+    rendered_ids = "\n".join(f"- `{item_id}`" for item_id in ids)
+    if not ids:
         rendered_ids = "- (none)"
+    if not ids and requires_direct_discussion_ack:
+        return (
+            "## Bounded direct-discussion human-requirements context for coder follow-up:\n"
+            "The detailed signed requirements were omitted. Repair with `human_requirement_dispositions: []`, "
+            "`human_requirements.addressed_ids: []`, and `human_requirements.checked_discussion_directly: true` "
+            "after checking the discussion directly. Do not invent requirement labels.\n"
+        )
     return (
         "## Surfaced signed human requirement labels for coder follow-up:\n"
         f"{rendered_ids}\n"
+        "Include exactly one `human_requirement_dispositions` object per listed ID, with the exact ID, disposition "
+        "`addressed`, `blocked`, or `not-applicable`, and non-blank evidence.\n"
         "Only the exact labels above may appear in `human_requirements.addressed_ids`.\n"
         "When the list is `(none)`, set `human_requirements.addressed_ids` to `[]`. "
         "Do not use issue numbers, issue acceptance criteria, reviewer item IDs, reviewer comments, "
-        "summaries, or arbitrary labels as human requirement IDs.\n"
+        "summaries, or arbitrary labels as human requirement IDs. When the list is `(none)` without direct-discussion acknowledgement, both ledgers must be empty.\n"
     )
 
 

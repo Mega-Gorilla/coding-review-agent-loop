@@ -554,6 +554,7 @@ def test_pr_loop_accepts_structured_coder_followup_in_pr_round(tmp_path):
                     "summary": "Added the requested regression test.",
                     "addressed_items": ["item-1"],
                     "remaining_items": [],
+                    "human_requirement_dispositions": [],
                     "addressed_item_notes": {
                         "item-1": "Added the structured coder follow-up regression case."
                     },
@@ -603,6 +604,7 @@ def test_pr_loop_rejects_malformed_structured_coder_followup_before_re_review(tm
                     "summary": "Tried to handle the feedback.",
                     "addressed_items": ["item-9"],
                     "remaining_items": [],
+                    "human_requirement_dispositions": [],
                     "human_requirements": {
                         "addressed_ids": [],
                         "checked_discussion_directly": False,
@@ -2613,6 +2615,7 @@ def test_resume_pr_round_prefers_structured_coder_followup_metadata():
                 "summary": "Added the requested regression test.",
                 "addressed_items": ["item-1"],
                 "remaining_items": [],
+                "human_requirement_dispositions": [],
                 "human_requirements": {
                     "addressed_ids": ["Requirement 1"],
                     "checked_discussion_directly": False,
@@ -3303,9 +3306,16 @@ def test_reconcile_human_requirements_ack_item_accepts_stored_structured_coder_f
                 "schema_version": 1,
                 "kind": "coder_followup",
                 "state": "blocking",
-                "summary": "Implemented the requested URL fix.",
-                "addressed_items": ["item-1"],
-                "remaining_items": [],
+                    "summary": "Implemented the requested URL fix.",
+                    "addressed_items": ["item-1"],
+                    "remaining_items": [],
+                    "human_requirement_dispositions": [
+                        {
+                            "requirement_id": "Requirement 1",
+                            "disposition": "addressed",
+                            "evidence": "The URL fix is implemented.",
+                        }
+                    ],
                 "human_requirements": {
                     "addressed_ids": ["Requirement 1"],
                     "checked_discussion_directly": False,

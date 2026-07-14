@@ -684,6 +684,7 @@ def test_structured_coder_followup_transient_terms_before_footer_runs_repair(tmp
                 "summary": "Updated timeout and capacity handling without treating prose as transient.",
                 "addressed_items": ["item-1"],
                 "remaining_items": [],
+                "human_requirement_dispositions": [],
                 "human_requirements": {
                     "addressed_ids": [],
                     "checked_discussion_directly": False,
