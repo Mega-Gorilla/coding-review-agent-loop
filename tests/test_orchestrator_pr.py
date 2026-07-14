@@ -3306,16 +3306,16 @@ def test_reconcile_human_requirements_ack_item_accepts_stored_structured_coder_f
                 "schema_version": 1,
                 "kind": "coder_followup",
                 "state": "blocking",
-                    "summary": "Implemented the requested URL fix.",
-                    "addressed_items": ["item-1"],
-                    "remaining_items": [],
-                    "human_requirement_dispositions": [
-                        {
-                            "requirement_id": "Requirement 1",
-                            "disposition": "addressed",
-                            "evidence": "The URL fix is implemented.",
-                        }
-                    ],
+                "summary": "Implemented the requested URL fix.",
+                "addressed_items": ["item-1"],
+                "remaining_items": [],
+                "human_requirement_dispositions": [
+                    {
+                        "requirement_id": "Requirement 1",
+                        "disposition": "addressed",
+                        "evidence": "The URL fix is implemented.",
+                    }
+                ],
                 "human_requirements": {
                     "addressed_ids": ["Requirement 1"],
                     "checked_discussion_directly": False,

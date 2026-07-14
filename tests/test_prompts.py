@@ -1258,7 +1258,7 @@ def test_followup_prompt_with_no_human_requirements_guides_empty_addressed_ids(t
     assert "issue acceptance criteria" in prompt
     assert "reviewer item IDs" in prompt
 
-def test_non_plan_prompts_do_not_request_plan_disposition_json(tmp_path):
+def test_non_plan_prompts_request_human_requirement_dispositions_not_plan_dispositions(tmp_path):
     config = make_config(tmp_path, reviewer=("codex",))
     requirements = (
         HumanReviewRequirement(

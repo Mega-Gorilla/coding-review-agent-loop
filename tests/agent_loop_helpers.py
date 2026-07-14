@@ -1030,12 +1030,12 @@ def structured_coder_followup(
             human_requirement_dispositions
             if human_requirement_dispositions is not None
             else [
-            {
-                "requirement_id": requirement_id,
-                "disposition": "addressed",
-                "evidence": "The follow-up addresses the surfaced requirement.",
-            }
-            for requirement_id in (human_requirement_ids or [])
+                {
+                    "requirement_id": requirement_id,
+                    "disposition": "addressed",
+                    "evidence": "The follow-up addresses the surfaced requirement.",
+                }
+                for requirement_id in (human_requirement_ids or [])
             ]
         ),
     }

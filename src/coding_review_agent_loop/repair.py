@@ -1315,7 +1315,8 @@ def _coder_followup_human_requirements_instruction(
         "Only the exact labels above may appear in `human_requirements.addressed_ids`.\n"
         "When the list is `(none)`, set `human_requirements.addressed_ids` to `[]`. "
         "Do not use issue numbers, issue acceptance criteria, reviewer item IDs, reviewer comments, "
-        "summaries, or arbitrary labels as human requirement IDs. When the list is `(none)` without direct-discussion acknowledgement, both ledgers must be empty.\n"
+        "summaries, or arbitrary labels as human requirement IDs.\n"
+        + ("When the list is `(none)` without direct-discussion acknowledgement, both ledgers must be empty.\n" if not ids else "")
     )
 
 
