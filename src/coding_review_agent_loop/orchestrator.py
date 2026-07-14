@@ -1678,7 +1678,16 @@ def _run_structured_repair(
 ) -> tuple[str | None, object | None, list[RepairAttemptResult]]:
     """Run configured repair, retaining compatibility with patched legacy test hooks."""
     if attempt_repair is not _ORIGINAL_ATTEMPT_REPAIR:
-        repaired = attempt_repair(raw, config.gemini_cmd, **repair_kwargs)
+        try:
+            repaired = attempt_repair(raw, config.gemini_cmd, **repair_kwargs)
+        except TypeError as exc:
+            # Keep older test/integration hooks callable while the reviewer-ID
+            # context is rolled out. The real repair API accepts this keyword.
+            if "reviewer_requirement_ids" not in str(exc):
+                raise
+            legacy_kwargs = dict(repair_kwargs)
+            legacy_kwargs.pop("reviewer_requirement_ids", None)
+            repaired = attempt_repair(raw, config.gemini_cmd, **legacy_kwargs)
         if repaired is None:
             return None, None, []
         try:
@@ -1736,6 +1745,7 @@ def _run_validated_agent(
     repair_expected_kind: str | None = None,
     repair_unresolved_item_ids: Sequence[str] | None = None,
     repair_surfaced_requirement_ids: Sequence[str] | None = None,
+    repair_reviewer_requirement_ids: Sequence[str] | None = None,
     repair_requires_direct_discussion_ack: bool = False,
     repair_allowed_prior_item_ids: Sequence[str] | None = None,
     ledger_incomplete: bool = False,
@@ -2143,6 +2153,13 @@ def _run_validated_agent(
                         and repair_surfaced_requirement_ids is not None
                     ):
                         repair_kwargs["surfaced_requirement_ids"] = tuple(repair_surfaced_requirement_ids)
+                    elif (
+                        repair_expected_kind in {"plan_review", "pr_review"}
+                        and repair_reviewer_requirement_ids is not None
+                    ):
+                        repair_kwargs["reviewer_requirement_ids"] = tuple(
+                            repair_reviewer_requirement_ids
+                        )
                     if isinstance(exc, UnknownPriorItemDispositionError):
                         repair_kwargs["allowed_prior_item_ids"] = exc.allowed_ids
                         repair_kwargs["unknown_prior_item_ids"] = exc.unknown_ids
@@ -3244,6 +3261,10 @@ def _run_plan_first_loop(
                     usage_context=usage_context,
                     use_repair=True,
                     repair_expected_kind="plan_review",
+                    repair_reviewer_requirement_ids=_surfaced_reviewer_requirement_ids(
+                        issue_context.human_requirements,
+                        requirement_scope="planning requirements",
+                    ),
                     repair_allowed_prior_item_ids=tuple(item.item_id for item in prior_unresolved_items),
                     ledger_incomplete=round_ledger_incomplete,
                     role="reviewer",
@@ -4401,6 +4422,10 @@ def run_pr_loop(
                         usage_context=usage_context,
                         use_repair=True,
                         repair_expected_kind="pr_review",
+                        repair_reviewer_requirement_ids=_surfaced_reviewer_requirement_ids(
+                            human_requirements,
+                            requirement_scope="PR requirements",
+                        ),
                         repair_allowed_prior_item_ids=tuple(item.item_id for item in prior_unresolved_items),
                         ledger_incomplete=round_ledger_incomplete,
                         role="reviewer",

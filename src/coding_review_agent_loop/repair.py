@@ -241,9 +241,7 @@ You are a format-repair assistant. An AI agent produced an initial plan state, c
   "prior_plan_item_dispositions": [
     {"item_id": "item-1", "disposition": "resolved"}
   ],
-  "human_requirement_dispositions": [
-    {"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "Covered by the current plan."}
-  ]
+  "human_requirement_dispositions": []
 }
 <!-- AGENT_PLAN_STATE: approved -->
 -- <Reviewer Name>
@@ -407,15 +405,13 @@ Notes:
   "state": "blocking",
   "summary": "<short implementation summary>",
   "plan_steps": ["Update the parser.", "Add regression tests."],
-  "human_requirement_dispositions": [
-    {"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "Covered by the current plan."}
-  ]
+  "human_requirement_dispositions": []
 }
 <!-- HUMAN_REQUIREMENTS_ADDRESSED -->
 
 ### Human requirements
 
-- Requirement 1: <how the plan addresses this signed human requirement, if present in the original>
+- <one bullet per authoritative surfaced signed human requirement, only when present>
 <!-- AGENT_PLAN_STATE: blocking -->
 -- <Coder Name>
 
@@ -1373,6 +1369,21 @@ def _reviewer_human_requirements_instruction(
             "The JSON must include one `human_requirement_dispositions` object per listed requirement, "
             "with exact `Requirement N` ID, disposition `addressed`, `blocked`, or `not-applicable`, "
             "and non-empty evidence.\n"
+        )
+    if not reviewer_requirement_ids:
+        empty_field = (
+            "Set `human_requirement_dispositions` to `[]` and remove any fabricated "
+            "human-requirement dispositions from the malformed response.\n"
+            if expected_kind == "plan_review"
+            else "Remove or omit any fabricated `human_requirement_dispositions` field.\n"
+        )
+        return (
+            "## Authoritative signed human requirements context:\n"
+            "No signed human requirements were surfaced (none). Issue acceptance criteria, issue prose, "
+            "reviewer items, and comments are not signed-requirement IDs and cannot establish one.\n"
+            + empty_field
+            + "Remove any `<!-- HUMAN_REQUIREMENTS_RESOLVED -->` marker; it is prohibited when the surfaced set is empty.\n"
+            + f"Keep the `{state_marker}` footer and otherwise repair only the {expected_kind} schema.\n"
         )
     target = "current canonical plan" if expected_kind == "plan_review" else "current PR"
     return (

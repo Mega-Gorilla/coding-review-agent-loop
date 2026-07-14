@@ -1659,6 +1659,17 @@ def test_reviewer_human_requirements_instruction_empty_ids():
     assert "(none)" in result
     assert "HUMAN_REQUIREMENTS_RESOLVED" in result
 
+
+def test_reviewer_human_requirements_empty_context_removes_fabricated_acknowledgements():
+    plan_prompt = _reviewer_human_requirements_instruction("plan_review", ())
+    pr_prompt = _reviewer_human_requirements_instruction("pr_review", ())
+    for prompt in (plan_prompt, pr_prompt):
+        assert "acceptance criteria" in prompt
+        assert "not signed-requirement IDs" in prompt
+        assert "marker" in prompt and "prohibited" in prompt
+    assert "human_requirement_dispositions" in plan_prompt and "[]" in plan_prompt
+    assert "Remove or omit" in pr_prompt
+
 def test_reviewer_human_requirements_instruction_returns_empty_for_none():
     assert _reviewer_human_requirements_instruction("pr_review", None) == ""
     assert _reviewer_human_requirements_instruction("plan_review", None) == ""
