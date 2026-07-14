@@ -592,9 +592,12 @@ run again.
 Structured JSON is also the preferred coder format for follow-up and plan
 revision rounds. Coder follow-up responses use `kind: "coder_followup"` with
 `state`, `summary`, `addressed_items`, `remaining_items`,
-`human_requirements`, optional `addressed_item_notes` / `remaining_item_notes`,
-and optional `tests_run`; every carried reviewer item ID must appear exactly
+`human_requirement_dispositions`, and `human_requirements`, plus optional
+`addressed_item_notes` / `remaining_item_notes`, and `tests_run`; every carried reviewer item ID must appear exactly
 once in either `addressed_items` or `remaining_items`.
+The disposition ledger must contain one entry per surfaced signed requirement,
+marked `addressed`, `blocked`, or `not-applicable` with non-blank evidence;
+use an empty ledger when no signed requirements were surfaced.
 Plan-revision responses use `kind: "plan_revision"` with `state: "blocking"`,
 `summary`, `prior_plan_item_dispositions`, and `plan_steps`. Structured
 responses must start with one top-level JSON object, place the matching

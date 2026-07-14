@@ -1241,6 +1241,7 @@ class TestStructuredSkillRecovery:
             "summary": "Fixed.",
             "addressed_items": ["item-1"],
             "remaining_items": [],
+            "human_requirement_dispositions": [],
             "addressed_item_notes": {"item-1": "Implemented."},
             "remaining_item_notes": {},
             "human_requirements": {
@@ -2821,12 +2822,19 @@ def _structured_pr_fix_output() -> str:
             "summary": "Fixed the blocking item.",
             "addressed_items": ["item-1"],
             "remaining_items": [],
+            "human_requirement_dispositions": [
+                {
+                    "requirement_id": "Requirement 1",
+                    "disposition": "addressed",
+                    "evidence": "The requested fix is implemented.",
+                }
+            ],
             "addressed_item_notes": {"item-1": "Implemented the requested fix."},
             "remaining_item_notes": {},
             "tests_run": ["python3 -m pytest tests/test_skill_helpers.py -k run_pr_fix"],
             "human_requirements": {
                 "addressed_ids": ["Requirement 1"],
-                "checked_discussion_directly": True,
+                "checked_discussion_directly": False,
             },
         }
     ) + "\n<!-- AGENT_STATE: blocking -->\n-- Codex\n"
@@ -3015,6 +3023,9 @@ class TestRunPrFix:
                 recovered_output = _structured_pr_fix_output().replace(
                     '"addressed_ids": ["Requirement 1"]',
                     '"addressed_ids": []',
+                ).replace(
+                    '"human_requirement_dispositions": [{"requirement_id": "Requirement 1", "disposition": "addressed", "evidence": "The requested fix is implemented."}]',
+                    '"human_requirement_dispositions": []',
                 )
                 out.write_text(recovered_output + "trailing prose", encoding="utf-8")
             elif args[:2] == ("helpers.state_manager", "attach-metadata"):
@@ -4037,6 +4048,7 @@ def test_render_response_coder_followup_stamps_model_signature():
             "summary": "Addressed feedback.",
             "addressed_items": [],
             "remaining_items": [],
+            "human_requirement_dispositions": [],
             "human_requirements": {"addressed_ids": [], "checked_discussion_directly": False},
         }
     ) + "\n<!-- AGENT_STATE: approved -->\n-- Google Antigravity\n"

@@ -1006,6 +1006,7 @@ def structured_coder_followup(
     addressed_item_notes: dict[str, str] | None = None,
     remaining_item_notes: dict[str, str] | None = None,
     human_requirement_ids: list[str] | None = None,
+    human_requirement_dispositions: list[dict[str, str]] | None = None,
     checked_discussion_directly: bool = False,
     tests_run: list[str] | None = None,
     disputed_items: list[str] | None = None,
@@ -1025,6 +1026,18 @@ def structured_coder_followup(
             "addressed_ids": human_requirement_ids or [],
             "checked_discussion_directly": checked_discussion_directly,
         },
+        "human_requirement_dispositions": (
+            human_requirement_dispositions
+            if human_requirement_dispositions is not None
+            else [
+                {
+                    "requirement_id": requirement_id,
+                    "disposition": "addressed",
+                    "evidence": "The follow-up addresses the surfaced requirement.",
+                }
+                for requirement_id in (human_requirement_ids or [])
+            ]
+        ),
     }
     if tests_run is not None:
         payload["tests_run"] = tests_run

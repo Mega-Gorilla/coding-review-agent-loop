@@ -543,6 +543,18 @@ def _render_public_coder_followup_comment(
         sections.append(
             "\n".join(["### Tests run", *[f"- {test}" for test in parsed_followup.tests_run]])
         )
+    if parsed_followup.human_requirement_dispositions:
+        sections.append(
+            "\n".join(
+                [
+                    "### Human requirements",
+                    *[
+                        f"- {disposition.requirement_id}: {disposition.disposition} — {disposition.evidence}"
+                        for disposition in parsed_followup.human_requirement_dispositions
+                    ],
+                ]
+            )
+        )
     sections.append(f"<!-- AGENT_STATE: {parsed_followup.state} -->")
     sections.append(f"-- {_comment_signature(agent, config, model_used)}")
     return "\n\n".join(section for section in sections if section)

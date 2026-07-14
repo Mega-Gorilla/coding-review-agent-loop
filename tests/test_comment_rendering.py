@@ -240,6 +240,7 @@ def test_render_public_coder_followup_comment():
                 "summary": "Added the requested regression test.",
                 "addressed_items": ["item-1", "item-2"],
                 "remaining_items": [],
+                "human_requirement_dispositions": [],
                 "addressed_item_notes": {
                     "item-1": "Added coverage for the parser.",
                     "item-2": "Updated the helper.",
@@ -306,6 +307,7 @@ def test_render_public_coder_followup_comment():
                 "summary": "Still working through the review.",
                 "addressed_items": [],
                 "remaining_items": ["item-3"],
+                "human_requirement_dispositions": [],
                 "human_requirements": {
                     "addressed_ids": [],
                     "checked_discussion_directly": False,
@@ -339,6 +341,7 @@ def test_render_public_coder_followup_comment_expands_carried_items_with_notes_a
                 "summary": "Fixed the blocker and deferred the follow-up.",
                 "addressed_items": ["item-1"],
                 "remaining_items": ["item-2"],
+                "human_requirement_dispositions": [],
                 "addressed_item_notes": {"item-1": "Restored the missing validation branch."},
                 "human_requirements": {
                     "addressed_ids": [],
@@ -394,6 +397,7 @@ def test_render_public_coder_followup_comment_expands_pr_220_remaining_items():
                 "summary": "Hardened markdown stripping; two follow-ups remain.",
                 "addressed_items": ["item-3", "item-4"],
                 "remaining_items": ["item-5", "item-6"],
+                "human_requirement_dispositions": [],
                 "remaining_item_notes": {
                     "item-5": "Deferred because URL canonicalization needs product confirmation.",
                     "item-6": "Deferred because the helper move should be isolated from this fix.",

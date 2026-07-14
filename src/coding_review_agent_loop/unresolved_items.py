@@ -239,6 +239,11 @@ def _reconcile_human_requirements_ack_item(
     try:
         structured_followup = validate_structured_coder_followup(coder_output)
         if structured_followup is not None:
+            validate_human_requirement_dispositions(
+                structured_followup.human_requirement_dispositions,
+                surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
+                context="coder_followup.human_requirement_dispositions",
+            )
             validate_structured_human_requirements_acknowledgement(
                 structured_followup.human_requirements.addressed_ids,
                 checked_discussion_directly=structured_followup.human_requirements.checked_discussion_directly,
@@ -311,6 +316,11 @@ def _validate_coder_followup_response(
         _validate_structured_coder_followup_items(
             structured_followup,
             unresolved_items=unresolved_items,
+        )
+        validate_human_requirement_dispositions(
+            structured_followup.human_requirement_dispositions,
+            surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
+            context="coder_followup.human_requirement_dispositions",
         )
         validate_structured_human_requirements_acknowledgement(
             structured_followup.human_requirements.addressed_ids,

@@ -2150,9 +2150,13 @@ def _run_validated_agent(
                         )
                     elif (
                         repair_expected_kind == "coder_followup"
-                        and repair_surfaced_requirement_ids is not None
+                        and (
+                            repair_surfaced_requirement_ids is not None
+                            or repair_requires_direct_discussion_ack
+                        )
                     ):
-                        repair_kwargs["surfaced_requirement_ids"] = tuple(repair_surfaced_requirement_ids)
+                        repair_kwargs["surfaced_requirement_ids"] = tuple(repair_surfaced_requirement_ids or ())
+                        repair_kwargs["requires_direct_discussion_ack"] = repair_requires_direct_discussion_ack
                     elif (
                         repair_expected_kind in {"plan_review", "pr_review"}
                         and repair_reviewer_requirement_ids is not None
@@ -4946,6 +4950,7 @@ def run_pr_loop(
                 repair_expected_kind="coder_followup",
                 repair_unresolved_item_ids=repair_unresolved_item_ids,
                 repair_surfaced_requirement_ids=coder_human_requirements_context.surfaced_requirement_ids,
+                repair_requires_direct_discussion_ack=coder_human_requirements_context.requires_direct_discussion_ack,
                 salvage_context=SalvageContext(
                     repo=config.repo,
                     issue_number=None if issue_context is None else issue_context.number,

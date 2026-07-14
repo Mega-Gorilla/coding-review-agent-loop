@@ -1110,6 +1110,7 @@ response must classify every carried reviewer item exactly once:
   "remaining_items": [],
   "addressed_item_notes": {"item-1": "Updated the parser and added regression coverage."},
   "remaining_item_notes": {},
+  "human_requirement_dispositions": [],
   "human_requirements": {
     "addressed_ids": [],
     "checked_discussion_directly": false
@@ -1117,6 +1118,11 @@ response must classify every carried reviewer item exactly once:
   "tests_run": ["python -m pytest tests/test_agent_loop.py -k followup"]
 }
 ```
+
+`human_requirement_dispositions` is an auditable ledger: include exactly one
+entry for each surfaced signed requirement, with disposition `addressed`,
+`blocked`, or `not-applicable` and non-blank evidence. It must be empty when
+no signed requirements were surfaced.
 
 A plan revision uses:
 

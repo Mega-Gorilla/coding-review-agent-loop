@@ -2098,6 +2098,7 @@ def test_validate_structured_coder_followup_accepts_v1_payload():
                 "summary": "Addressed the first item; one remains.",
                 "addressed_items": ["item-1"],
                 "remaining_items": ["item-2"],
+                "human_requirement_dispositions": [],
                 "human_requirements": {
                     "addressed_ids": ["Requirement 1"],
                     "checked_discussion_directly": False,
@@ -2130,6 +2131,7 @@ def test_validate_structured_coder_followup_accepts_optional_item_notes():
                 "remaining_items": ["item-2"],
                 "addressed_item_notes": {"item-1": "Added parsing coverage."},
                 "remaining_item_notes": {"item-2": "Deferred until the docs owner weighs in."},
+                "human_requirement_dispositions": [],
                 "human_requirements": {
                     "addressed_ids": [],
                     "checked_discussion_directly": False,
@@ -2158,6 +2160,7 @@ def test_validate_structured_coder_followup_rejects_note_for_unlisted_item():
                 "summary": "Addressed one item.",
                 "addressed_items": ["item-1"],
                 "remaining_items": [],
+                "human_requirement_dispositions": [],
                 "addressed_item_notes": {"item-2": "This note is stale."},
                 "human_requirements": {
                     "addressed_ids": [],
@@ -2183,6 +2186,7 @@ def test_validate_structured_coder_followup_rejects_invalid_note_values(bad_note
                 "summary": "Addressed one item.",
                 "addressed_items": ["item-1"],
                 "remaining_items": [],
+                "human_requirement_dispositions": [],
                 "addressed_item_notes": {"item-1": bad_note},
                 "human_requirements": {
                     "addressed_ids": [],
@@ -2216,6 +2220,7 @@ def test_validate_structured_coder_followup_rejects_unknown_keys_in_structured_c
                 "summary": "Done.",
                 "addressed_items": [],
                 "remaining_items": [],
+                "human_requirement_dispositions": [],
                 "human_requirements": {
                     "addressed_ids": [],
                     "checked_discussion_directly": True,
@@ -2240,6 +2245,7 @@ def test_validate_structured_coder_followup_rejects_footer_state_mismatch():
                 "summary": "Done.",
                 "addressed_items": [],
                 "remaining_items": [],
+                "human_requirement_dispositions": [],
                 "human_requirements": {
                     "addressed_ids": [],
                     "checked_discussion_directly": True,
@@ -2263,6 +2269,7 @@ def test_validate_structured_coder_followup_rejects_trailing_prose_after_footer(
                 "summary": "Done.",
                 "addressed_items": [],
                 "remaining_items": [],
+                "human_requirement_dispositions": [],
                 "human_requirements": {
                     "addressed_ids": [],
                     "checked_discussion_directly": True,
@@ -2286,6 +2293,7 @@ def test_validate_structured_coder_followup_accepts_disputed_items_with_evidence
                 "summary": "Fixed item-1; disputing item-2 with evidence.",
                 "addressed_items": ["item-1"],
                 "remaining_items": [],
+                "human_requirement_dispositions": [],
                 "disputed_items": ["item-2"],
                 "dispute_evidence": {"item-2": "Checked the official docs: $1.50/1M is correct."},
                 "human_requirements": {
@@ -2316,6 +2324,7 @@ def test_validate_structured_coder_followup_accepts_empty_disputed_items():
                 "summary": "No disputes.",
                 "addressed_items": ["item-1"],
                 "remaining_items": [],
+                "human_requirement_dispositions": [],
                 "disputed_items": [],
                 "human_requirements": {
                     "addressed_ids": [],
@@ -2345,6 +2354,7 @@ def test_validate_structured_coder_followup_rejects_disputed_item_also_in_addres
                 "remaining_items": [],
                 "disputed_items": ["item-1"],
                 "dispute_evidence": {"item-1": "Evidence provided but item also in addressed."},
+                "human_requirement_dispositions": [],
                 "human_requirements": {
                     "addressed_ids": [],
                     "checked_discussion_directly": False,
@@ -2370,6 +2380,7 @@ def test_validate_structured_coder_followup_rejects_evidence_for_non_disputed_it
                 "remaining_items": [],
                 "disputed_items": [],
                 "dispute_evidence": {"item-1": "Evidence for an addressed item, not disputed."},
+                "human_requirement_dispositions": [],
                 "human_requirements": {
                     "addressed_ids": [],
                     "checked_discussion_directly": False,
@@ -2395,6 +2406,7 @@ def test_validate_structured_coder_followup_rejects_disputed_item_without_eviden
                 "remaining_items": [],
                 "disputed_items": ["item-1"],
                 "dispute_evidence": {},
+                "human_requirement_dispositions": [],
                 "human_requirements": {
                     "addressed_ids": [],
                     "checked_discussion_directly": False,

@@ -529,6 +529,7 @@ def _structured_coder_followup_guidance(
         '  "addressed_item_notes": {"item-1": "Updated the parser and added regression coverage."},',
         '  "remaining_item_notes": {"item-2": "Deferred because it requires a separate UI change."},',
         '  "dispute_evidence": {"item-3": "Checked Google pricing page (https://...): $1.50/1M tokens is correct per the official docs."},',
+        '  "human_requirement_dispositions": [],',
         '  "human_requirements": {',
         f'    "addressed_ids": {example_human_requirement_ids_json},',
         '    "checked_discussion_directly": false',
@@ -536,7 +537,7 @@ def _structured_coder_followup_guidance(
         '  "tests_run": ["python -m pytest tests/test_agent_loop.py -k followup"]',
         "}",
         "",
-        "Required structured fields: `schema_version`, `kind`, `state`, `summary`, `addressed_items`, `remaining_items`, and `human_requirements`. `addressed_item_notes`, `remaining_item_notes`, `disputed_items`, `dispute_evidence`, and `tests_run` are optional.",
+        "Required structured fields: `schema_version`, `kind`, `state`, `summary`, `addressed_items`, `remaining_items`, `human_requirements`, and `human_requirement_dispositions`. `addressed_item_notes`, `remaining_item_notes`, `disputed_items`, `dispute_evidence`, and `tests_run` are optional.",
         "Your response and public response file must start directly with `{`, contain exactly one top-level JSON object, and must not include stdout filtering markers, prose, headings, or code fences before or between the JSON and footer.",
         "After the JSON object, add exactly one footer `<!-- AGENT_STATE: approved|blocking -->`, then only your standalone signature. The JSON `state` must match the `AGENT_STATE` footer exactly.",
         "Use `addressed_items`, `remaining_items`, and `disputed_items` to classify every unresolved reviewer item ID shown in this prompt. Do not omit any listed reviewer item ID and do not list any item ID more than once.",
@@ -549,13 +550,16 @@ def _structured_coder_followup_guidance(
             "In structured replies, set `human_requirements.addressed_ids` to exactly the surfaced signed human requirement IDs you addressed in this prompt: "
             f"{surfaced}. Only exact surfaced labels such as `Requirement 1` are valid."
         )
+        lines.append(
+            "Set `human_requirement_dispositions` to exactly one object per surfaced label, using the exact `requirement_id`, disposition `addressed`, `blocked`, or `not-applicable`, and non-blank evidence. This ledger is separate from reviewer item classifications and the legacy `human_requirements` acknowledgement."
+        )
     elif human_requirements_context.requires_direct_discussion_ack:
         lines.append(
-            "If the prompt omitted detailed signed human requirements, set `human_requirements.addressed_ids` to `[]` and `human_requirements.checked_discussion_directly` to `true` only after checking the GitHub discussion directly. Do not put issue numbers, issue acceptance criteria, reviewer item IDs, reviewer comments, summaries, or arbitrary labels in `addressed_ids`."
+            "If the prompt omitted detailed signed human requirements, set `human_requirement_dispositions` to `[]`, set `human_requirements.addressed_ids` to `[]`, and set `human_requirements.checked_discussion_directly` to `true` only after checking the GitHub discussion directly. Do not put issue numbers, issue acceptance criteria, reviewer item IDs, reviewer comments, summaries, or arbitrary labels in `addressed_ids`."
         )
     else:
         lines.append(
-            "No signed human requirements are surfaced in this prompt, so structured replies must set `human_requirements.addressed_ids` to `[]`. Do not put issue numbers, issue acceptance criteria, reviewer item IDs, reviewer comments, summaries, or arbitrary labels in `addressed_ids`; only exact surfaced signed requirement labels are valid when such labels are actually shown."
+            "No signed human requirements are surfaced in this prompt, so structured replies must set both `human_requirement_dispositions` and `human_requirements.addressed_ids` to `[]`, with `checked_discussion_directly` false. Do not put issue numbers, issue acceptance criteria, reviewer item IDs, reviewer comments, summaries, or arbitrary labels in `addressed_ids`; only exact surfaced signed requirement labels are valid when such labels are actually shown."
         )
     return "\n".join(lines) + "\n"
 

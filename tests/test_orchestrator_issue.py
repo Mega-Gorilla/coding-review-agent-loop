@@ -727,6 +727,7 @@ def test_issue_loop_plan_revision_repair_rejects_wrong_kind_from_human_requireme
                 "summary": "Revised the plan.",
                 "addressed_items": [],
                 "remaining_items": [],
+                "human_requirement_dispositions": [],
                 "human_requirements": {
                     "addressed_ids": ["Requirement 1"],
                     "checked_discussion_directly": False,

@@ -277,6 +277,7 @@ def test_envelope_normalization_recovers_reversed_signature_before_footer(expect
             "summary": "All done.",
             "addressed_items": [],
             "remaining_items": [],
+            "human_requirement_dispositions": [],
             "addressed_item_notes": {},
             "remaining_item_notes": {},
             "human_requirements": {"addressed_ids": [], "checked_discussion_directly": False},
@@ -1442,6 +1443,7 @@ def test_run_pr_loop_uses_repair_pass_on_coder_followup_format_failure(tmp_path)
     repaired_followup = (
         '{"schema_version":1,"kind":"coder_followup","state":"blocking","summary":"Fixed the bug.",'
         '"addressed_items":["item-1"],"remaining_items":[],'
+        '"human_requirement_dispositions": [],'
         '"human_requirements":{"addressed_ids":[],"checked_discussion_directly":false}}'
         "\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
     )
@@ -3140,6 +3142,7 @@ def test_envelope_normalization_coder_followup_returns_none_when_prose_before_fo
                 "summary": "Done.",
                 "addressed_items": [],
                 "remaining_items": [],
+                "human_requirement_dispositions": [],
                 "human_requirements": {"addressed_ids": [], "checked_discussion_directly": False},
             }
         )
