@@ -1581,6 +1581,16 @@ def test_repair_prompt_plan_revision_preserves_human_requirements_acknowledgemen
     assert "preserve the acknowledgement only when it requires surfaced signed requirements" in _REPAIR_PROMPT
     assert "If the original plan revision includes <!-- HUMAN_REQUIREMENTS_ADDRESSED -->" not in _REPAIR_PROMPT
 
+
+def test_repair_prompt_empty_initial_plan_state_has_no_human_requirements_acknowledgement():
+    example = _REPAIR_PROMPT.split("## Valid Format J — Initial Plan State:", 1)[1].split(
+        "## Valid Format D — Plan Revision:", 1
+    )[0]
+    assert '"human_requirement_dispositions": []' in example
+    assert "<!-- HUMAN_REQUIREMENTS_ADDRESSED -->" not in example
+    assert "### Human requirements" not in example
+
+
 def test_repair_prompt_does_not_suggest_ack_pseudo_item_in_addressed_items():
     """The ack pseudo-item must never be suggested as a value for addressed_items.
 

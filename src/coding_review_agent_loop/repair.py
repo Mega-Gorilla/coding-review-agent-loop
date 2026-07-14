@@ -407,11 +407,6 @@ Notes:
   "plan_steps": ["Update the parser.", "Add regression tests."],
   "human_requirement_dispositions": []
 }
-<!-- HUMAN_REQUIREMENTS_ADDRESSED -->
-
-### Human requirements
-
-- <one bullet per authoritative surfaced signed human requirement, only when present>
 <!-- AGENT_PLAN_STATE: blocking -->
 -- <Coder Name>
 
