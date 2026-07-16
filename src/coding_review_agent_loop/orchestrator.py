@@ -734,6 +734,28 @@ def _is_retryable_marker_near_miss(text: str) -> bool:
     )
 
 
+_NATIVE_PERMISSION_DENIAL_RE = re.compile(
+    r"(?:required the\s+\"(?P<quoted>read_file|write_file|command)\"\s+permission|"
+    r"permission(?: request)?(?: for| to)?\s+[`\"]?(?P<named>read_file|write_file|command)[`\"]?)",
+    re.I,
+)
+
+
+def _native_permission_denial_tool(text: str) -> str | None:
+    """Return the native tool denied by headless Antigravity, if any.
+
+    Antigravity reports these failures on stdout and exits without a public
+    response. Keeping this classification separate from ``empty-response``
+    makes the actionable CLI diagnostic visible to callers and logs.
+    """
+    if not re.search(r"(?:headless|no output produced|auto-denied|auto denied)", text, re.I):
+        return None
+    match = _NATIVE_PERMISSION_DENIAL_RE.search(text)
+    if not match:
+        return None
+    return (match.group("quoted") or match.group("named")).lower()
+
+
 def _failure_category(
     text: str,
     *,
@@ -741,6 +763,9 @@ def _failure_category(
     repair_expected_kind: str | None = None,
 ) -> str:
     """Classify a failure for logging: helps users decide whether to rerun or fix config/code."""
+    native_tool = _native_permission_denial_tool(text)
+    if native_tool:
+        return f"native-tool-denied-{native_tool}"
     if not text.strip():
         return "empty-response"
     if _unsupported_model_classification_text(
@@ -1231,6 +1256,12 @@ def _failure_suggestion(
         if re.search(r"\bdirty\b", combined, re.I):
             return "Suggestion: clean up the dirty working tree or workdir, then re-run."
         return f"Suggestion: check that {agent_name} is installed and authenticated, then re-run."
+    if category and category.startswith("native-tool-denied-"):
+        tool = category.removeprefix("native-tool-denied-")
+        return (
+            f"Suggestion: inspect the Antigravity {tool} permission policy for the assigned "
+            "checkout, then re-run; do not enable unrestricted permission bypasses."
+        )
     if category == "deterministic":
         if "repair invocation failure" in reason and "invalid_output" in reason:
             return (

@@ -43,6 +43,7 @@ from coding_review_agent_loop.orchestrator import (
     _format_reset_duration,
     _is_transient_agent_output,
     _is_transient_public_response,
+    _native_permission_denial_tool,
     _parse_rate_limit_reset_seconds,
     _plan_subject,
     _resume_plan_round,
@@ -4272,6 +4273,39 @@ def test_failure_suggestion_deterministic_genuine():
 def test_failure_suggestion_empty_response():
     msg = _failure_suggestion("empty-response", "", "TestAgent")
     assert msg == ""
+
+
+@pytest.mark.parametrize(
+    ("tool", "diagnostic"),
+    [
+        (
+            "read_file",
+            'jetski: no output produced — a tool required the "read_file" permission '
+            "that headless mode cannot prompt for, so it was auto-denied.",
+        ),
+        (
+            "write_file",
+            'headless mode auto-denied a tool required the "write_file" permission.',
+        ),
+        (
+            "command",
+            'headless mode auto-denied a tool required the "command" permission.',
+        ),
+    ],
+)
+def test_headless_native_permission_denials_are_categorized_by_tool(tool, diagnostic):
+    assert _native_permission_denial_tool(diagnostic) == tool
+    assert _failure_category(diagnostic) == f"native-tool-denied-{tool}"
+    suggestion = _failure_suggestion(
+        f"native-tool-denied-{tool}", diagnostic, "Antigravity"
+    )
+    assert tool in suggestion
+    assert "unrestricted" in suggestion
+
+
+def test_unrelated_blank_output_remains_empty_response():
+    assert _native_permission_denial_tool("") is None
+    assert _failure_category("") == "empty-response"
 
 
 def test_failure_suggestion_none_category():
