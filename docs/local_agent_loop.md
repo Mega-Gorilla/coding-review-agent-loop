@@ -162,6 +162,48 @@ Currently supported local agent CLIs:
 - OpenAI Codex CLI via `codex`
 - Gemini CLI via `gemini` (best-effort support for users whose organization or API-key setup still has access)
 
+### Antigravity native-tool capability probe for issue #568
+
+Production Antigravity settings injection is intentionally not changed until a
+real `agy --print` probe verifies a checkout-scoped recursive native read while
+denying all native writes and outside access. This section records the probe
+run on 2026-07-15 with `agy` version `1.1.3` and model `Gemini 3.5 Flash (High)`.
+
+The isolated profile was selected with `HOME` set to a temporary directory;
+`strace` confirmed that `agy` read that profile's
+`.gemini/antigravity-cli/settings.json`. The nested fixture was
+`/tmp/coding-review-agent-loop/scratch/issue-568-probe/fixture/nested/file.txt`
+and contained `nested-probe-secret`.
+
+The following candidate settings were each tested with a native nested read:
+
+```json
+{"toolPermission":"strict","permissions":{"allow":["read_file(/tmp/coding-review-agent-loop/scratch/issue-568-probe/fixture)"]}}
+{"toolPermission":"strict","permissions":{"allow":["read_file(/tmp/coding-review-agent-loop/scratch/issue-568-probe/fixture/**)"]}}
+{"toolPermission":"strict","permissions":{"allow":["read_file(/tmp/coding-review-agent-loop/scratch/issue-568-probe/fixture/*)"]}}
+{"trustedWorkspaces":["/tmp/coding-review-agent-loop/scratch/issue-568-probe/fixture"],"allowNonWorkspaceAccess":false}
+```
+
+Every candidate failed before producing a response with this diagnostic:
+
+```text
+jetski: no output produced — a tool required the "read_file" permission that headless mode cannot prompt for, so it was auto-denied. Add an allow-rule under permissions.allow in settings.json (e.g. read_file(<target>)). Alternatively, re-run with --dangerously-skip-permissions to auto-approve all tools.
+```
+
+The exact-file and wildcard probes were also denied; adding
+`read_file(*)` did not change the result. The trusted-workspace probe was
+repeated after initializing the fixture as a Git repository and still failed.
+
+For each candidate, native `write_file` probes targeting a fresh path inside
+the fixture and a fresh path outside it were denied, and neither target was
+created. The trusted-workspace profile also denied a native `command` probe
+(`pwd`). Those denials are safety-positive, but they do not compensate for
+the missing nested read grant: no candidate passed the required combination
+of nested read plus inside- and outside-checkout write denial. No production
+permission rule is therefore inferred or shipped. An Antigravity-supported
+recursive-read mechanism (or explicit human approval of an alternative) is
+required before implementation can continue.
+
 ## Prerequisites
 
 - `gh` is installed and authenticated for the target GitHub repository.
