@@ -136,6 +136,8 @@ from .protocol import (
     StructuredPlanState,
     StructuredPlanRevision,
     UnresolvedReviewItem,
+    PrReference,
+    classify_pr_reference,
     human_requirements_resolved,
     is_clarification_request,
     parse_human_requirements_acknowledgement,
@@ -2297,10 +2299,42 @@ def _run_validated_agent(
     raise AgentInvocationError(message, failure_category=last_failure_category)
 
 
+@dataclass(frozen=True)
+class _TerminalNoPrImplementation:
+    state: str
+
+
+def _require_issue_implementation_result(text: str) -> int | _TerminalNoPrImplementation:
+    """Accept a positive PR, or an explicit terminal blocking/clarify outcome."""
+    reference: PrReference = classify_pr_reference(text)
+    if reference.is_valid:
+        assert reference.number is not None
+        return reference.number
+
+    if is_clarification_request(text):
+        return _TerminalNoPrImplementation("clarification")
+    try:
+        state = parse_agent_state(text)
+    except AgentLoopError:
+        state = None
+    if state == "blocking":
+        return _TerminalNoPrImplementation("blocking")
+
+    reference_error = (
+        "the AGENT_PR marker or PR URL present was invalid"
+        if reference.kind == "invalid"
+        else "response did not include a PR marker or PR URL"
+    )
+    raise AgentLoopError(
+        f"Coder did not create a valid PR: {reference_error} "
+        "or a terminal blocking/clarification marker."
+    )
+
+
 def _require_pr_number(text: str) -> int:
     pr_number = parse_pr_number(text)
     if pr_number is None:
-        raise AgentLoopError("Agent response did not include a PR marker or PR URL.")
+        raise AgentLoopError("Agent response did not include a valid positive PR marker or PR URL.")
     return pr_number
 
 
@@ -2902,14 +2936,8 @@ def _implement_approved_issue(
             staged_parent_issue=staged_parent_issue,
         ),
         session_id=implementation_session_id,
-        marker_description="<!-- AGENT_PR: <number> --> or PR URL",
-        validate=lambda text, human_requirements=issue_context.human_requirements: _validate_response_with_human_requirements(
-            text,
-            marker_validator=_require_pr_number,
-            human_requirements=human_requirements,
-            requirement_scope="implementation requirements",
-            full_omission_fallback="Fetch the issue discussion directly before implementing.",
-        ),
+        marker_description="positive <!-- AGENT_PR: <number> -->, PR URL, blocking, or clarification",
+        validate=_require_issue_implementation_result,
         usage_context=usage_context,
         salvage_context=SalvageContext(
             repo=implementation_config.repo,
@@ -2922,7 +2950,19 @@ def _implement_approved_issue(
         operation_description="approved-plan implementation",
     )
     coder_output = coder_response.text
-    pr_number = int(coder_response.marker_value)
+    implementation_result = coder_response.marker_value
+    if isinstance(implementation_result, _TerminalNoPrImplementation):
+        raise AgentLoopError(
+            "Coder did not create a valid PR; implementation is " + implementation_result.state + "."
+        )
+    pr_number = int(implementation_result)
+    _validate_response_with_human_requirements(
+        coder_output,
+        marker_validator=_require_pr_number,
+        human_requirements=issue_context.human_requirements,
+        requirement_scope="implementation requirements",
+        full_omission_fallback="Fetch the issue discussion directly before implementing.",
+    )
     _validate_response_tests_with_post_pr_context(
         coder_output,
         runner=runner,
@@ -3974,14 +4014,8 @@ def run_issue_loop(
                 issue_context=issue_context,
                 salvage_summary=salvage_summary,
             ),
-            marker_description="<!-- AGENT_PR: <number> --> or PR URL",
-            validate=lambda text, human_requirements=issue_context.human_requirements: _validate_response_with_human_requirements(
-                text,
-                marker_validator=_require_pr_number,
-                human_requirements=human_requirements,
-                requirement_scope="implementation requirements",
-                full_omission_fallback="Fetch the issue discussion directly before implementing.",
-            ),
+            marker_description="positive <!-- AGENT_PR: <number> -->, PR URL, blocking, or clarification",
+            validate=_require_issue_implementation_result,
             usage_context=usage_context,
             salvage_context=SalvageContext(
                 repo=config.repo,
@@ -3994,7 +4028,19 @@ def run_issue_loop(
         )
         coder_output = coder_response.text
         coder_session_id = coder_response.session_id
-        pr_number = int(coder_response.marker_value)
+        implementation_result = coder_response.marker_value
+        if isinstance(implementation_result, _TerminalNoPrImplementation):
+            raise AgentLoopError(
+                "Coder did not create a valid PR; implementation is " + implementation_result.state + "."
+            )
+        pr_number = int(implementation_result)
+        _validate_response_with_human_requirements(
+            coder_output,
+            marker_validator=_require_pr_number,
+            human_requirements=issue_context.human_requirements,
+            requirement_scope="implementation requirements",
+            full_omission_fallback="Fetch the issue discussion directly before implementing.",
+        )
         _validate_response_tests_with_post_pr_context(
             coder_output,
             runner=runner,

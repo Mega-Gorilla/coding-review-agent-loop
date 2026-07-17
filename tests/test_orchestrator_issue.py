@@ -313,7 +313,7 @@ def test_issue_loop_requires_claude_to_report_pr_number(tmp_path):
     runner = FakeRunner(claude_outputs=["Created something.\n<!-- AGENT_STATE: blocking -->"])
     config = make_config(tmp_path)
 
-    with pytest.raises(AgentLoopError, match="PR marker"):
+    with pytest.raises(AgentLoopError, match="valid PR"):
         run_issue_loop(runner, issue_number=56, config=config)
 
 def test_issue_loop_rejects_missing_initial_issue_human_requirements_acknowledgement(tmp_path):
@@ -2298,10 +2298,41 @@ def test_codex_issue_loop_requires_codex_to_report_pr_number(tmp_path):
     )
     config = make_config(tmp_path, coder="codex", reviewer="claude")
 
-    with pytest.raises(AgentLoopError, match="PR marker"):
+    with pytest.raises(AgentLoopError, match="valid PR"):
         run_issue_loop(runner, issue_number=56, config=config)
 
     assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+
+
+@pytest.mark.parametrize("terminal_marker, expected_state", [
+    ("<!-- AGENT_STATE: blocking -->", "blocking"),
+    ("<!-- AGENT_CLARIFY -->", "clarification"),
+])
+def test_issue_loop_stops_before_pr_lookup_for_invalid_pr_terminal_result(
+    tmp_path, terminal_marker, expected_state
+):
+    runner = FakeRunner(codex_outputs=[f"Cannot proceed.\n<!-- AGENT_PR: 0 -->\n{terminal_marker}"])
+    config = make_config(tmp_path, coder="codex", reviewer="claude")
+
+    with pytest.raises(AgentLoopError, match=f"implementation is {expected_state}"):
+        run_issue_loop(runner, issue_number=56, config=config)
+
+    assert not any(cmd[:3] == ["gh", "pr", "view"] for cmd, _cwd in runner.commands)
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+    assert runner.comments == []
+
+
+def test_issue_loop_invalid_pr_without_terminal_state_is_protocol_error(tmp_path):
+    runner = FakeRunner(codex_outputs=["Cannot proceed.\n<!-- AGENT_PR: malformed -->"])
+    config = make_config(tmp_path, coder="codex", reviewer="claude")
+
+    with pytest.raises(
+        AgentLoopError,
+        match="AGENT_PR marker or PR URL present was invalid",
+    ):
+        run_issue_loop(runner, issue_number=56, config=config)
+
+    assert not any(cmd[:3] == ["gh", "pr", "view"] for cmd, _cwd in runner.commands)
 
 def test_issue_loop_rejects_outside_workdir_tests_before_posting_pr_comment(tmp_path):
     runner = FakeRunner(
@@ -3008,6 +3039,37 @@ def test_approved_plan_implementation_rerun_discovers_remote_salvage_with_matchi
     assert "Previous failed implementation attempt salvage:" in coder_prompt
     assert "recovered from a GitHub issue comment" in coder_prompt
     assert "remote approved-plan failure" in coder_prompt
+
+
+@pytest.mark.parametrize("terminal_marker, expected_state", [
+    ("<!-- AGENT_STATE: blocking -->", "blocking"),
+    ("<!-- AGENT_CLARIFY -->", "clarification"),
+])
+def test_approved_plan_no_pr_terminal_result_bypasses_human_requirements_and_pr_checks(
+    tmp_path, terminal_marker, expected_state
+):
+    runner = FakeRunner(
+        issue_payload={"body": "Keep the public API stable.\n\n-- Human Reviewer"},
+        claude_outputs=[f"Cannot proceed.\n<!-- AGENT_PR: 0 -->\n{terminal_marker}"],
+    )
+    config = make_config(tmp_path)
+    issue_context = get_issue_context(runner, config=config, issue_number=56)
+
+    with pytest.raises(AgentLoopError, match=f"implementation is {expected_state}"):
+        orchestrator_module._implement_approved_issue(
+            runner,
+            issue_number=56,
+            approved_plan="Plan:\n- Do the thing.",
+            config=config,
+            memory=None,
+            issue_context=issue_context,
+            coder_session_id=None,
+            usage_context=orchestrator_module._new_usage_context(config),
+        )
+
+    assert not any(cmd[:3] == ["gh", "pr", "view"] for cmd, _cwd in runner.commands)
+    assert not any(cmd[:1] == ["codex"] for cmd, _cwd in runner.commands)
+    assert runner.comments == []
 
 
 def test_approved_plan_implementation_rerun_ignores_remote_salvage_on_plan_hash_mismatch(tmp_path):
