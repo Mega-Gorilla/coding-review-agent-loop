@@ -19,7 +19,6 @@ HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK = (
 
 STATE_RE = re.compile(r"<!--\s*AGENT_STATE:\s*(approved|blocking)\s*-->", re.I)
 PLAN_STATE_RE = re.compile(r"<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*-->", re.I)
-PR_RE = re.compile(r"<!--\s*AGENT_PR:\s*(\d+)\s*-->", re.I)
 _PR_MARKER_VALUE_RE = re.compile(r"(?m)^\s*<!--\s*AGENT_PR:\s*(.*?)\s*-->\s*$", re.I)
 GH_PR_URL_RE = re.compile(r"/pull/(\d+)(?:\b|$)")
 CLARIFY_RE = re.compile(r"<!--\s*AGENT_CLARIFY\s*-->", re.I)

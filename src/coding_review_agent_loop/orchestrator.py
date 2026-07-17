@@ -2320,9 +2320,13 @@ def _require_issue_implementation_result(text: str) -> int | _TerminalNoPrImplem
     if state == "blocking":
         return _TerminalNoPrImplementation("blocking")
 
-    reference_error = "invalid PR marker or PR URL" if reference.kind == "invalid" else "PR marker or PR URL"
+    reference_error = (
+        "the AGENT_PR marker or PR URL present was invalid"
+        if reference.kind == "invalid"
+        else "response did not include a PR marker or PR URL"
+    )
     raise AgentLoopError(
-        f"Coder did not create a valid PR: response did not include a valid {reference_error} "
+        f"Coder did not create a valid PR: {reference_error} "
         "or a terminal blocking/clarification marker."
     )
 

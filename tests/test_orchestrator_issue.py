@@ -2326,7 +2326,10 @@ def test_issue_loop_invalid_pr_without_terminal_state_is_protocol_error(tmp_path
     runner = FakeRunner(codex_outputs=["Cannot proceed.\n<!-- AGENT_PR: malformed -->"])
     config = make_config(tmp_path, coder="codex", reviewer="claude")
 
-    with pytest.raises(AgentLoopError, match="did not create a valid PR"):
+    with pytest.raises(
+        AgentLoopError,
+        match="AGENT_PR marker or PR URL present was invalid",
+    ):
         run_issue_loop(runner, issue_number=56, config=config)
 
     assert not any(cmd[:3] == ["gh", "pr", "view"] for cmd, _cwd in runner.commands)
