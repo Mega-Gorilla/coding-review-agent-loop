@@ -20,6 +20,7 @@ HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK = (
 STATE_RE = re.compile(r"<!--\s*AGENT_STATE:\s*(approved|blocking)\s*-->", re.I)
 PLAN_STATE_RE = re.compile(r"<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*-->", re.I)
 PR_RE = re.compile(r"<!--\s*AGENT_PR:\s*(\d+)\s*-->", re.I)
+_PR_MARKER_VALUE_RE = re.compile(r"(?m)^\s*<!--\s*AGENT_PR:\s*(.*?)\s*-->\s*$", re.I)
 GH_PR_URL_RE = re.compile(r"/pull/(\d+)(?:\b|$)")
 CLARIFY_RE = re.compile(r"<!--\s*AGENT_CLARIFY\s*-->", re.I)
 # Standalone variants: marker must occupy its own line.
@@ -476,6 +477,22 @@ class ParsedHumanRequirementsAcknowledgement:
     section_text: str
 
 
+@dataclass(frozen=True)
+class PrReference:
+    """Classify the PR reference supplied in an agent response.
+
+    Explicit markers are authoritative, including invalid ones, so an
+    incidental URL cannot turn ``AGENT_PR: 0`` into a real PR handoff.
+    """
+
+    kind: str
+    number: int | None = None
+
+    @property
+    def is_valid(self) -> bool:
+        return self.kind == "valid"
+
+
 def parse_agent_state(text: str) -> str:
     matches = STATE_RE.findall(text)
     if not matches:
@@ -493,15 +510,39 @@ def parse_plan_state(text: str) -> str:
     return matches[-1].lower()
 
 
-def parse_pr_number(text: str) -> int | None:
-    # Use the final marker as authoritative, consistent with parse_agent_state.
-    markers = list(PR_RE.finditer(text))
+def classify_pr_reference(text: str) -> PrReference:
+    """Return whether a response has an absent, valid, or invalid PR reference.
+
+    Only standalone, non-fenced protocol markers count. The final explicit
+    marker wins and is never rescued by a URL elsewhere in the response.
+    """
+    code_ranges = _fenced_code_block_ranges(text)
+
+    def active(matches):
+        return [m for m in matches if not any(start <= m.start() < end for start, end in code_ranges)]
+
+    markers = active(list(_PR_MARKER_VALUE_RE.finditer(text)))
     if markers:
-        return int(markers[-1].group(1))
-    urls = list(GH_PR_URL_RE.finditer(text))
+        value = markers[-1].group(1).strip()
+        if re.fullmatch(r"\d+", value):
+            number = int(value)
+            if number > 0:
+                return PrReference("valid", number)
+        return PrReference("invalid")
+
+    urls = active(list(GH_PR_URL_RE.finditer(text)))
     if urls:
-        return int(urls[-1].group(1))
-    return None
+        number = int(urls[-1].group(1))
+        if number > 0:
+            return PrReference("valid", number)
+        return PrReference("invalid")
+    return PrReference("absent")
+
+
+def parse_pr_number(text: str) -> int | None:
+    """Compatibility parser that returns only a positive PR number."""
+    reference = classify_pr_reference(text)
+    return reference.number if reference.is_valid else None
 
 
 def _fenced_code_block_ranges(text: str) -> list[tuple[int, int]]:

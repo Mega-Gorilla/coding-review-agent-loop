@@ -968,11 +968,23 @@ run relevant tests, commit, push, and open a pull request against {config.base}.
 {_salvage_summary_block(salvage_summary)}
 
 Do not wait for {reviewer_name} yourself; this local orchestrator will run {reviewer_name} after
-you create the PR. Use blocking here to hand the PR to {reviewer_name} for review. Do not place
-your signature before the AGENT_STATE marker. Your response must end with, in this exact order:
+you create the PR. Use blocking here to hand the PR to {reviewer_name} for review. If you cannot
+safely proceed and cannot create a PR, explain the blocker and end with `AGENT_STATE: blocking`
+(without an `AGENT_PR` marker), or ask a final focused question with `AGENT_CLARIFY`. Otherwise,
+use a positive PR number; do not invent placeholders such as `AGENT_PR: 0`. Do not place your
+signature before the AGENT_STATE marker. Your response must end with, in this exact order for a
+completed implementation:
 
 <!-- AGENT_PR: <number> -->
 <!-- AGENT_STATE: blocking -->
+-- {coder_signature}
+
+For a no-PR blocking result:
+<!-- AGENT_STATE: blocking -->
+-- {coder_signature}
+
+For clarification:
+<!-- AGENT_CLARIFY -->
 -- {coder_signature}
 """
 
@@ -1572,11 +1584,23 @@ Approved implementation plan:
 
 Do not wait for {reviewer_name} yourself; this local orchestrator will run
 {reviewer_name} after you create the PR. Use blocking here to hand the PR to
-{reviewer_name} for review. Do not place your signature before the AGENT_STATE
-marker. Your response must end with, in this exact order:
+{reviewer_name} for review. If you cannot safely proceed and cannot create a
+PR, explain the blocker and end with `AGENT_STATE: blocking` (without an
+`AGENT_PR` marker), or ask a final focused question with `AGENT_CLARIFY`.
+Otherwise, use a positive PR number. Do not invent placeholder identifiers such
+as `AGENT_PR: 0`. Do not place your signature before the AGENT_STATE marker.
+Your response must end with, in this exact order for a completed implementation:
 
 <!-- AGENT_PR: <number> -->
 <!-- AGENT_STATE: blocking -->
+-- {coder_signature}
+
+For a no-PR blocking result:
+<!-- AGENT_STATE: blocking -->
+-- {coder_signature}
+
+For clarification:
+<!-- AGENT_CLARIFY -->
 -- {coder_signature}
 """
 

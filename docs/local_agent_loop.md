@@ -1049,10 +1049,15 @@ Agent responses are parsed using HTML comment markers:
 <!-- AGENT_CLARIFY -->
 ```
 
-`AGENT_PR` is required after a coder creates a PR. Review/fix responses must
-include a final `AGENT_STATE` marker. Plan-first coder/reviewer responses use
-`AGENT_PLAN_STATE` instead. If a response quotes older markers, the final
-matching marker is treated as authoritative.
+`AGENT_PR` is required after a coder creates a PR and must be a positive base-10
+integer. `0`, negative, empty, and malformed identifiers are rejected before
+any GitHub lookup; a final explicit invalid marker is authoritative and is not
+rescued by an incidental PR URL. An issue implementation that cannot safely
+continue may instead end with `AGENT_STATE: blocking` or a final
+`AGENT_CLARIFY`; it stops without PR review and surfaces that state. Review/fix
+responses must include a final `AGENT_STATE` marker. Plan-first coder/reviewer
+responses use `AGENT_PLAN_STATE` instead. If a response quotes older markers,
+the final matching marker is treated as authoritative.
 
 Structured-response runs follow this fallback order:
 

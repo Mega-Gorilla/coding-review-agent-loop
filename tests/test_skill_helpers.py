@@ -2680,7 +2680,7 @@ class TestRunExternalImplStub:
                 "--dry-run",
             )
             assert result.returncode == 0
-            assert "<!-- AGENT_PR:" in out.read_text(encoding="utf-8")
+            assert "<!-- AGENT_PR: 1 -->" in out.read_text(encoding="utf-8")
 
 
 class TestRunExternalDecomposeStub:
@@ -3182,7 +3182,7 @@ class TestRunImplement:
             )
             assert result.returncode == 0, result.stderr
             output = self._last_json(result.stdout)
-            assert output["pr"] == 0 and output["issue"] == 9992
+            assert output["pr"] == 1 and output["issue"] == 9992
             # Launcher base behavior is observable (not only the prompt text).
             assert "release-x" in result.stdout
 
@@ -3634,7 +3634,7 @@ class TestRunImplementByPhase:
             assert output["state"] == "would-implement"
             assert output["phase"]["automation"] == "agent-pr"
             assert output["would_post_phase_handoff"] is True
-            assert output["child_implementation_preview"]["pr"] == 0
+            assert output["child_implementation_preview"]["pr"] == 1
 
 
 # ---------------------------------------------------------------------------

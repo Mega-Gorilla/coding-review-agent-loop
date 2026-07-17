@@ -77,7 +77,7 @@ _CANNED_IMPLEMENTATION = """\
 Implemented the approved plan (dry-run stub): created a branch, made the changes,
 and opened a pull request.
 
-<!-- AGENT_PR: 0 -->
+<!-- AGENT_PR: 1 -->
 -- Codex (dry-run stub)
 """
 

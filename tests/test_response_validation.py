@@ -1,5 +1,5 @@
 from agent_loop_helpers import *  # noqa: F403
-from coding_review_agent_loop.protocol import StructuredCoderFollowup
+from coding_review_agent_loop.protocol import StructuredCoderFollowup, classify_pr_reference
 from coding_review_agent_loop.unresolved_items import (
     CODER_DISPUTE_NOTE_PREFIX,
     _apply_dispute_evidence,
@@ -443,6 +443,34 @@ def test_parse_pr_number_uses_final_marker():
     )
     # Marker takes precedence over URL when both present (marker checked first).
     assert parse_pr_number("https://github.com/OWNER/REPO/pull/5\n<!-- AGENT_PR: 7 -->") == 7
+
+
+@pytest.mark.parametrize("response", [
+    "<!-- AGENT_PR: 0 -->",
+    "<!-- AGENT_PR: -1 -->",
+    "<!-- AGENT_PR: -->",
+    "<!-- AGENT_PR: abc -->",
+    "<!-- AGENT_PR: 12abc -->",
+    "https://github.com/OWNER/REPO/pull/0",
+])
+def test_pr_reference_classifier_rejects_invalid_identifiers(response):
+    assert classify_pr_reference(response).kind == "invalid"
+    assert parse_pr_number(response) is None
+
+
+def test_pr_reference_classifier_preserves_absent_and_authoritative_final_marker():
+    assert classify_pr_reference("no PR yet").kind == "absent"
+    assert classify_pr_reference("<!-- AGENT_PR: 8 -->").number == 8
+    assert classify_pr_reference("https://github.com/OWNER/REPO/pull/9").number == 9
+    assert classify_pr_reference("<!-- AGENT_PR: 8 -->\n<!-- AGENT_PR: 0 -->").kind == "invalid"
+    assert classify_pr_reference(
+        "https://github.com/OWNER/REPO/pull/9\n<!-- AGENT_PR: 0 -->"
+    ).kind == "invalid"
+
+
+def test_pr_reference_classifier_ignores_fenced_and_inline_examples():
+    assert classify_pr_reference("```\n<!-- AGENT_PR: 7 -->\n```").kind == "absent"
+    assert classify_pr_reference("Use <!-- AGENT_PR: 7 --> as the footer.").kind == "absent"
 
 def test_validate_human_requirements_acknowledgement_accepts_multiple_bullet_styles():
     response = f"""Implemented the fix.
