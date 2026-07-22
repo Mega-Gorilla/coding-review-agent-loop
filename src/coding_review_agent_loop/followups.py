@@ -205,6 +205,14 @@ def _followup_similarity(left: ApprovedFollowup, right: ApprovedFollowup) -> flo
             return 1.0
     if common_terms == left_terms or common_terms == right_terms:
         return 1.0
+    # A concise restatement of carried work can omit context while retaining
+    # most of its concrete terms. Treat that as the same follow-up before the
+    # broader Jaccard threshold below.
+    if (
+        len(common_terms) >= 4
+        and len(common_terms) / min(len(left_terms), len(right_terms)) >= 0.6
+    ):
+        return 0.55
     return len(common_terms) / len(left_terms | right_terms)
 
 
