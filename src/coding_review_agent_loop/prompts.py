@@ -504,10 +504,29 @@ reason that you explicitly accept before approving.
 """ if require_plan_dispositions else "")
 
 
+def _agent_unavailable_guidance(signature: str) -> str:
+    return f"""If an internal environment, permission, provider, or tooling problem makes it impossible to complete this assigned operation after safe recovery attempts, do not invent a blocking code finding or claim approval. Return this instead of the normal response schema:
+
+{{
+  "schema_version": 1,
+  "kind": "agent_unavailable",
+  "retryable": false,
+  "category": "environment|permissions|provider|tooling|unknown",
+  "summary": "concise description of what prevented completion",
+  "suggested_action": "specific operator action"
+}}
+<!-- AGENT_UNAVAILABLE -->
+-- {signature}
+
+Use `retryable: true` only when a fresh invocation may succeed without changing code or configuration. This is an agent-operational failure, not review feedback; do not use it for a genuine code blocker, a request for clarification, or a normal disagreement.
+"""
+
+
 def _structured_coder_followup_guidance(
     *,
     reviewer_name: str,
     human_requirements_context: CoderHumanRequirementsPromptContext,
+    coder_signature: str,
 ) -> str:
     example_human_requirement_ids = (
         list(human_requirements_context.surfaced_requirement_ids[:1])
@@ -543,6 +562,7 @@ def _structured_coder_followup_guidance(
         "Use `addressed_items`, `remaining_items`, and `disputed_items` to classify every unresolved reviewer item ID shown in this prompt. Do not omit any listed reviewer item ID and do not list any item ID more than once.",
         "Use `addressed_item_notes` to summarize how each addressed item was resolved, and use `remaining_item_notes` to give a visible reason for each intentionally deferred remaining item.",
         "Use `disputed_items` when a reviewer claim is factually incorrect (wrong pricing, stale diff reading, incorrect behavior assumption) and you have verifiable counter-evidence. Put the item ID in `disputed_items` instead of `addressed_items` or `remaining_items`, and record your evidence in `dispute_evidence`. The reviewer will get one more turn to reconsider with your evidence attached. If the reviewer still blocks after seeing the evidence, the orchestrator will surface the disagreement to a human for resolution.",
+        _agent_unavailable_guidance(coder_signature),
     ]
     if human_requirements_context.surfaced_requirement_ids:
         surfaced = ", ".join(f"`{item}`" for item in human_requirements_context.surfaced_requirement_ids)
@@ -1042,6 +1062,7 @@ prose between the JSON object and footer.
 {_issue_context_block(issue_context)}
 {_memory_block(memory)}
 
+{_agent_unavailable_guidance(coder_signature)}
 Do not wait for {reviewer_name} yourself; this local orchestrator will run
 {reviewer_name} to review the plan. Use blocking to hand the plan to {reviewer_name}
 for review. If the issue is materially ambiguous before a useful plan can be written,
@@ -1173,7 +1194,7 @@ them forward explicitly.
 Signed human issue requirements are approval-critical issue constraints for this
 plan review.
 {human_requirements_guidance}
-{_phased_plan_guard(config)}Use blocking only when the current plan still has blocking plan issues or
+{_phased_plan_guard(config)}{_agent_unavailable_guidance(reviewer_signature)}Use blocking only when the current plan still has blocking plan issues or
 same-plan follow-ups. All configured reviewers ({reviewer_group}) must approve
 in the same planning round before implementation can proceed.
 Use approved only if there are no blocking plan issues, no Same-plan
@@ -1271,6 +1292,7 @@ Current implementation plan from {coder_name}:
 
 {plan}
 
+{_agent_unavailable_guidance(reviewer_signature)}
 All configured reviewers ({reviewer_group}) must approve in the same planning
 round before implementation can proceed. Use approved only if there are no
 blocking plan issues, no Same-plan follow-ups, and no carried-forward plan
@@ -1416,6 +1438,7 @@ Previous plan:
 
 {review}
 
+{_agent_unavailable_guidance(coder_signature)}
 Revise the plan item by item instead of replying only with free-form prose. If
 prior unresolved plan items are listed above, include this exact section in
 your response and address each item ID exactly once:
@@ -1582,6 +1605,7 @@ Approved implementation plan:
 
 {approved_plan}
 
+{_agent_unavailable_guidance(coder_signature)}
 Do not wait for {reviewer_name} yourself; this local orchestrator will run
 {reviewer_name} after you create the PR. Use blocking here to hand the PR to
 {reviewer_name} for review. If you cannot safely proceed and cannot create a
@@ -1632,6 +1656,7 @@ Use this local checkout as your workspace. Decide between two paths:
     the implementation, do NOT write code. Instead, ask focused clarifying
     questions.
 
+{_agent_unavailable_guidance(coder_signature)}
 Prefer (a) when reasonable assumptions can be documented in the PR description;
 choose (b) only for material ambiguity. Do not place your signature before the
 AGENT_STATE or AGENT_CLARIFY marker. Your response must end with, in this exact
@@ -1675,6 +1700,7 @@ again if a critical detail is still missing.
 {_scratch_file_guidance()}
 {_coder_test_reporting_guidance()}{_coder_documentation_guidance()}
 
+{_agent_unavailable_guidance(coder_signature)}
 Do not place your signature before the AGENT_STATE or AGENT_CLARIFY marker.
 Your response must end with, in this exact order:
 
@@ -1939,6 +1965,7 @@ available, or produce a blocking review explaining the limitation.
 Reviewer: {reviewer_name}
 Action for this call: {action}
 
+{_agent_unavailable_guidance(reviewer_signature)}
 Use blocking only for issues that should prevent merge. Do not place your
 signature before the AGENT_STATE footer. Your response must end with, in this
 exact order:
@@ -2172,6 +2199,7 @@ also listed in the active `Prior unresolved review items from earlier rounds`
 section above.
 {unresolved_items_guidance}
 {followup_guidance}
+{_agent_unavailable_guidance(reviewer_signature)}
 Use blocking only for issues that should prevent merge.
 All configured reviewers ({reviewer_group}) must approve in the same round for
 the pull request to be considered approved.
@@ -2261,6 +2289,7 @@ Do not create a new PR.
 {_structured_coder_followup_guidance(
     reviewer_name=reviewer_name,
     human_requirements_context=human_requirements_context,
+    coder_signature=coder_signature,
 )}This is round {round_number}. Use blocking to hand the updated PR back to {reviewer_name}.
 If you cannot safely address the review, explain why and still use the blocking
 marker so a human can intervene. Do not place your signature before the
@@ -2309,6 +2338,7 @@ Same-PR follow-ups:
 {_structured_coder_followup_guidance(
     reviewer_name=reviewer_name,
     human_requirements_context=human_requirements_context,
+    coder_signature=coder_signature,
 )}This is round {round_number}. Use blocking to hand the updated PR back to {reviewer_name}.
 If you cannot safely address the follow-ups, explain why and still use the
 blocking marker so a human can intervene. Do not place your signature before

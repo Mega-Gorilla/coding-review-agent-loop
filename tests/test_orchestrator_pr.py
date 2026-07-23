@@ -2598,6 +2598,89 @@ def test_pr_loop_stops_on_incomplete_review_without_coder_followup(tmp_path):
     assert "Review incomplete" not in "\n".join(runner.comments)
 
 
+def test_pr_loop_quarantines_unavailable_reviewer_while_healthy_reviewer_finishes(tmp_path):
+    unavailable = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "agent_unavailable",
+            "retryable": False,
+            "category": "environment",
+            "summary": "The review checkout cannot access the diff.",
+            "suggested_action": "Repair the reviewer sandbox before retrying it.",
+        }
+    ) + "\n<!-- AGENT_UNAVAILABLE -->\n-- OpenAI Codex"
+    runner = FakeRunner(
+        codex_outputs=[unavailable],
+        claude_outputs=[
+            structured_pr_review(
+                state="blocking",
+                summary="A regression test is required.",
+                blocking_items=["Add coverage for the unavailable-reviewer path."],
+                reviewer="Anthropic Claude",
+            ),
+            structured_pr_review(
+                state="approved",
+                summary="The healthy-reviewer finding is resolved.",
+                prior_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+                reviewer="Anthropic Claude",
+            ),
+        ],
+        gemini_outputs=[
+            structured_coder_followup(
+                state="blocking",
+                summary="Added the requested regression coverage.",
+                addressed_items=["item-1"],
+                reviewer="Google Gemini",
+            )
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        coder="gemini",
+        reviewer=("codex", "claude"),
+        max_rounds=3,
+    )
+
+    with pytest.raises(AgentLoopError, match="missing required input from Codex"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    codex_reviews = [cmd for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]
+    claude_reviews = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    gemini_coder_turns = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["gemini"]]
+    assert len(codex_reviews) == 1
+    assert len(claude_reviews) == 2
+    assert len(gemini_coder_turns) == 1
+    assert "**Review status: Incomplete**" in runner.comments[-1]
+    assert "Claude" in runner.comments[-1]
+    assert not any(cmd[:3] == ["gh", "pr", "merge"] for cmd, _cwd in runner.commands)
+
+
+def test_pr_loop_retries_explicit_retryable_agent_unavailable_response(tmp_path):
+    retryable_unavailable = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "agent_unavailable",
+            "retryable": True,
+            "category": "provider",
+            "summary": "The provider returned a temporary unavailable response.",
+            "suggested_action": "Retry the review shortly.",
+        }
+    ) + "\n<!-- AGENT_UNAVAILABLE -->\n-- OpenAI Codex"
+    runner = FakeRunner(
+        codex_outputs=[
+            retryable_unavailable,
+            structured_pr_review(reviewer="OpenAI Codex"),
+        ]
+    )
+    config = make_config(tmp_path, reviewer="codex", agent_max_retries=1)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    codex_reviews = [cmd for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]
+    assert len(codex_reviews) == 2
+    assert any(cmd[:1] == ["sleep"] for cmd, _cwd in runner.commands)
+
+
 def test_pr_loop_posts_human_readable_item_labels_in_new_and_prior_sections(tmp_path):
     runner = FakeRunner(
         claude_outputs=[
