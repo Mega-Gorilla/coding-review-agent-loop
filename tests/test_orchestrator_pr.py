@@ -1646,6 +1646,79 @@ def test_pr_loop_files_earlier_future_followup_not_repeated_in_final_round(tmp_p
     )
     assert "Update from Codex: Still useful as separate tracking." in runner.issues[0]["body"]
 
+
+def test_pr_loop_does_not_allocate_new_items_for_repeated_carried_future_followups(tmp_path):
+    future_text = "Rate limit the preferences write endpoint to avoid provider validation abuse."
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(
+                state="approved",
+                summary="Codex approves with a later hardening task.",
+                future_followups=[future_text],
+                reviewer="OpenAI Codex",
+            ),
+            structured_pr_review(
+                state="approved",
+                summary="Codex final approval.",
+                future_followups=[
+                    "Add a rate limit to PUT /api/preferences because it triggers provider validation."
+                ],
+                prior_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "future", "note": "Still separate work."},
+                    {"item_id": "item-2", "disposition": "resolved"},
+                ],
+                reviewer="OpenAI Codex",
+            ),
+        ],
+        claude_outputs=[
+            structured_pr_review(
+                state="blocking",
+                summary="Need one current-PR fix.",
+                blocking_items=["Fix the current sync regression."],
+                reviewer="Anthropic Claude",
+            ),
+            structured_coder_followup(
+                addressed_items=["item-2"],
+                remaining_items=["item-1"],
+                reviewer="Anthropic Claude",
+            ),
+            structured_pr_review(
+                state="approved",
+                summary="Claude final approval.",
+                future_followups=[future_text],
+                prior_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "future", "note": "Still useful."},
+                    {"item_id": "item-2", "disposition": "resolved"},
+                ],
+                reviewer="Anthropic Claude",
+            ),
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        reviewer=("codex", "claude"),
+        approved_followups="issue",
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    reviewer_metadata = []
+    for comment in runner.pr_payload["comments"]:
+        match = re.search(
+            r"<!--\s*AGENT_LOOP_META:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->",
+            comment["body"],
+        )
+        if match:
+            metadata = _decode_round_metadata(match.group("payload"))
+            if metadata.role == "reviewer" and metadata.round_number == 2:
+                reviewer_metadata.append(metadata)
+
+    assert len(reviewer_metadata) == 2
+    assert all(not metadata.new_items for metadata in reviewer_metadata)
+    assert len(runner.issues) == 1
+    assert runner.issues[0]["title"] == f"Follow up future review note: {future_text}"
+
+
 def test_pr_loop_does_not_file_resolved_earlier_future_followup(tmp_path):
     runner = FakeRunner(
         codex_outputs=[

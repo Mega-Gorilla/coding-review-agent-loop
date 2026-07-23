@@ -113,6 +113,7 @@ from .prompts import (
     render_coder_human_requirements_prompt_context,
 )
 from .protocol import (
+    ApprovedFollowups,
     DISCUSS_FAILED_OUTCOME,
     DISCUSS_RESEARCH_TARGET_VALUES,
     DeferredStage,
@@ -129,6 +130,7 @@ from .protocol import (
     failed_discuss_answer_placeholder,
     is_failed_discuss_response,
     ParsedPlanReview,
+    PlanReviewItems,
     ParsedReview,
     PUBLIC_RESPONSE_MARKER,
     ReviewItemDisposition,
@@ -2474,6 +2476,63 @@ _PENDING_CI_TEXT_KEYWORDS = (
 )
 
 
+def _drop_repeated_carried_future_followups(
+    followups: ApprovedFollowups,
+    *,
+    prior_items: Sequence[UnresolvedReviewItem],
+    dispositions: Sequence[ReviewItemDisposition],
+) -> ApprovedFollowups:
+    """Keep carried future work in its original ledger item.
+
+    A reviewer records a carried item's status through `prior_item_dispositions`.
+    Repeating that same concern in `future_followups` used to allocate another
+    item ID, even though final follow-up publishing later grouped the two.
+    """
+    future_ids = {
+        disposition.item_id
+        for disposition in dispositions
+        if disposition.disposition == "future"
+    }
+    carried = [
+        _approved_followup_from_unresolved_item(item)
+        for item in prior_items
+        if item.item_id in future_ids
+    ]
+    if not carried or not followups.future:
+        return followups
+
+    carried_group_count = len(_dedupe_approved_followups(carried))
+    retained = tuple(
+        followup
+        for followup in followups.future
+        if len(_dedupe_approved_followups([*carried, followup])) > carried_group_count
+    )
+    if retained == followups.future:
+        return followups
+    return ApprovedFollowups(same_pr=followups.same_pr, future=retained)
+
+
+def _drop_repeated_carried_plan_future_followups(
+    items: PlanReviewItems,
+    *,
+    prior_items: Sequence[UnresolvedReviewItem],
+    dispositions: Sequence[ReviewItemDisposition],
+) -> PlanReviewItems:
+    """Keep repeated carried plan follow-ups in their original ledger items."""
+    followups = _drop_repeated_carried_future_followups(
+        ApprovedFollowups(same_pr=items.same_plan, future=items.future),
+        prior_items=prior_items,
+        dispositions=dispositions,
+    )
+    if followups.future == items.future:
+        return items
+    return PlanReviewItems(
+        blocking=items.blocking,
+        same_plan=items.same_plan,
+        future=followups.future,
+    )
+
+
 def _is_pending_ci_only_review(parsed_review: ParsedReview, pr_checks: PullRequestChecks) -> bool:
     """Detect a blocking review whose only content restates pending/unavailable
     GitHub check status rather than an actionable code-level finding.
@@ -3319,6 +3378,14 @@ def _run_plan_first_loop(
                 reviewer_session_ids[reviewer] = review_response.session_id
                 parsed_review = review_response.marker_value
                 assert isinstance(parsed_review, ParsedPlanReview)
+                parsed_review = dataclasses_replace(
+                    parsed_review,
+                    items=_drop_repeated_carried_plan_future_followups(
+                        parsed_review.items,
+                        prior_items=prior_unresolved_items,
+                        dispositions=parsed_review.dispositions,
+                    ),
+                )
                 review_state = parsed_review.state
                 reviewer_new_unresolved_items = []
             log(
@@ -4486,6 +4553,14 @@ def run_pr_loop(
                     reviewer_session_ids[reviewer] = review_response.session_id
                     parsed_review = review_response.marker_value
                     assert isinstance(parsed_review, ParsedReview)
+                    parsed_review = dataclasses_replace(
+                        parsed_review,
+                        followups=_drop_repeated_carried_future_followups(
+                            parsed_review.followups,
+                            prior_items=prior_unresolved_items,
+                            dispositions=parsed_review.dispositions,
+                        ),
+                    )
                     review_state = parsed_review.state
                     reviewer_new_unresolved_items = []
 

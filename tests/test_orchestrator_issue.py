@@ -1335,7 +1335,7 @@ def test_issue_loop_plan_first_files_approved_future_followups_before_implementa
     )
     assert issue_create_index < second_claude_index
 
-def test_issue_loop_plan_first_files_surviving_future_from_mixed_outcome_round(tmp_path):
+def test_issue_loop_plan_first_does_not_allocate_new_items_for_repeated_carried_future_followups(tmp_path):
     future_text = "Factor the shared follow-up guidance into a reusable helper."
     runner = FakeRunner(
         claude_outputs=[
@@ -1428,12 +1428,12 @@ def test_issue_loop_plan_first_files_surviving_future_from_mixed_outcome_round(t
 
     assert len(runner.issues) == 1
     issue_body = runner.issues[0]["body"]
-    assert "Planning round(s): 1, 2" in issue_body
-    assert "Reviewers: Codex, Gemini" in issue_body
-    assert "Original plan item ID(s): item-1, item-3" in issue_body
+    assert "Planning round(s): 1" in issue_body
+    assert "Reviewer: Codex" in issue_body
+    assert "Original plan item ID(s): item-1" in issue_body
     assert "Keep this as confirmed post-plan cleanup." in issue_body
     assert any(
-        "Reconciliation: 1 filed, 1 deduplicated, 0 skipped by cap." in comment
+        "Reconciliation: 1 filed, 0 deduplicated, 0 skipped by cap." in comment
         for comment in runner.comments
     )
 

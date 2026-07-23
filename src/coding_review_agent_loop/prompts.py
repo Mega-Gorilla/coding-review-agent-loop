@@ -571,7 +571,7 @@ def _format_unresolved_review_items(unresolved_items: Sequence[UnresolvedReviewI
         "Prior unresolved review items from earlier rounds",
         "",
         "Explicitly evaluate every item below before approving. Use the item IDs exactly as written.",
-        "For carried future follow-ups, restate `future follow-up: reason` only when the item still deserves separate tracking; use `resolved` if later PR changes already handled it, or promote it to `same-pr`/`still blocking` if it must be fixed before merge.",
+        "For carried future follow-ups, record their status only in `prior_item_dispositions`; do not repeat the same concern in new `future_followups`. Use `resolved` if later PR changes already handled it, or promote it to `same-pr`/`still blocking` if it must be fixed before merge.",
         "",
     ]
     for item in unresolved_items:
@@ -596,7 +596,7 @@ def _format_unresolved_plan_items(unresolved_items: Sequence[UnresolvedReviewIte
         "Prior unresolved plan items from earlier rounds",
         "",
         "Explicitly evaluate every item below before approving. Use the item IDs exactly as written.",
-        "For carried future follow-ups, restate `future follow-up: reason` only when the item still deserves separate tracking; use `resolved` if later plan changes already handled it, or promote it to `same-plan`/`still blocking` if it must be fixed before implementation.",
+        "For carried future follow-ups, record their status only in `prior_plan_item_dispositions`; do not repeat the same concern in new `future_followups`. Use `resolved` if later plan changes already handled it, or promote it to `same-plan`/`still blocking` if it must be fixed before implementation.",
         "",
     ]
     for item in unresolved_items:
