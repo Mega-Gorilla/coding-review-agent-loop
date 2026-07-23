@@ -1445,6 +1445,110 @@ def test_pr_loop_skips_prior_approval_when_pr_head_is_unchanged(tmp_path):
     assert "round 1" in codex_reviews[0][-1]
 
 
+def test_pr_loop_rereviews_unchanged_head_when_new_human_requirement_is_surfaced(
+    tmp_path, monkeypatch
+):
+    requirement_1 = HumanReviewRequirement(
+        source_type="PR comment",
+        author="maintainer",
+        created_at="2026-05-18T10:00:00Z",
+        url="https://github.com/OWNER/REPO/pull/77#issuecomment-1",
+        body="Keep the current audit trail.",
+    )
+    requirement_2 = HumanReviewRequirement(
+        source_type="PR comment",
+        author="maintainer",
+        created_at="2026-05-18T10:10:00Z",
+        url="https://github.com/OWNER/REPO/pull/77#issuecomment-2",
+        body="Also preserve the reviewer attribution.",
+    )
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(
+                state="approved",
+                summary="Codex approves the initial requirement.",
+                human_requirements_resolved=True,
+            ),
+            structured_pr_review(
+                state="approved",
+                summary="Codex approves after reviewing the new requirement.",
+                prior_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "resolved"},
+                    {"item_id": HUMAN_REQUIREMENTS_ACK_ITEM_ID, "disposition": "resolved"},
+                ],
+                human_requirements_resolved=True,
+            ),
+        ],
+        claude_outputs=[
+            structured_pr_review(
+                state="blocking",
+                summary="Claude needs one fix.",
+                blocking_items=["Fix the admission cleanup race."],
+                reviewer="Anthropic Claude",
+                human_requirements_resolved=True,
+            ),
+            structured_pr_review(
+                state="approved",
+                summary="Claude accepts the follow-up.",
+                prior_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "resolved"},
+                    {"item_id": HUMAN_REQUIREMENTS_ACK_ITEM_ID, "disposition": "resolved"},
+                ],
+                reviewer="Anthropic Claude",
+                human_requirements_resolved=True,
+            ),
+        ],
+        gemini_outputs=[
+            structured_coder_followup(
+                addressed_items=["item-1"],
+                remaining_items=[],
+                human_requirement_ids=["Requirement 1"],
+                reviewer="Google Gemini",
+            )
+        ],
+        advance_pr_head_on_coder_followup=False,
+    )
+    metadata = PullRequestMetadata(
+        number=77,
+        repo="OWNER/REPO",
+        title="Improve review prompt context",
+        head_branch="feature/review-context",
+        base_branch="main",
+        head_sha="abc123",
+        url="https://github.com/OWNER/REPO/pull/77",
+    )
+    contexts = iter(
+        [
+            PullRequestReviewContext(
+                metadata=metadata,
+                comments=(),
+                human_requirements=(requirement_1,),
+            ),
+            PullRequestReviewContext(
+                metadata=metadata,
+                comments=(),
+                human_requirements=(requirement_1, requirement_2),
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        "coding_review_agent_loop.orchestrator.get_pr_review_context",
+        lambda *args, **kwargs: next(contexts),
+    )
+    config = make_config(
+        tmp_path,
+        coder="gemini",
+        reviewer=("codex", "claude"),
+        max_rounds=2,
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    codex_reviews = [cmd for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]
+    assert len(codex_reviews) == 2
+    assert "Requirement 2" in codex_reviews[1][-1]
+
+
 def test_pr_loop_ignores_approved_followups_by_default(tmp_path):
     runner = FakeRunner(
         codex_outputs=[

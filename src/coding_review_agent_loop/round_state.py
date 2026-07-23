@@ -77,6 +77,11 @@ class PostedRoundMetadata:
     # Canonical bounded #535 evidence artifact on final summaries.  Keeping it
     # here makes resume idempotent without feeding evidence into analyzer agenda.
     evidence_reconciliation: dict | None = None
+    # Requirement IDs shown to a PR reviewer when this comment was posted.
+    # Persisting this lets a later round distinguish an approval that covered
+    # the current signed requirements from one made before new requirements
+    # were surfaced for the same immutable PR head.
+    surfaced_reviewer_requirement_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -178,6 +183,7 @@ def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
         "split_proposals": list(metadata.split_proposals),
         "result_mode": metadata.result_mode,
         "evidence_reconciliation": metadata.evidence_reconciliation,
+        "surfaced_reviewer_requirement_ids": list(metadata.surfaced_reviewer_requirement_ids),
     }
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -245,6 +251,9 @@ def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
                 payload.get("evidence_reconciliation")
                 if isinstance(payload.get("evidence_reconciliation"), dict)
                 else None
+            ),
+            surfaced_reviewer_requirement_ids=tuple(
+                str(item) for item in payload.get("surfaced_reviewer_requirement_ids", [])
             ),
         )
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:

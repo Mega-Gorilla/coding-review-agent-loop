@@ -4389,6 +4389,10 @@ def run_pr_loop(
                 if use_compact_pr_context
                 else None
             )
+            surfaced_reviewer_requirement_ids = _surfaced_reviewer_requirement_ids(
+                human_requirements,
+                requirement_scope="PR requirements",
+            )
             approved_review_outputs: list[tuple[str, str]] = []
             resumed_by_name = {
                 record.metadata.agent: record for record in (current_resume.completed_reviews if current_resume is not None else ())
@@ -4431,7 +4435,12 @@ def run_pr_loop(
                     and prior_approval.metadata.round_number < round_number
                     and (
                         not human_requirements
-                        or human_requirements_resolved(prior_approval.body)
+                        or (
+                            human_requirements_resolved(prior_approval.body)
+                            and set(surfaced_reviewer_requirement_ids).issubset(
+                                prior_approval.metadata.surfaced_reviewer_requirement_ids
+                            )
+                        )
                     )
                 ):
                     carried_approval_record = prior_approval
@@ -4644,6 +4653,7 @@ def run_pr_loop(
                                     new_items=tuple(reviewer_new_unresolved_items),
                                     state=review_state,
                                     model_used=review_model_used,
+                                    surfaced_reviewer_requirement_ids=surfaced_reviewer_requirement_ids,
                                 ),
                             ),
                         )
@@ -4694,6 +4704,7 @@ def run_pr_loop(
                                 new_items=tuple(reviewer_new_unresolved_items),
                                 state=review_state,
                                 model_used=review_model_used,
+                                surfaced_reviewer_requirement_ids=surfaced_reviewer_requirement_ids,
                             ),
                         ),
                     )
