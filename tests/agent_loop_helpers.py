@@ -236,6 +236,7 @@ class FakeRunner(Runner):
         issue_urls=None,
         public_response_outputs=None,
         advance_git_head_on_pr=True,
+        advance_pr_head_on_coder_followup=True,
         search_issues_payload=None,
         open_prs_payload=None,
     ):
@@ -317,6 +318,8 @@ class FakeRunner(Runner):
         self.issue_urls = list(issue_urls) if issue_urls is not None else None
         self.public_response_outputs = list(public_response_outputs or [])
         self.advance_git_head_on_pr = advance_git_head_on_pr
+        self.advance_pr_head_on_coder_followup = advance_pr_head_on_coder_followup
+        self._coder_followup_counter = 0
         # Results returned by the next `gh issue list --search` call (#476).
         # A list of dicts with number/title/url/body keys; consumed one call
         # at a time when a list of lists is provided, otherwise reused as-is.
@@ -480,6 +483,17 @@ class FakeRunner(Runner):
         self._agent_pr_counter += 1
         self.git_head = f"{self.git_head}-agent-{self._agent_pr_counter}"
 
+    def _maybe_advance_pr_head_for_coder_followup(self, cmd) -> None:
+        if not self.advance_pr_head_on_coder_followup:
+            return
+        if '"kind": "coder_followup"' not in "\n".join(cmd):
+            return
+        self._coder_followup_counter += 1
+        head_sha = self.pr_payload.get("headRefOid", self.git_head)
+        new_head_sha = f"{head_sha}-coder-{self._coder_followup_counter}"
+        self.pr_payload["headRefOid"] = new_head_sha
+        self.git_head = new_head_sha
+
     def _mark_agent_command_seen(self) -> None:
         self._agent_command_seen = True
 
@@ -551,6 +565,7 @@ class FakeRunner(Runner):
                 output = self._normalize_legacy_agent_output(output, "\n".join(cmd))
             self._maybe_write_public_response_file(cmd)
             self._maybe_advance_git_head_for_agent_pr(output)
+            self._maybe_advance_pr_head_for_coder_followup(cmd)
             self._mark_agent_command_seen()
             log_path.write_text(f"$ {' '.join(cmd)}\n\n{output}", encoding="utf-8")
             return CommandResult(cmd, cwd_path, output, "", returncode)
@@ -573,6 +588,7 @@ class FakeRunner(Runner):
                 out_path = Path(cmd[cmd.index("--output-last-message") + 1])
                 out_path.write_text(public_response, encoding="utf-8")
             self._maybe_advance_git_head_for_agent_pr(public_response)
+            self._maybe_advance_pr_head_for_coder_followup(cmd)
             self._mark_agent_command_seen()
             log_path.write_text(f"$ {' '.join(cmd)}\n\ncodex completed", encoding="utf-8")
             return CommandResult(cmd, cwd_path, stdout, "", returncode)
@@ -591,6 +607,7 @@ class FakeRunner(Runner):
                 output = self._normalize_legacy_agent_output(output, "\n".join(cmd))
             self._maybe_write_public_response_file(cmd)
             self._maybe_advance_git_head_for_agent_pr(output)
+            self._maybe_advance_pr_head_for_coder_followup(cmd)
             self._mark_agent_command_seen()
             log_path.write_text(f"$ {' '.join(cmd)}\n\n{output}", encoding="utf-8")
             return CommandResult(cmd, cwd_path, output, "", returncode)
@@ -606,6 +623,7 @@ class FakeRunner(Runner):
                 stdout, returncode = output
             self._maybe_write_public_response_file(cmd)
             self._maybe_advance_git_head_for_agent_pr(stdout)
+            self._maybe_advance_pr_head_for_coder_followup(cmd)
             self._mark_agent_command_seen()
             log_path.write_text(f"$ {' '.join(cmd)}\n\n{stdout}", encoding="utf-8")
             return CommandResult(cmd, cwd_path, stdout, "", returncode)
@@ -624,6 +642,7 @@ class FakeRunner(Runner):
             if isinstance(output, str):
                 output = self._normalize_legacy_agent_output(output, "\n".join(cmd))
             self._maybe_advance_git_head_for_agent_pr(output)
+            self._maybe_advance_pr_head_for_coder_followup(cmd)
             self._mark_agent_command_seen()
             return CommandResult(cmd, cwd_path, output, "", returncode)
 
@@ -644,6 +663,7 @@ class FakeRunner(Runner):
                 out_path = Path(cmd[cmd.index("--output-last-message") + 1])
                 out_path.write_text(public_response, encoding="utf-8")
             self._maybe_advance_git_head_for_agent_pr(public_response)
+            self._maybe_advance_pr_head_for_coder_followup(cmd)
             self._mark_agent_command_seen()
             return CommandResult(cmd, cwd_path, stdout, "", returncode)
 
