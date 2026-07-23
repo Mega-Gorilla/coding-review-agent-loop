@@ -20,7 +20,13 @@ from coding_review_agent_loop.prompts import (
     COMPACT_PLANNING_VOLATILE_TAIL_MARKER,
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
 )
-from coding_review_agent_loop.protocol import UnresolvedReviewItem
+from coding_review_agent_loop.protocol import (
+    ApprovedFollowup,
+    ParsedPlanReview,
+    PlanReviewItems,
+    ReviewItemDisposition,
+    UnresolvedReviewItem,
+)
 from coding_review_agent_loop.salvage import (
     SalvageContext,
     capture_salvage_artifacts,
@@ -457,6 +463,159 @@ def test_issue_loop_plan_first_revises_until_all_reviewers_approve(tmp_path):
     config = make_config(tmp_path)
 
     assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+def test_issue_loop_plan_first_stops_on_incomplete_review_without_coder_followup(tmp_path):
+    """An explicit inability to review is an agent failure, not a new blocker."""
+    runner = FakeRunner(
+        claude_outputs=[
+            structured_plan_state(summary="Initial plan."),
+        ],
+        codex_outputs=[
+            structured_plan_review(
+                state="blocking",
+                summary="Review incomplete; unable to verify the retry path without further inspection.",
+            ),
+        ],
+    )
+    config = make_config(tmp_path, max_rounds=3)
+
+    with pytest.raises(AgentLoopError, match="reviewer-internal error"):
+        run_issue_loop(runner, issue_number=56, config=config, plan_first=True)
+
+    claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert len(claude_calls) == 1
+    assert "Review incomplete" not in "\n".join(runner.comments)
+
+def test_issue_loop_plan_first_resume_ignores_incomplete_wording_outside_summary(tmp_path):
+    """A resumed structured review must be scanned the same way a fresh one is.
+
+    Before the resumed-branch summary reconstruction fix, `summary` was
+    rebuilt from the raw (unrendered) response text even when a structured
+    review had already been parsed, so incomplete-review wording living in an
+    unrelated field (here, `future_followups`) could leak into the summary
+    candidate text and falsely trip the incomplete-review heuristic only
+    after a resume.
+    """
+    round1_plan = "Initial plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    coder_round1_comment = _attach_round_metadata(
+        round1_plan,
+        PostedRoundMetadata(
+            flow="plan",
+            role="coder",
+            agent="Claude",
+            round_number=1,
+            subject=_plan_subject(round1_plan),
+        ),
+    )
+    resumed_reviewer_comment = _attach_round_metadata(
+        structured_plan_review(
+            state="blocking",
+            summary="Reviewed the updated plan; still recommend revisiting the retry approach later.",
+            future_followups=["Could not confirm the retry path in CI end-to-end; revisit later."],
+        ),
+        PostedRoundMetadata(
+            flow="plan",
+            role="reviewer",
+            agent="Codex",
+            round_number=1,
+            subject=_plan_subject(round1_plan),
+            state="blocking",
+        ),
+    )
+    runner = FakeRunner(
+        issue_comments=[
+            {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:00:00Z", "body": coder_round1_comment},
+            {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:05:00Z", "body": resumed_reviewer_comment},
+        ],
+        claude_outputs=[structured_plan_revision(summary="Revised plan addressing round 1 feedback.")],
+        codex_outputs=[structured_plan_review(summary="Plan looks sound now.")],
+    )
+    config = make_config(tmp_path, coder="claude", reviewer=("codex",), max_rounds=3)
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert len(claude_calls) == 1
+
+def test_issue_loop_plan_first_resume_stops_on_incomplete_review_in_summary(tmp_path):
+    """Genuine incomplete-review wording must still be caught after a resume."""
+    round1_plan = "Initial plan.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    coder_round1_comment = _attach_round_metadata(
+        round1_plan,
+        PostedRoundMetadata(
+            flow="plan",
+            role="coder",
+            agent="Claude",
+            round_number=1,
+            subject=_plan_subject(round1_plan),
+        ),
+    )
+    resumed_reviewer_comment = _attach_round_metadata(
+        structured_plan_review(
+            state="blocking",
+            summary="Review incomplete; unable to confirm the retry path without further inspection.",
+        ),
+        PostedRoundMetadata(
+            flow="plan",
+            role="reviewer",
+            agent="Codex",
+            round_number=1,
+            subject=_plan_subject(round1_plan),
+            state="blocking",
+        ),
+    )
+    runner = FakeRunner(
+        issue_comments=[
+            {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:00:00Z", "body": coder_round1_comment},
+            {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:05:00Z", "body": resumed_reviewer_comment},
+        ],
+    )
+    config = make_config(tmp_path, coder="claude", reviewer=("codex",), max_rounds=3)
+
+    with pytest.raises(AgentLoopError, match="reviewer-internal error"):
+        run_issue_loop(runner, issue_number=56, config=config, plan_first=True)
+
+    claude_calls = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert len(claude_calls) == 0
+
+@pytest.mark.parametrize(
+    ("state", "blocking", "same_plan", "summary", "expected"),
+    [
+        ("blocking", (), (), "Unable to verify the plan without more context.", True),
+        (
+            "blocking",
+            (ApprovedFollowup(reviewer="Codex", text="Add a migration step."),),
+            (),
+            "Unable to verify the plan without more context.",
+            False,
+        ),
+        ("approved", (), (), "Unable to verify the plan without more context.", False),
+    ],
+)
+def test_is_incomplete_plan_review(state, blocking, same_plan, summary, expected):
+    parsed_review = ParsedPlanReview(
+        state=state,
+        summary=summary,
+        items=PlanReviewItems(blocking=blocking, same_plan=same_plan, future=()),
+        dispositions=(),
+    )
+    assert orchestrator_module._is_incomplete_plan_review(parsed_review) is expected
+
+def test_is_incomplete_plan_review_matches_disposition_note():
+    parsed_review = ParsedPlanReview(
+        state="blocking",
+        summary="",
+        items=PlanReviewItems(blocking=(), same_plan=(), future=()),
+        dispositions=(
+            ReviewItemDisposition(
+                item_id="item-1",
+                reviewer="Codex",
+                disposition="still blocking",
+                note="Resolution could not be confirmed; plan and referenced files need review.",
+            ),
+        ),
+    )
+    assert orchestrator_module._is_incomplete_plan_review(parsed_review) is True
 
 def test_issue_loop_structured_plan_state_public_comment_renders_markdown_and_preserves_metadata(tmp_path):
     raw_structured_plan = structured_plan_state(
