@@ -306,6 +306,34 @@ def _extract_round_metadata_records(comments: Sequence[object], *, flow: str) ->
     return tuple(records)
 
 
+def _latest_pr_approved_reviews_for_head(
+    comments: Sequence[object],
+    *,
+    head_sha: str | None,
+    configured_reviewers: Sequence[AgentName],
+) -> dict[str, PostedRoundRecord]:
+    """Return each reviewer's latest approval for the current immutable PR head."""
+    if not head_sha:
+        return {}
+    configured_names = {agent_display_name(agent) for agent in configured_reviewers}
+    latest_by_reviewer: dict[str, PostedRoundRecord] = {}
+    for record in reversed(_extract_round_metadata_records(comments, flow="pr")):
+        metadata = record.metadata
+        if (
+            metadata.subject != head_sha
+            or metadata.role != "reviewer"
+            or metadata.agent not in configured_names
+            or metadata.agent in latest_by_reviewer
+        ):
+            continue
+        latest_by_reviewer[metadata.agent] = record
+    return {
+        reviewer: record
+        for reviewer, record in latest_by_reviewer.items()
+        if record.metadata.state == "approved"
+    }
+
+
 def _prior_item_ledger_signature(items: Sequence[UnresolvedReviewItem]) -> tuple[tuple[str, str, int, str, str, str | None, tuple[str, ...]], ...]:
     return tuple(
         (

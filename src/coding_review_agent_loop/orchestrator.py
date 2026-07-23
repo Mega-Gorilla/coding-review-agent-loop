@@ -256,6 +256,7 @@ from .round_state import (
     _deserialize_unresolved_item,
     _encode_round_metadata,
     _extract_round_metadata_records,
+    _latest_pr_approved_reviews_for_head,
     _max_unresolved_item_number_from_records,
     _plan_subject,
     _prior_item_ledger_signature,
@@ -4392,6 +4393,11 @@ def run_pr_loop(
             resumed_by_name = {
                 record.metadata.agent: record for record in (current_resume.completed_reviews if current_resume is not None else ())
             }
+            unchanged_head_approvals = _latest_pr_approved_reviews_for_head(
+                pr_comments,
+                head_sha=pr_metadata.head_sha,
+                configured_reviewers=configured_reviewers,
+            )
             skip_reviewers_for_recovery = bool(
                 current_resume is not None and current_resume.unrecorded_head_advance
             )
@@ -4405,6 +4411,7 @@ def run_pr_loop(
             for reviewer in (() if skip_reviewers_for_recovery else configured_reviewers):
                 reviewer_name = agent_display_name(reviewer)
                 resumed_record = resumed_by_name.get(reviewer_name)
+                carried_approval_record: PostedRoundRecord | None = None
                 if resumed_record is not None:
                     review_output = resumed_record.body
                     review_model_used = resumed_record.metadata.model_used
@@ -4419,6 +4426,32 @@ def run_pr_loop(
                     review_state = parsed_review.state
                     reviewer_new_unresolved_items = list(resumed_record.metadata.new_items)
                     log(config, f"Round {round_number}: resuming {reviewer_name}'s completed review")
+                elif (
+                    (prior_approval := unchanged_head_approvals.get(reviewer_name)) is not None
+                    and prior_approval.metadata.round_number < round_number
+                    and (
+                        not human_requirements
+                        or human_requirements_resolved(prior_approval.body)
+                    )
+                ):
+                    carried_approval_record = prior_approval
+                    review_output = prior_approval.body
+                    review_model_used = prior_approval.metadata.model_used
+                    reparsed_review = parse_review(review_output, reviewer=reviewer_name)
+                    parsed_review = ParsedReview(
+                        state="approved",
+                        summary=review_freeform_summary_text(review_output),
+                        blocking_items=reparsed_review.blocking_items,
+                        followups=reparsed_review.followups,
+                        dispositions=(),
+                    )
+                    review_state = parsed_review.state
+                    reviewer_new_unresolved_items = []
+                    log(
+                        config,
+                        f"Round {round_number}: skipping {reviewer_name}; it approved unchanged "
+                        f"PR head {current_pr_subject} in round {prior_approval.metadata.round_number}",
+                    )
                 else:
                     context_mode = "compact" if use_compact_pr_context else "full"
                     log(
@@ -4527,7 +4560,7 @@ def run_pr_loop(
                     f"{_describe_pr_review_outcome(parsed_review, has_blocking_summary=has_blocking_summary)}",
                 )
                 if review_state == "blocking":
-                    if resumed_record is None:
+                    if resumed_record is None and carried_approval_record is None:
                         if parsed_review.blocking_items:
                             for blocking_item in parsed_review.blocking_items:
                                 tracked_item = _next_unresolved_item(
@@ -4615,11 +4648,12 @@ def run_pr_loop(
                             ),
                         )
                     else:
-                        round_new_unresolved_items.extend(reviewer_new_unresolved_items)
+                        if resumed_record is not None:
+                            round_new_unresolved_items.extend(reviewer_new_unresolved_items)
                     continue
 
                 approved_review_outputs.append((reviewer_name, review_output))
-                if resumed_record is None:
+                if resumed_record is None and carried_approval_record is None:
                     if config.approved_followups != "ignore":
                         for followup in parsed_review.followups.future:
                             tracked_item = _next_unresolved_item(
@@ -4664,7 +4698,8 @@ def run_pr_loop(
                         ),
                     )
                 else:
-                    round_new_unresolved_items.extend(reviewer_new_unresolved_items)
+                    if resumed_record is not None:
+                        round_new_unresolved_items.extend(reviewer_new_unresolved_items)
 
             if use_compact_pr_context:
                 unresolved_items, future_from_prior_items = _apply_unresolved_item_dispositions(

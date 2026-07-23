@@ -723,6 +723,7 @@ def test_pr_loop_revalidates_latest_coder_output_against_refreshed_human_require
             ],
             "reviews": [],
         },
+        advance_pr_head_on_coder_followup=False,
     )
     config = make_config(tmp_path, coder="claude", reviewer="codex", max_rounds=2)
     metadata = PullRequestMetadata(
@@ -1392,6 +1393,57 @@ def test_pr_loop_requires_all_reviewers_to_approve(tmp_path):
     assert len(metadata_fetches) == 1
     assert ["pytest", "tests/test_agent_loop.py"] in commands
     assert ["gh", "pr", "merge", "77", "--repo", "OWNER/REPO", "--merge"] in commands
+
+
+def test_pr_loop_skips_prior_approval_when_pr_head_is_unchanged(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(
+                state="approved",
+                summary="Codex approves the initial head.",
+                reviewer="OpenAI Codex",
+            )
+        ],
+        claude_outputs=[
+            structured_pr_review(
+                state="blocking",
+                summary="Claude needs one fix.",
+                blocking_items=["Fix the admission cleanup race."],
+                reviewer="Anthropic Claude",
+            ),
+            structured_pr_review(
+                state="approved",
+                summary="Claude accepts the follow-up.",
+                prior_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+                reviewer="Anthropic Claude",
+            ),
+        ],
+        gemini_outputs=[
+            structured_coder_followup(
+                addressed_items=["item-1"],
+                remaining_items=[],
+                reviewer="Google Gemini",
+            )
+        ],
+        advance_pr_head_on_coder_followup=False,
+    )
+    config = make_config(
+        tmp_path,
+        coder="gemini",
+        reviewer=("codex", "claude"),
+        max_rounds=2,
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    codex_reviews = [
+        cmd
+        for cmd, _cwd in runner.commands
+        if cmd[:2] == ["codex", "exec"]
+    ]
+    assert len(codex_reviews) == 1
+    assert "round 1" in codex_reviews[0][-1]
+
 
 def test_pr_loop_ignores_approved_followups_by_default(tmp_path):
     runner = FakeRunner(
@@ -3216,6 +3268,7 @@ def test_pr_loop_routes_unrecorded_head_advance_through_coder_before_reviewers(t
                 {"author": {"login": "bot"}, "createdAt": "2026-05-20T09:01:00Z", "body": old_review_comment},
             ],
         },
+        advance_pr_head_on_coder_followup=False,
     )
     config = make_config(tmp_path, reviewer="codex")
 
