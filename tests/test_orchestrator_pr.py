@@ -2341,6 +2341,34 @@ def test_pr_loop_carries_prior_item_notes_without_creating_duplicate_blocker_ite
     assert "Codex: include API error path too" in second_coder_prompt
     assert "[item-2]" not in second_coder_prompt
 
+def test_pr_loop_stops_on_incomplete_review_without_coder_followup(tmp_path):
+    """An explicit inability to review is an agent failure, not a new blocker."""
+    runner = FakeRunner(
+        codex_outputs=[
+            "Needs regression coverage.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+            "Review incomplete; item-1 requires further inspection of the PR diff "
+            "and referenced files before a disposition can be confirmed."
+            + prior_item_dispositions(
+                "[item-1] still blocking: Resolution could not be confirmed; "
+                "PR diff and referenced files need review."
+            )
+            + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+        ],
+        claude_outputs=[
+            "Added regression coverage.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+    )
+    config = make_config(tmp_path, max_rounds=3)
+
+    with pytest.raises(AgentLoopError, match="reviewer-internal error"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    coder_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert len(coder_commands) == 1
+    assert len(runner.comments) == 2
+    assert "Review incomplete" not in "\n".join(runner.comments)
+
+
 def test_pr_loop_posts_human_readable_item_labels_in_new_and_prior_sections(tmp_path):
     runner = FakeRunner(
         claude_outputs=[
