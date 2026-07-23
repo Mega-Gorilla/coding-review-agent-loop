@@ -2698,6 +2698,24 @@ def _format_incomplete_pr_review_comment(
     return "\n".join(lines)
 
 
+def _is_incomplete_plan_review(parsed_review: ParsedPlanReview) -> bool:
+    """Identify a plan reviewer failure reported as a blocking verdict.
+
+    Mirrors `_is_incomplete_pr_review` for the plan review flow: a reviewer
+    occasionally returns a syntactically valid blocking response that only
+    says it could not inspect the plan or confirm a prior item. That is not
+    actionable feedback for the coder. Keep this deliberately narrow so
+    substantive freeform blocking summaries retain their existing behavior.
+    """
+    if parsed_review.state != "blocking":
+        return False
+    if parsed_review.items.blocking or parsed_review.items.same_plan:
+        return False
+    candidate_texts = [parsed_review.summary]
+    candidate_texts.extend(disposition.note for disposition in parsed_review.dispositions)
+    return any(text and _INCOMPLETE_PR_REVIEW_RE.search(text) for text in candidate_texts)
+
+
 def _describe_plan_review_outcome(parsed_review: ParsedPlanReview) -> str:
     if parsed_review.state == "approved":
         return "approved"
@@ -3415,7 +3433,11 @@ def _run_plan_first_loop(
                 )
                 parsed_review = ParsedPlanReview(
                     state=resumed_record.metadata.state or parse_plan_state(review_output),
-                    summary=review_freeform_summary_text(review_output),
+                    summary=(
+                        structured_review.summary
+                        if structured_review is not None
+                        else review_freeform_summary_text(review_output)
+                    ),
                     items=(
                         structured_review.items
                         if structured_review is not None
@@ -3494,6 +3516,21 @@ def _run_plan_first_loop(
                 )
                 review_state = parsed_review.state
                 reviewer_new_unresolved_items = []
+
+            if _is_incomplete_plan_review(parsed_review):
+                log(
+                    config,
+                    f"Planning round {round_number}: {reviewer_name} did not complete its plan review "
+                    "and reported no actionable blocking plan issues or Same-Plan follow-ups; "
+                    "stopping without a coder follow-up",
+                )
+                raise AgentLoopError(
+                    f"{reviewer_name} did not complete plan review and reported no actionable "
+                    "blocking plan issues or Same-Plan follow-ups. This is a reviewer-internal error; "
+                    "agent-loop stopped before a coder follow-up. Rerun or switch the reviewer/model "
+                    "after resolving the reviewer environment."
+                )
+
             log(
                 config,
                 "Planning round "
