@@ -987,6 +987,7 @@ run relevant tests, commit, push, and open a pull request against {config.base}.
 {_memory_block(memory)}
 {_salvage_summary_block(salvage_summary)}
 
+{_agent_unavailable_guidance(coder_signature)}
 Do not wait for {reviewer_name} yourself; this local orchestrator will run {reviewer_name} after
 you create the PR. Use blocking here to hand the PR to {reviewer_name} for review. If you cannot
 safely proceed and cannot create a PR, explain the blocker and end with `AGENT_STATE: blocking`

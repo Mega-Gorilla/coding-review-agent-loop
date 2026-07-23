@@ -2115,6 +2115,14 @@ def test_coder_prompt_includes_documentation_reminder(tmp_path):
         assert "user-facing subcommand" in prompt
 
 
+def test_issue_prompt_includes_agent_unavailable_guidance(tmp_path):
+    prompt = build_issue_prompt(1, make_config(tmp_path))
+
+    assert '"kind": "agent_unavailable"' in prompt
+    assert "<!-- AGENT_UNAVAILABLE -->" in prompt
+    assert "do not invent a blocking code finding or claim approval" in prompt
+
+
 def test_reviewer_prompt_includes_documentation_check(tmp_path):
     config = make_config(tmp_path, reviewer=("codex",))
     phrase = "Flag missing or stale documentation as a blocking item"
