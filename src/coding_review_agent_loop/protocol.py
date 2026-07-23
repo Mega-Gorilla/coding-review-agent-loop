@@ -22,8 +22,12 @@ PLAN_STATE_RE = re.compile(r"<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*--
 _PR_MARKER_VALUE_RE = re.compile(r"(?m)^\s*<!--\s*AGENT_PR:\s*(.*?)\s*-->\s*$", re.I)
 GH_PR_URL_RE = re.compile(r"/pull/(\d+)(?:\b|$)")
 CLARIFY_RE = re.compile(r"<!--\s*AGENT_CLARIFY\s*-->", re.I)
+AGENT_UNAVAILABLE_RE = re.compile(r"<!--\s*AGENT_UNAVAILABLE\s*-->", re.I)
 # Standalone variants: marker must occupy its own line.
 _STANDALONE_CLARIFY_RE = re.compile(r"(?m)^\s*<!--\s*AGENT_CLARIFY\s*-->\s*$", re.I)
+_STANDALONE_AGENT_UNAVAILABLE_RE = re.compile(
+    r"(?m)^\s*<!--\s*AGENT_UNAVAILABLE\s*-->\s*$", re.I
+)
 _STANDALONE_STATE_RE = re.compile(r"(?m)^\s*<!--\s*AGENT_STATE:\s*(approved|blocking)\s*-->\s*$", re.I)
 _STANDALONE_PLAN_STATE_RE = re.compile(
     r"(?m)^\s*<!--\s*AGENT_PLAN_STATE:\s*(approved|blocking)\s*-->\s*$", re.I
@@ -134,6 +138,23 @@ class ParsedReview:
     followups: ApprovedFollowups
     dispositions: tuple[ReviewItemDisposition, ...]
     raw_dispositions_text: str = ""
+
+
+@dataclass(frozen=True)
+class AgentUnavailable:
+    """An agent-declared inability to complete the assigned operation."""
+
+    schema_version: int
+    kind: str
+    retryable: bool
+    category: str
+    summary: str
+    suggested_action: str
+
+
+AGENT_UNAVAILABLE_CATEGORIES = frozenset(
+    {"environment", "permissions", "provider", "tooling", "unknown"}
+)
 
 
 @dataclass(frozen=True)
@@ -1106,6 +1127,74 @@ def _consume_structured_footer_and_signature(
                 f"{context_label} footer {state_marker_name} must match the payload state."
             )
     return payload
+
+
+def _consume_agent_unavailable_footer_and_signature(
+    *, payload: dict[str, object], trailing: str
+) -> dict[str, object]:
+    trailing = trailing.lstrip()
+    marker_match = _STANDALONE_AGENT_UNAVAILABLE_RE.search(trailing)
+    if marker_match is None:
+        raise AgentLoopError(
+            "Structured agent-unavailable response must place <!-- AGENT_UNAVAILABLE --> "
+            "after the JSON object."
+        )
+    if trailing[: marker_match.start()].strip():
+        raise AgentLoopError(
+            "Structured agent-unavailable response may not include prose between the JSON object "
+            "and the AGENT_UNAVAILABLE footer."
+        )
+    signature = trailing[marker_match.end() :].lstrip()
+    signature_match = re.match(r"^--\s+\S[^\n]*(?:\n)?$", signature)
+    if signature_match is None or signature[signature_match.end() :].strip():
+        raise AgentLoopError(
+            "Structured agent-unavailable response may not include trailing prose after "
+            "the footer and signature."
+        )
+    return payload
+
+
+def parse_agent_unavailable(text: str) -> AgentUnavailable | None:
+    """Parse the shared, terminal agent-unavailable response envelope."""
+    text, _status = normalize_response_file_structured_text(text)
+    extracted = _extract_json_object_prefix(text)
+    if extracted is None:
+        return None
+    payload, trailing = extracted
+    if payload.get("kind") != "agent_unavailable":
+        return None
+    _consume_agent_unavailable_footer_and_signature(payload=payload, trailing=trailing)
+    _require_supported_schema_version(payload)
+    _expect_exact_keys(
+        payload,
+        context="agent_unavailable",
+        required={
+            "schema_version",
+            "kind",
+            "retryable",
+            "category",
+            "summary",
+            "suggested_action",
+        },
+    )
+    category = _expect_non_empty_string(
+        payload["category"], context="agent_unavailable.category"
+    )
+    if category not in AGENT_UNAVAILABLE_CATEGORIES:
+        allowed = ", ".join(sorted(AGENT_UNAVAILABLE_CATEGORIES))
+        raise AgentLoopError(
+            f"agent_unavailable.category must be one of: {allowed}."
+        )
+    return AgentUnavailable(
+        schema_version=_expect_int(payload["schema_version"], context="schema_version"),
+        kind="agent_unavailable",
+        retryable=_expect_bool(payload["retryable"], context="agent_unavailable.retryable"),
+        category=category,
+        summary=_expect_non_empty_string(payload["summary"], context="agent_unavailable.summary"),
+        suggested_action=_expect_non_empty_string(
+            payload["suggested_action"], context="agent_unavailable.suggested_action"
+        ),
+    )
 
 
 def _extract_structured_pr_review_payload(text: str) -> dict[str, object] | None:

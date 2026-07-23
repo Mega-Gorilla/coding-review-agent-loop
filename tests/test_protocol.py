@@ -36,6 +36,7 @@ from coding_review_agent_loop.protocol import (
     _extract_structured_plan_revision_payload,
     _extract_structured_pr_review_payload,
     normalize_response_file_structured_text,
+    parse_agent_unavailable,
     parse_approved_followups,
     parse_human_requirements_acknowledgement,
     parse_pr_review,
@@ -1697,6 +1698,29 @@ def test_parse_structured_pr_review_strips_verdict_and_sections_from_json_summar
 
     assert parsed is not None
     assert parsed.summary == "Need one more regression test."
+
+
+def test_parse_agent_unavailable_requires_terminal_envelope():
+    payload = (
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "agent_unavailable",
+                "retryable": False,
+                "category": "permissions",
+                "summary": "The review sandbox cannot read the assigned checkout.",
+                "suggested_action": "Grant read access and rerun the reviewer.",
+            }
+        )
+        + "\n<!-- AGENT_UNAVAILABLE -->\n-- OpenAI Codex"
+    )
+
+    parsed = parse_agent_unavailable(payload)
+
+    assert parsed is not None
+    assert parsed.retryable is False
+    assert parsed.category == "permissions"
+    assert parse_agent_unavailable(structured_pr_review()) is None
 
 
 def test_parse_structured_pr_review_rejects_kind_mismatch():

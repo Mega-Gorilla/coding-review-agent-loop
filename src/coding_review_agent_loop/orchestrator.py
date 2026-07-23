@@ -113,6 +113,7 @@ from .prompts import (
     render_coder_human_requirements_prompt_context,
 )
 from .protocol import (
+    AgentUnavailable,
     ApprovedFollowups,
     DISCUSS_FAILED_OUTCOME,
     DISCUSS_RESEARCH_TARGET_VALUES,
@@ -144,6 +145,7 @@ from .protocol import (
     is_clarification_request,
     parse_human_requirements_acknowledgement,
     parse_agent_state,
+    parse_agent_unavailable,
     parse_plan_review,
     parse_plan_review_items,
     parse_plan_state,
@@ -415,6 +417,23 @@ class ValidatedAgentResponse:
     # Model the agent actually ran, for the dynamic signature (#332). Carried from
     # AgentResult.model_used so the orchestrator render sites can stamp it.
     model_used: str | None = None
+
+
+class _AgentUnavailableResponse(AgentLoopError):
+    """Internal control flow for a validated agent-unavailable envelope."""
+
+    def __init__(self, unavailable: AgentUnavailable) -> None:
+        self.unavailable = unavailable
+        super().__init__(unavailable.summary)
+
+
+def _capture_agent_invocation(
+    invoke: Callable[[], ValidatedAgentResponse],
+) -> tuple[ValidatedAgentResponse | None, AgentInvocationError | None]:
+    try:
+        return invoke(), None
+    except AgentInvocationError as exc:
+        return None, exc
 
 
 @dataclass(frozen=True)
@@ -1220,6 +1239,11 @@ def _failure_suggestion(
     combined = f"{reason} {classification_text}"
     if category == "unsupported_model":
         return _unsupported_model_suggestion(unsupported_model_diagnostic)
+    if category == "agent-unavailable":
+        return (
+            "Suggestion: resolve the reported agent environment/provider/tooling problem, "
+            "or switch that agent/model before re-running."
+        )
     if category == "transient":
         if _QUOTA_RATE_LIMIT_RE.search(combined):
             return (
@@ -1307,6 +1331,8 @@ def _format_invalid_agent_response_error(
         category_hint = " Failure category: deterministic (may require a code fix)."
     elif category == "timeout":
         category_hint = " Failure category: timeout (the agent exceeded the configured time limit)."
+    elif category == "agent-unavailable":
+        category_hint = " Failure category: agent-unavailable (the agent explicitly could not continue)."
     if not classification_text:
         classification_text = (result.raw_output or result.text or "") if result is not None else ""
     unsupported_model_diagnostic = None
@@ -1832,6 +1858,9 @@ def _run_validated_agent(
                 else None
             )
             try:
+                unavailable = parse_agent_unavailable(text)
+                if unavailable is not None:
+                    raise _AgentUnavailableResponse(unavailable)
                 marker_value = validate(text)
                 if response_file_pre_status == "leading-public-response-marker-recovered":
                     log(
@@ -1839,6 +1868,21 @@ def _run_validated_agent(
                         f"{agent_name}: response file contained stdout filtering marker and "
                         "validated after stripping it",
                     )
+            except _AgentUnavailableResponse as exc:
+                unavailable = exc.unavailable
+                last_error = (
+                    f"agent explicitly reported it cannot continue ({unavailable.category}): "
+                    f"{unavailable.summary}. Suggested action: {unavailable.suggested_action}"
+                )
+                classification_text = text
+                last_classification_text = classification_text
+                last_failure_category = "agent-unavailable"
+                should_retry = unavailable.retryable
+                log(
+                    config,
+                    f"{agent_name}: explicitly reported agent-unavailable "
+                    f"({unavailable.category}, retryable={'yes' if unavailable.retryable else 'no'})",
+                )
             except AgentLoopError as exc:
                 last_error = str(exc)
                 classification_text = _agent_failure_classification_text(result, phase="validation")
@@ -2617,6 +2661,41 @@ def _describe_pr_review_outcome(parsed_review: ParsedReview, *, has_blocking_sum
     if has_same_pr:
         return "blocking with same-PR follow-ups"
     return "blocking with blocking findings"
+
+
+def _format_incomplete_pr_review_comment(
+    *,
+    pr_number: int,
+    unavailable_reviewers: Mapping[AgentName, AgentInvocationError],
+    approved_reviewer_names: Sequence[str],
+) -> str:
+    lines = [
+        "**Review status: Incomplete**",
+        "",
+        "No coder follow-up was started for the unavailable reviewer(s). "
+        "Their failure is not a code finding and does not count as approval.",
+        "",
+        "### Missing required reviewer input",
+    ]
+    for reviewer, failure in unavailable_reviewers.items():
+        category = failure.failure_category or "unknown"
+        lines.append(f"- {agent_display_name(reviewer)}: {category}")
+    if approved_reviewer_names:
+        lines.extend(
+            [
+                "",
+                "### Healthy reviewer approvals",
+                *[f"- {name}" for name in approved_reviewer_names],
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "Resolve the reviewer problem or rerun with a replacement reviewer/model "
+            f"before merging PR #{pr_number}.",
+        ]
+    )
+    return "\n".join(lines)
 
 
 def _describe_plan_review_outcome(parsed_review: ParsedPlanReview) -> str:
@@ -4407,6 +4486,7 @@ def run_pr_loop(
         validate_open_pr(runner, config=config, pr_number=pr_number)
         memory = prepare_agent_memory(runner, config)
         reviewer_session_ids: dict[AgentName, str | None] = {}
+        unavailable_reviewer_failures: dict[AgentName, AgentInvocationError] = {}
         configured_reviewers = reviewers(config)
         unresolved_items: list[UnresolvedReviewItem] = []
         pr_compact_prior_summaries: list[str] = []
@@ -4507,6 +4587,13 @@ def run_pr_loop(
                 )
             for reviewer in (() if skip_reviewers_for_recovery else configured_reviewers):
                 reviewer_name = agent_display_name(reviewer)
+                if reviewer in unavailable_reviewer_failures:
+                    log(
+                        config,
+                        f"Round {round_number}: skipping unavailable reviewer {reviewer_name}; "
+                        "it already exhausted its retry budget in this run",
+                    )
+                    continue
                 resumed_record = resumed_by_name.get(reviewer_name)
                 carried_approval_record: PostedRoundRecord | None = None
                 if resumed_record is not None:
@@ -4571,51 +4658,74 @@ def run_pr_loop(
                         if use_compact_pr_context
                         else None
                     )
-                    review_response = _run_validated_agent(
-                        runner,
-                        agent=reviewer,
-                        config=config,
-                        prompt=build_review_prompt(
-                            pr_number,
-                            round_number,
-                            config,
-                            reviewer=reviewer,
-                            pr_metadata=pr_metadata,
-                            pr_checks=reviewer_pr_checks,
-                            memory=memory,
-                            issue_context=issue_context,
-                            human_requirements=human_requirements,
-                            unresolved_items=prior_unresolved_items,
-                            compact_context=use_compact_pr_context,
-                            compact_prior=(
-                                CompactPriorContext(tuple(pr_compact_prior_summaries))
-                                if use_compact_pr_context
-                                else None
+                    review_response, review_failure = _capture_agent_invocation(
+                        lambda: _run_validated_agent(
+                            runner,
+                            agent=reviewer,
+                            config=config,
+                            prompt=build_review_prompt(
+                                pr_number,
+                                round_number,
+                                config,
+                                reviewer=reviewer,
+                                pr_metadata=pr_metadata,
+                                pr_checks=reviewer_pr_checks,
+                                memory=memory,
+                                issue_context=issue_context,
+                                human_requirements=human_requirements,
+                                unresolved_items=prior_unresolved_items,
+                                compact_context=use_compact_pr_context,
+                                compact_prior=(
+                                    CompactPriorContext(tuple(pr_compact_prior_summaries))
+                                    if use_compact_pr_context
+                                    else None
+                                ),
+                                compact_tail=compact_tail,
+                                compact_coder_summary=compact_coder_summary,
+                                compact_coder_tests_run=compact_coder_tests_run,
                             ),
-                            compact_tail=compact_tail,
-                            compact_coder_summary=compact_coder_summary,
-                            compact_coder_tests_run=compact_coder_tests_run,
-                        ),
-                        session_id=None if use_compact_pr_context else reviewer_session_ids.get(reviewer),
-                        marker_description="<!-- AGENT_STATE: approved|blocking -->",
-                        validate=lambda text, reviewer_name=reviewer_name, items=prior_unresolved_items: _validate_review_response(
-                            text,
-                            reviewer=reviewer_name,
-                            unresolved_items=items,
-                            current_round_items=round_new_unresolved_items,
-                        ),
-                        usage_context=usage_context,
-                        use_repair=True,
-                        repair_expected_kind="pr_review",
-                        repair_reviewer_requirement_ids=_surfaced_reviewer_requirement_ids(
-                            human_requirements,
-                            requirement_scope="PR requirements",
-                        ),
-                        repair_allowed_prior_item_ids=tuple(item.item_id for item in prior_unresolved_items),
-                        ledger_incomplete=round_ledger_incomplete,
-                        role="reviewer",
-                        operation_description="PR review",
+                            session_id=(
+                                None
+                                if use_compact_pr_context
+                                else reviewer_session_ids.get(reviewer)
+                            ),
+                            marker_description="<!-- AGENT_STATE: approved|blocking -->",
+                            validate=lambda text, reviewer_name=reviewer_name, items=prior_unresolved_items: _validate_review_response(
+                                text,
+                                reviewer=reviewer_name,
+                                unresolved_items=items,
+                                current_round_items=round_new_unresolved_items,
+                            ),
+                            usage_context=usage_context,
+                            use_repair=True,
+                            repair_expected_kind="pr_review",
+                            repair_reviewer_requirement_ids=_surfaced_reviewer_requirement_ids(
+                                human_requirements,
+                                requirement_scope="PR requirements",
+                            ),
+                            repair_allowed_prior_item_ids=tuple(
+                                item.item_id for item in prior_unresolved_items
+                            ),
+                            ledger_incomplete=round_ledger_incomplete,
+                            role="reviewer",
+                            operation_description="PR review",
+                        )
                     )
+                    if review_failure is not None:
+                        if (
+                            len(configured_reviewers) == 1
+                            or review_failure.failure_category in {None, "deterministic"}
+                        ):
+                            raise review_failure
+                        unavailable_reviewer_failures[reviewer] = review_failure
+                        category = review_failure.failure_category or "unknown"
+                        log(
+                            config,
+                            f"Round {round_number}: {reviewer_name} became unavailable "
+                            f"({category}); continuing with the remaining reviewers",
+                        )
+                        continue
+                    assert review_response is not None
                     review_output = review_response.text
                     review_model_used = review_response.model_used
                     reviewer_session_ids[reviewer] = review_response.session_id
@@ -4647,18 +4757,25 @@ def run_pr_loop(
                     review_state = parsed_review.state
 
                 if _is_incomplete_pr_review(parsed_review):
+                    if len(configured_reviewers) == 1:
+                        raise AgentLoopError(
+                            f"{reviewer_name} did not complete PR review and reported no actionable "
+                            "blocking items or Same-PR follow-ups. This is a reviewer-internal error; "
+                            "agent-loop stopped before a coder follow-up. Rerun or switch the reviewer/model "
+                            "after resolving the reviewer environment."
+                        )
+                    unavailable_reviewer_failures[reviewer] = AgentInvocationError(
+                        f"{reviewer_name} reported an incomplete PR review without actionable "
+                        "blocking items or Same-PR follow-ups.",
+                        failure_category="agent-unavailable",
+                    )
                     log(
                         config,
                         f"Round {round_number}: {reviewer_name} did not complete its PR review "
                         "and reported no actionable blocking items or Same-PR follow-ups; "
-                        "stopping without a coder follow-up",
+                        "continuing with the remaining reviewers",
                     )
-                    raise AgentLoopError(
-                        f"{reviewer_name} did not complete PR review and reported no actionable "
-                        "blocking items or Same-PR follow-ups. This is a reviewer-internal error; "
-                        "agent-loop stopped before a coder follow-up. Rerun or switch the reviewer/model "
-                        "after resolving the reviewer environment."
-                    )
+                    continue
 
                 for disposition in parsed_review.dispositions:
                     _record_prior_item_disposition(
@@ -4987,6 +5104,30 @@ def run_pr_loop(
                             must_fix_items = [
                                 item for item in unresolved_items if item.status in {"blocking", "same-pr"}
                             ]
+                if not must_fix_items and unavailable_reviewer_failures:
+                    approved_reviewer_names = [
+                        reviewer_name for reviewer_name, _review_output in approved_review_outputs
+                    ]
+                    post_pr_comment(
+                        runner,
+                        config=config,
+                        pr_number=pr_number,
+                        body=_format_incomplete_pr_review_comment(
+                            pr_number=pr_number,
+                            unavailable_reviewers=unavailable_reviewer_failures,
+                            approved_reviewer_names=approved_reviewer_names,
+                        ),
+                    )
+                    missing = ", ".join(
+                        agent_display_name(reviewer)
+                        for reviewer in unavailable_reviewer_failures
+                    )
+                    healthy = ", ".join(approved_reviewer_names) or "(none)"
+                    raise AgentLoopError(
+                        f"PR #{pr_number} review incomplete: missing required input from {missing}. "
+                        f"Healthy reviewers approved: {healthy}. No coder follow-up or merge was attempted."
+                    )
+
                 sync_coder_pr_before_validation(config, runner, pr_number, pr_metadata)
                 migration_validation = validate_pr_migration_topology(
                     runner,
