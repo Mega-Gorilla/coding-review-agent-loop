@@ -2581,6 +2581,32 @@ def _should_record_new_blocking_item(summary: str, *, had_prior_items: bool, had
     return len(non_empty_lines[0]) >= 80
 
 
+_INCOMPLETE_PR_REVIEW_RE = re.compile(
+    r"\breview\s+(?:is\s+)?incomplete\b|"
+    r"\b(?:resolution|finding)\s+could\s+not\s+be\s+confirmed\b|"
+    r"\b(?:could\s+not|cannot|can't|unable\s+to)\s+"
+    r"(?:complete|confirm|verify|assess|review)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_incomplete_pr_review(parsed_review: ParsedReview) -> bool:
+    """Identify a reviewer failure reported as a blocking verdict.
+
+    A reviewer occasionally returns a syntactically valid blocking response that
+    only says it could not inspect the diff or confirm a prior item. That is
+    not actionable feedback for the coder. Keep this deliberately narrow so
+    substantive freeform blocking summaries retain their existing behavior.
+    """
+    if parsed_review.state != "blocking":
+        return False
+    if parsed_review.blocking_items or parsed_review.followups.same_pr:
+        return False
+    candidate_texts = [parsed_review.summary]
+    candidate_texts.extend(disposition.note for disposition in parsed_review.dispositions)
+    return any(text and _INCOMPLETE_PR_REVIEW_RE.search(text) for text in candidate_texts)
+
+
 def _describe_pr_review_outcome(parsed_review: ParsedReview, *, has_blocking_summary: bool) -> str:
     if parsed_review.state == "approved":
         return "approved"
@@ -4619,6 +4645,20 @@ def run_pr_loop(
                     )
                     parsed_review = dataclasses_replace(parsed_review, state="approved", blocking_items=())
                     review_state = parsed_review.state
+
+                if _is_incomplete_pr_review(parsed_review):
+                    log(
+                        config,
+                        f"Round {round_number}: {reviewer_name} did not complete its PR review "
+                        "and reported no actionable blocking items or Same-PR follow-ups; "
+                        "stopping without a coder follow-up",
+                    )
+                    raise AgentLoopError(
+                        f"{reviewer_name} did not complete PR review and reported no actionable "
+                        "blocking items or Same-PR follow-ups. This is a reviewer-internal error; "
+                        "agent-loop stopped before a coder follow-up. Rerun or switch the reviewer/model "
+                        "after resolving the reviewer environment."
+                    )
 
                 for disposition in parsed_review.dispositions:
                     _record_prior_item_disposition(
