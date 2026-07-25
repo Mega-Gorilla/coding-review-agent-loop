@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from .base import (
     AgentName,
     AgentResult,
+    STDIN_PROMPT_THRESHOLD_BYTES,
     public_response_path,
     read_public_response_file,
     with_public_response_file_instruction,
@@ -33,9 +34,6 @@ _CODEX_REASONING_EFFORT_KEYS = (
     "reasoning_effort",
     "model_reasoning_effort",
 )
-_STDIN_PROMPT_THRESHOLD_BYTES = 100_000
-
-
 def _normalize_codex_usage(payload: object) -> UsageMetadata | None:
     if not isinstance(payload, dict):
         return None
@@ -247,7 +245,7 @@ class CodexBackend:
         response_path = public_response_path(config, "codex")
         prompt_with_response_file = with_public_response_file_instruction(prompt, response_path)
         input_text = None
-        if len(prompt_with_response_file.encode("utf-8")) > _STDIN_PROMPT_THRESHOLD_BYTES:
+        if len(prompt_with_response_file.encode("utf-8")) > STDIN_PROMPT_THRESHOLD_BYTES:
             # Linux limits a single exec argument to about 128 KiB. Long compact
             # contexts can exceed that before the Codex CLI is launched.
             input_text = prompt_with_response_file

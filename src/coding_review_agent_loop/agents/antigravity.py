@@ -32,6 +32,7 @@ from .base import (
     AgentName,
     AgentResult,
     AgentTextSource,
+    STDIN_PROMPT_THRESHOLD_BYTES,
     public_response_path,
     read_public_response_file,
     with_public_response_file_instruction,
@@ -107,7 +108,6 @@ _REVIEWER_SETTINGS_INJECTION = {
         ]
     },
 }
-_STDIN_PROMPT_THRESHOLD_BYTES = 100_000
 _OVERSIZED_PROMPT_DIRECTIVE = (
     "Follow the complete task included in the Agent Loop Task section of GEMINI.md."
 )
@@ -211,7 +211,7 @@ class AntigravityBackend:
             prompt_text = _with_public_response_marker_instruction(
                 with_public_response_file_instruction(prompt, response_path)
             )
-            oversized_prompt = len(prompt_text.encode("utf-8")) > _STDIN_PROMPT_THRESHOLD_BYTES
+            oversized_prompt = len(prompt_text.encode("utf-8")) > STDIN_PROMPT_THRESHOLD_BYTES
             args = [config.antigravity_cmd, "--model", model, *config.antigravity_args]
             if role in {"reviewer", "repair"}:
                 args = [a for a in args if a != "--dangerously-skip-permissions"]

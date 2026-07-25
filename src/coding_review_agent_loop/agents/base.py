@@ -17,6 +17,10 @@ if TYPE_CHECKING:
 AgentName = Literal["claude", "codex", "gemini", "antigravity"]
 AgentTextSource = Literal["response_file", "stdout_marker", "stdout"]
 
+# Keep prompts below Linux's per-argument exec limit; longer prompts are sent
+# through stdin or backend-specific task context instead.
+STDIN_PROMPT_THRESHOLD_BYTES = 100_000
+
 
 def normalize_agent_name(value: str) -> AgentName:
     """Normalize input-only agent aliases to their canonical names."""
