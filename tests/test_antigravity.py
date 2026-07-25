@@ -40,6 +40,32 @@ def test_antigravity_backend_stdout_fallback(tmp_path):
     assert result.text == "plain stdout review"
     assert result.text_source == "stdout"
 
+
+def test_antigravity_backend_places_large_prompt_in_injected_gemini_md(tmp_path):
+    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+
+    agy_dir = tmp_path / "antigravity"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    captured: list[str] = []
+
+    class CapturingRunner(FakeRunner):
+        def run_with_log(self, args, *, cwd, **kwargs):
+            captured.append((cwd / "GEMINI.md").read_text(encoding="utf-8"))
+            return super().run_with_log(args, cwd=cwd, **kwargs)
+
+    prompt = "x" * 150_000
+    runner = CapturingRunner(antigravity_outputs=[("ok", 0)])
+    config = make_config(tmp_path, antigravity_dir=agy_dir)
+
+    AntigravityBackend().run(runner, config, prompt, run_id="r1")
+
+    cmd = runner.commands[-1][0]
+    assert cmd[-2] == "--print"
+    assert cmd[-1] == "Follow the complete task included in the Agent Loop Task section of GEMINI.md."
+    assert all(prompt not in arg for arg in cmd)
+    assert captured and prompt in captured[0]
+    assert not (agy_dir / "GEMINI.md").exists()
+
 def test_antigravity_backend_fallback_chain_on_quota_signal(tmp_path):
     from coding_review_agent_loop.agents.antigravity import AntigravityBackend
     agy_dir = tmp_path / "antigravity"
