@@ -488,6 +488,18 @@ def test_codex_backend_prefers_response_file_over_last_message_and_stdout(tmp_pa
     assert result.usage.total_tokens == 20
 
 
+def test_codex_backend_sends_large_prompt_on_stdin(tmp_path):
+    runner = FakeRunner(codex_outputs=[{"public_response": "last message text"}])
+    config = make_config(tmp_path)
+    prompt = "x" * 150_000
+
+    CODEX_BACKEND.run(runner, config, prompt, run_id="run-1")
+
+    assert runner.last_input_text is not None
+    assert prompt in runner.last_input_text
+    assert all(prompt not in arg for arg in runner.commands[-1][0])
+
+
 def test_codex_backend_prefers_last_message_over_stdout_without_response_file(tmp_path):
     runner = FakeRunner(
         codex_outputs=[
