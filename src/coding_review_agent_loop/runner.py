@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass
@@ -231,6 +232,7 @@ class Runner:
         progress_interval_seconds: int,
         check: bool = True,
         env: Mapping[str, str] | None = None,
+        input_text: str | None = None,
         use_pty: bool = False,
         timeout_seconds: float | None = None,
     ) -> CommandResult:
@@ -254,12 +256,18 @@ class Runner:
                 progress_interval_seconds=progress_interval_seconds,
                 check=check,
                 env=env,
+                input_text=input_text,
                 timeout_seconds=timeout_seconds,
             )
         started = time.monotonic()
         deadline = started + timeout_seconds if timeout_seconds is not None else None
         next_progress = started + progress_interval_seconds
-        header = f"$ {' '.join(cmd)}\n\n"
+        header = f"$ {' '.join(cmd)}\n"
+        if input_text is not None:
+            # Preserve stdin-routed prompts in the log just as argv-routed
+            # prompts are preserved in the command header.
+            header += f"\n# stdin\n{input_text}\n"
+        header += "\n"
         with log_path.open("w", encoding="utf-8") as log_file:
             log_file.write(header)
             log_file.flush()
@@ -268,52 +276,64 @@ class Runner:
             # so stderr capture is uniform across them (issue #266).
             # start_new_session isolates the child's process group so timeout
             # and interrupt handling can killpg the whole tree (#475).
-            proc = self._spawn_with_retry(
-                cmd,
-                lambda: subprocess.Popen(
+            # A regular file keeps large prompts out of argv and avoids blocking
+            # on a pipe before a child has started consuming stdin.
+            with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as input_file:
+                if input_text is not None:
+                    input_file.write(input_text)
+                    input_file.seek(0)
+
+                def spawn() -> subprocess.Popen[str]:
+                    if input_text is not None:
+                        input_file.seek(0)
+                    return subprocess.Popen(
+                        cmd,
+                        cwd=cwd,
+                        stdin=input_file if input_text is not None else subprocess.DEVNULL,
+                        stdout=log_file,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        start_new_session=True,
+                        env={**os.environ, **env} if env is not None else None,
+                    )
+
+                proc = self._spawn_with_retry(
                     cmd,
-                    cwd=cwd,
-                    stdin=subprocess.DEVNULL,
-                    stdout=log_file,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    start_new_session=True,
-                    env={**os.environ, **env} if env is not None else None,
-                ),
-            )
-            self._register_active_process(proc)
-            try:
-                while True:
-                    returncode = proc.poll()
-                    if returncode is not None:
-                        break
-                    now = time.monotonic()
-                    if deadline is not None and now >= deadline:
-                        # returncode=None marks the timeout for callers, matching
-                        # the pty branch.
-                        self._terminate_process_group(proc)
-                        returncode = None
-                        break
-                    if now >= next_progress:
-                        elapsed = int(now - started)
-                        print(
-                            f"[agent-loop {datetime.now().strftime('%H:%M:%S')}] "
-                            f"{label} still running ({elapsed}s); log: {log_path}",
-                            file=sys.stderr,
-                            flush=True,
-                        )
-                        next_progress = now + progress_interval_seconds
-                    if deadline is not None:
-                        time.sleep(min(1.0, max(0.05, deadline - now)))
-                    else:
-                        time.sleep(1)
-            except KeyboardInterrupt:
-                # The child runs in its own session and no longer receives the
-                # terminal SIGINT; kill its whole process group instead.
-                self._terminate_process_group(proc)
-                raise
-            finally:
-                self._unregister_active_process(proc)
+                    spawn,
+                )
+                self._register_active_process(proc)
+                try:
+                    while True:
+                        returncode = proc.poll()
+                        if returncode is not None:
+                            break
+                        now = time.monotonic()
+                        if deadline is not None and now >= deadline:
+                            # returncode=None marks the timeout for callers, matching
+                            # the pty branch.
+                            self._terminate_process_group(proc)
+                            returncode = None
+                            break
+                        if now >= next_progress:
+                            elapsed = int(now - started)
+                            print(
+                                f"[agent-loop {datetime.now().strftime('%H:%M:%S')}] "
+                                f"{label} still running ({elapsed}s); log: {log_path}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            next_progress = now + progress_interval_seconds
+                        if deadline is not None:
+                            time.sleep(min(1.0, max(0.05, deadline - now)))
+                        else:
+                            time.sleep(1)
+                except KeyboardInterrupt:
+                    # The child runs in its own session and no longer receives the
+                    # terminal SIGINT; kill its whole process group instead.
+                    self._terminate_process_group(proc)
+                    raise
+                finally:
+                    self._unregister_active_process(proc)
 
         full_output = log_path.read_text(encoding="utf-8")
         output = full_output[len(header):] if full_output.startswith(header) else full_output
@@ -335,6 +355,7 @@ class Runner:
         progress_interval_seconds: int,
         check: bool,
         env: Mapping[str, str] | None,
+        input_text: str | None,
         timeout_seconds: float | None = None,
     ) -> CommandResult:
         """Run a command attached to a pseudo-terminal, logging and capturing output.
@@ -348,6 +369,9 @@ class Runner:
         """
         import pty
         import select
+
+        if input_text is not None:
+            raise ValueError("stdin text is not supported for PTY-backed commands")
 
         started = time.monotonic()
         deadline = started + timeout_seconds if timeout_seconds is not None else None

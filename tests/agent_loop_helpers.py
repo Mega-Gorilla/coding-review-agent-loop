@@ -459,10 +459,10 @@ class FakeRunner(Runner):
         self.commands.append((cmd, cwd_path))
         return cmd, cwd_path
 
-    def _maybe_write_public_response_file(self, cmd):
+    def _maybe_write_public_response_file(self, cmd, *, prompt=None):
         if not self.public_response_outputs:
             return
-        prompt = "\n".join(cmd)
+        prompt = prompt or "\n".join(cmd)
         match = re.search(r"Write the final public response.*?\n\n([^\n]+/responses/[^\n]+\.md)", prompt, re.S)
         if not match:
             return
@@ -543,18 +543,21 @@ class FakeRunner(Runner):
         progress_interval_seconds,
         check=True,
         env=None,
+        input_text=None,
         use_pty=False,
         timeout_seconds=None,
     ):
         with self._scripted_lock:
+            self.last_input_text = input_text
             return self._run_with_log_locked(
                 args,
                 cwd=cwd,
                 log_path=log_path,
                 check=check,
+                input_text=input_text,
             )
 
-    def _run_with_log_locked(self, args, *, cwd, log_path, check):
+    def _run_with_log_locked(self, args, *, cwd, log_path, check, input_text=None):
         cmd, cwd_path = self._record_command(args, cwd)
         log_path.parent.mkdir(parents=True, exist_ok=True)
         ensure_log_dir_ignored(log_path.parent)
@@ -562,8 +565,8 @@ class FakeRunner(Runner):
         if cmd[:1] == ["claude"]:
             output, returncode = self._next_agent_output(self.claude_outputs)
             if isinstance(output, str):
-                output = self._normalize_legacy_agent_output(output, "\n".join(cmd))
-            self._maybe_write_public_response_file(cmd)
+                output = self._normalize_legacy_agent_output(output, input_text or "\n".join(cmd))
+            self._maybe_write_public_response_file(cmd, prompt=input_text)
             self._maybe_advance_git_head_for_agent_pr(output)
             self._maybe_advance_pr_head_for_coder_followup(cmd)
             self._mark_agent_command_seen()
