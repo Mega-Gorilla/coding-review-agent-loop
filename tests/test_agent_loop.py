@@ -3346,6 +3346,23 @@ def test_runner_pty_reports_tty_and_strips_ansi(tmp_path):
     assert result.returncode == 0
 
 
+def test_runner_with_log_passes_large_input_on_stdin(tmp_path):
+    import sys
+
+    prompt = "x" * 150_000
+    result = Runner().run_with_log(
+        [sys.executable, "-c", "import sys; print(len(sys.stdin.read()))"],
+        cwd=tmp_path,
+        log_path=tmp_path / "logs" / "stdin.log",
+        label="Stdin probe",
+        progress_interval_seconds=999,
+        input_text=prompt,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == str(len(prompt))
+
+
 @pytest.mark.parametrize("use_pty", [False, True])
 def test_runner_retries_dangling_symlink_spawn_and_recovers(
     monkeypatch,

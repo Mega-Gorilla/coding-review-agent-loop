@@ -20,6 +20,9 @@ from ..usage import UsageMetadata, coerce_int, first_present
 if TYPE_CHECKING:
     from ..config import AgentLoopConfig
 
+
+_STDIN_PROMPT_THRESHOLD_BYTES = 100_000
+
 def _normalize_claude_usage(payload: object) -> UsageMetadata | None:
     if not isinstance(payload, dict):
         return None
@@ -119,7 +122,14 @@ class ClaudeBackend:
             args += ["--model", config.claude_model]
         if session_id:
             args += ["--resume", session_id]
-        args.append(with_public_response_file_instruction(prompt, response_path))
+        prompt_with_response_instruction = with_public_response_file_instruction(prompt, response_path)
+        input_text = None
+        if len(prompt_with_response_instruction.encode("utf-8")) > _STDIN_PROMPT_THRESHOLD_BYTES:
+            # Linux limits a single exec argument to about 128 KiB. Long compact
+            # contexts can exceed that before the Claude CLI is launched.
+            input_text = prompt_with_response_instruction
+        else:
+            args.append(prompt_with_response_instruction)
         log_path = agent_log_path(config, "claude", run_id=run_id, label=label)
         log(config, f"Starting Claude in {config.claude_dir}; log: {log_path}; response: {response_path}")
         result = runner.run_with_log(
@@ -130,6 +140,7 @@ class ClaudeBackend:
             progress_interval_seconds=config.progress_interval_seconds,
             check=False,
             env={"AGENT_LOOP_WORKDIR": str(config.claude_dir.resolve())},
+            input_text=input_text,
             timeout_seconds=timeout_seconds,
         )
         log(config, f"Claude finished; log: {log_path}")
