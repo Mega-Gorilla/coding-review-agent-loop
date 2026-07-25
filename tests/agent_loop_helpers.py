@@ -586,7 +586,7 @@ class FakeRunner(Runner):
                 normalized = self._normalize_legacy_agent_output(public_response, "\n".join(cmd))
                 if normalized != public_response:
                     public_response = normalized
-            self._maybe_write_public_response_file(cmd)
+            self._maybe_write_public_response_file(cmd, prompt=input_text)
             if "--output-last-message" in cmd:
                 out_path = Path(cmd[cmd.index("--output-last-message") + 1])
                 out_path.write_text(public_response, encoding="utf-8")

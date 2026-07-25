@@ -32,6 +32,7 @@ from .base import (
     AgentName,
     AgentResult,
     AgentTextSource,
+    STDIN_PROMPT_THRESHOLD_BYTES,
     public_response_path,
     read_public_response_file,
     with_public_response_file_instruction,
@@ -107,6 +108,9 @@ _REVIEWER_SETTINGS_INJECTION = {
         ]
     },
 }
+_OVERSIZED_PROMPT_DIRECTIVE = (
+    "Follow the complete task included in the Agent Loop Task section of GEMINI.md."
+)
 _REPAIR_SETTINGS_INJECTION = {
     "toolPermission": "strict",
     "permissions": {"allow": []},
@@ -207,6 +211,7 @@ class AntigravityBackend:
             prompt_text = _with_public_response_marker_instruction(
                 with_public_response_file_instruction(prompt, response_path)
             )
+            oversized_prompt = len(prompt_text.encode("utf-8")) > STDIN_PROMPT_THRESHOLD_BYTES
             args = [config.antigravity_cmd, "--model", model, *config.antigravity_args]
             if role in {"reviewer", "repair"}:
                 args = [a for a in args if a != "--dangerously-skip-permissions"]
@@ -216,7 +221,7 @@ class AntigravityBackend:
             if session_id:
                 args += ["--conversation", session_id]
             # The prompt is the value of --print (must be last), not a positional.
-            args += ["--print", prompt_text]
+            args += ["--print", _OVERSIZED_PROMPT_DIRECTIVE if oversized_prompt else prompt_text]
             log_path = log_path_override or agent_log_path(
                 config, "antigravity", run_id=run_id, label=label
             )
@@ -265,6 +270,13 @@ class AntigravityBackend:
                     " in this same turn before writing your response.\n\n"
                     "---\n\n"
                 )
+            injected_gemini_prefix = single_shot_instruction
+            if oversized_prompt:
+                injected_gemini_prefix += (
+                    "# Agent Loop Task\n\n"
+                    f"{prompt_text}\n\n"
+                    "---\n\n"
+                )
             settings_path = _antigravity_settings_path()
             settings_lock_path = settings_path.with_suffix(".json.lock")
             settings_path.parent.mkdir(parents=True, exist_ok=True)
@@ -300,7 +312,7 @@ class AntigravityBackend:
                             except FileNotFoundError:
                                 existing_gemini = None
                             gemini_md_path.write_text(
-                                single_shot_instruction + (existing_gemini or ""),
+                                injected_gemini_prefix + (existing_gemini or ""),
                                 encoding="utf-8",
                             )
                             try:
@@ -322,8 +334,8 @@ class AntigravityBackend:
                             finally:
                                 if gemini_md_path.exists():
                                     current = gemini_md_path.read_text(encoding="utf-8")
-                                    if current.startswith(single_shot_instruction):
-                                        remainder = current[len(single_shot_instruction):]
+                                    if current.startswith(injected_gemini_prefix):
+                                        remainder = current[len(injected_gemini_prefix):]
                                         if remainder:
                                             gemini_md_path.write_text(remainder, encoding="utf-8")
                                         else:
@@ -348,7 +360,7 @@ class AntigravityBackend:
                         except FileNotFoundError:
                             existing_gemini = None
                         gemini_md_path.write_text(
-                            single_shot_instruction + (existing_gemini or ""),
+                            injected_gemini_prefix + (existing_gemini or ""),
                             encoding="utf-8",
                         )
                         try:
@@ -366,8 +378,8 @@ class AntigravityBackend:
                         finally:
                             if gemini_md_path.exists():
                                 current = gemini_md_path.read_text(encoding="utf-8")
-                                if current.startswith(single_shot_instruction):
-                                    remainder = current[len(single_shot_instruction):]
+                                if current.startswith(injected_gemini_prefix):
+                                    remainder = current[len(injected_gemini_prefix):]
                                     if remainder:
                                         gemini_md_path.write_text(remainder, encoding="utf-8")
                                     else:
