@@ -3361,6 +3361,8 @@ def test_runner_with_log_passes_large_input_on_stdin(tmp_path):
 
     assert result.returncode == 0
     assert result.stdout.strip() == str(len(prompt))
+    log_text = (tmp_path / "logs" / "stdin.log").read_text(encoding="utf-8")
+    assert f"# stdin\n{prompt}\n" in log_text
 
 
 @pytest.mark.parametrize("use_pty", [False, True])

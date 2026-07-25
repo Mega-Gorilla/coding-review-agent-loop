@@ -262,7 +262,12 @@ class Runner:
         started = time.monotonic()
         deadline = started + timeout_seconds if timeout_seconds is not None else None
         next_progress = started + progress_interval_seconds
-        header = f"$ {' '.join(cmd)}\n\n"
+        header = f"$ {' '.join(cmd)}\n"
+        if input_text is not None:
+            # Preserve stdin-routed prompts in the log just as argv-routed
+            # prompts are preserved in the command header.
+            header += f"\n# stdin\n{input_text}\n"
+        header += "\n"
         with log_path.open("w", encoding="utf-8") as log_file:
             log_file.write(header)
             log_file.flush()
