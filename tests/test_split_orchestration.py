@@ -10,6 +10,7 @@ from coding_review_agent_loop.decomposition import (
     format_one_shot_impl_handoff_comment,
 )
 from coding_review_agent_loop.github import validate_pr_body_does_not_close_issue
+from coding_review_agent_loop.issue_pr_handoff import format_issue_pr_handoff_comment
 from coding_review_agent_loop.orchestrator import (
     PostedRoundMetadata,
     _attach_round_metadata,
@@ -19,6 +20,7 @@ from coding_review_agent_loop.split_materialization import (
     MaterializedSplitChild,
     SplitMaterializationMetadata,
     format_split_materialization_summary,
+    format_split_stage_handoff_comment,
     split_stage_proposal_from_text,
 )
 from agent_loop_helpers import (
@@ -717,3 +719,172 @@ def test_validate_pr_body_does_not_close_issue_accepts_refs_url(tmp_path):
     runner = FakeRunner(pr_payload={"body": "Refs https://github.com/OWNER/REPO/issues/56"})
     config = make_config(tmp_path)
     validate_pr_body_does_not_close_issue(runner, config=config, pr_number=77, issue_number=56)
+
+
+def _selected_child_split_setup(*, plan_hash: str, plan_subject: str):
+    """Shared fixture for the #589 canonical-resolution selected-child tests:
+    a materialized split with one child (#101) and a pre-existing stage
+    handoff selecting it for `plan_hash`."""
+    split_metadata = SplitMaterializationMetadata(
+        parent_issue=56,
+        subject=plan_subject,
+        children=(
+            MaterializedSplitChild(
+                title="Auth flow",
+                key=split_stage_proposal_from_text("Auth flow").key,
+                url="https://github.com/OWNER/REPO/issues/101",
+                number=101,
+                origin="created",
+            ),
+        ),
+    )
+    return [
+        {
+            "author": {"login": "bot"},
+            "createdAt": "2026-05-23T00:00:02Z",
+            "body": format_split_materialization_summary(parent_issue=56, metadata=split_metadata),
+        },
+        {
+            "author": {"login": "bot"},
+            "createdAt": "2026-05-23T00:00:03Z",
+            "body": format_split_stage_handoff_comment(
+                parent_issue=56, plan_hash=plan_hash, child=split_metadata.children[0]
+            ),
+        },
+    ]
+
+
+def _approved_plan_round_comments(plan: str, *, plan_subject: str) -> list[dict]:
+    return [
+        {
+            "author": {"login": "bot"},
+            "createdAt": "2026-05-23T00:00:00Z",
+            "body": _attach_round_metadata(
+                plan,
+                PostedRoundMetadata(
+                    flow="plan", role="coder", agent="Claude", round_number=1, subject=plan_subject
+                ),
+            ),
+        },
+        {
+            "author": {"login": "bot"},
+            "createdAt": "2026-05-23T00:00:01Z",
+            "body": _attach_round_metadata(
+                "Plan looks sound.\n<!-- AGENT_PLAN_STATE: approved -->\n-- OpenAI Codex",
+                PostedRoundMetadata(
+                    flow="plan",
+                    role="reviewer",
+                    agent="Codex",
+                    round_number=1,
+                    subject=plan_subject,
+                    state="approved",
+                ),
+            ),
+        },
+    ]
+
+
+def test_plan_first_one_shot_selected_child_stale_canonical_record_raises(tmp_path):
+    """#589 item-1: a canonical AGENT_ISSUE_PR_HANDOFF record on the *selected
+    split-stage child* (#101, not the parent #56) must be resolved, and a
+    stale (closed) PR it references must fail safely with an actionable
+    `agent-loop pr <number>` message *before* the older plan-hash-scoped
+    one-shot-handoff lookup ever runs, and without invoking the coder."""
+    plan = "Plan:\n- Auth flow change.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    plan_subject = _plan_subject(plan)
+    plan_hash = approved_plan_hash(plan)
+    issue_comments = _approved_plan_round_comments(plan, plan_subject=plan_subject)
+    issue_comments += _selected_child_split_setup(plan_hash=plan_hash, plan_subject=plan_subject)
+    issue_comments.append(
+        {
+            "author": {"login": "bot"},
+            "createdAt": "2026-05-23T00:00:04Z",
+            "body": format_issue_pr_handoff_comment(
+                issue_number=101,
+                pr_number=77,
+                pr_url="https://github.com/OWNER/REPO/pull/77",
+                pr_head_sha="deadbeef",
+                flow="approved-plan-implementation",
+                plan_hash=plan_hash,
+            ),
+        }
+    )
+    runner = FakeRunner(
+        pr_payload={
+            "number": 77,
+            "state": "CLOSED",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "body": "Fixes #101",
+        },
+        issue_comments=issue_comments,
+    )
+    config = make_config(tmp_path, materialize_split_issues=True)
+
+    with pytest.raises(AgentLoopError, match=r"agent-loop pr 77"):
+        run_issue_loop(runner, issue_number=56, config=config, plan_first=True, implement_after_approval=True)
+
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+
+
+def test_plan_first_one_shot_selected_child_valid_canonical_record_resumes(tmp_path):
+    """#589 item-1: a valid canonical record on the selected child resumes PR
+    review directly (no coder call), taking priority over a present-but-stale
+    old-style one-shot-handoff marker that points at a different PR."""
+    plan = "Plan:\n- Auth flow change.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
+    plan_subject = _plan_subject(plan)
+    plan_hash = approved_plan_hash(plan)
+    issue_comments = _approved_plan_round_comments(plan, plan_subject=plan_subject)
+    issue_comments += _selected_child_split_setup(plan_hash=plan_hash, plan_subject=plan_subject)
+    issue_comments.append(
+        {
+            "author": {"login": "bot"},
+            "createdAt": "2026-05-23T00:00:04Z",
+            "body": format_one_shot_impl_handoff_comment(
+                parent_issue=101,
+                mode="implement-one-shot",
+                plan_hash=plan_hash,
+                plan_subject=plan_subject,
+                pr_number=999,
+                pr_head_sha="stalesha",
+            ),
+        }
+    )
+    issue_comments.append(
+        {
+            "author": {"login": "bot"},
+            "createdAt": "2026-05-23T00:00:05Z",
+            "body": format_issue_pr_handoff_comment(
+                issue_number=101,
+                pr_number=77,
+                pr_url="https://github.com/OWNER/REPO/pull/77",
+                pr_head_sha="deadbeef",
+                flow="approved-plan-implementation",
+                plan_hash=plan_hash,
+            ),
+        }
+    )
+    runner = FakeRunner(
+        pr_payload={
+            "number": 77,
+            "state": "OPEN",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "body": "Fixes #101",
+        },
+        issue_comments=issue_comments,
+        codex_outputs=[
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+    )
+    config = make_config(tmp_path, materialize_split_issues=True)
+
+    assert (
+        run_issue_loop(runner, issue_number=56, config=config, plan_first=True, implement_after_approval=True)
+        == 0
+    )
+
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+    assert any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
+    # No new handoff comment posted for an already-canonical resume.
+    assert not any(
+        "<!-- AGENT_ISSUE_PR_HANDOFF:" in comment for comment in runner.comments
+    )

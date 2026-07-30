@@ -48,7 +48,6 @@ from .github import (
     IssueContext,
     PullRequestChecks,
     PullRequestReviewContext,
-    find_open_pr_referencing_issue,
     get_issue_context,
     parse_linked_issue_numbers,
     get_pr_checks,
@@ -62,6 +61,11 @@ from .github import (
     validate_pr_body_does_not_close_issue,
     validate_pr_references_issue,
     wait_for_ci,
+)
+from .issue_pr_handoff import (
+    post_issue_pr_handoff_comment,
+    require_pr_metadata_for_handoff,
+    resolve_canonical_pr_for_issue,
 )
 from .split_materialization import (
     DISCUSS_SPLIT_MARKER_RE,
@@ -3047,13 +3051,15 @@ def _implement_approved_issue(
 
     # A prior implementation attempt may have created a PR and then aborted
     # before recording any handoff marker/comment (e.g. the #493 test-report
-    # false positive, which produced the duplicate PR #494 for #492). Check
-    # GitHub directly for an already-open PR referencing this issue before
-    # invoking the coder again (#495).
-    existing_pr_number = find_open_pr_referencing_issue(
-        runner, config=config, issue_number=issue_number
+    # false positive, which produced the duplicate PR #494 for #492). Resolve
+    # the canonical AGENT_ISSUE_PR_HANDOFF record first, falling back to the
+    # legacy exactly-one-open-PR GitHub search when no record exists yet
+    # (#495, #589).
+    resolved_pr = resolve_canonical_pr_for_issue(
+        runner, config=config, issue_number=issue_number, issue_context=issue_context
     )
-    if existing_pr_number is not None:
+    if resolved_pr is not None:
+        existing_pr_number = resolved_pr.pr_number
         log(
             config,
             f"Existing implementation PR #{existing_pr_number} found for issue #{issue_number} "
@@ -3072,10 +3078,24 @@ def _implement_approved_issue(
                 pr_number=existing_pr_number,
                 issue_number=staged_parent_issue,
             )
-        if one_shot_parent_issue is not None:
+        resumed_pr_context = None
+        if resolved_pr.source == "legacy" or one_shot_parent_issue is not None:
             resumed_pr_context = get_pr_review_context(
                 runner, config=implementation_config, pr_number=existing_pr_number
             )
+        if resolved_pr.source == "legacy":
+            pr_url, pr_head_sha = require_pr_metadata_for_handoff(resumed_pr_context.metadata)
+            post_issue_pr_handoff_comment(
+                runner,
+                config=implementation_config,
+                issue_number=issue_number,
+                pr_number=existing_pr_number,
+                pr_url=pr_url,
+                pr_head_sha=pr_head_sha,
+                flow="approved-plan-implementation",
+                plan_hash=plan_hash,
+            )
+        if one_shot_parent_issue is not None:
             post_one_shot_impl_handoff_comment(
                 runner,
                 config=implementation_config,
@@ -3173,6 +3193,17 @@ def _implement_approved_issue(
             issue_number=staged_parent_issue,
         )
     initial_pr_context = get_pr_review_context(runner, config=implementation_config, pr_number=pr_number)
+    initial_pr_url, initial_pr_head_sha = require_pr_metadata_for_handoff(initial_pr_context.metadata)
+    post_issue_pr_handoff_comment(
+        runner,
+        config=implementation_config,
+        issue_number=issue_number,
+        pr_number=pr_number,
+        pr_url=initial_pr_url,
+        pr_head_sha=initial_pr_head_sha,
+        flow="approved-plan-implementation",
+        plan_hash=plan_hash,
+    )
     if one_shot_parent_issue is not None:
         post_one_shot_impl_handoff_comment(
             runner,
@@ -3992,6 +4023,56 @@ def _run_plan_first_loop(
                     )
                     staged_parent_issue = issue_number
 
+                # Canonical handoff resolution runs before the (older,
+                # plan-hash-scoped) one-shot handoff lookup below, so a stale
+                # canonical record fails safely instead of being bypassed by
+                # it (#589). It is scoped to the selected target issue, since
+                # a split-stage plan implements a child, not the parent.
+                resolved_pr = resolve_canonical_pr_for_issue(
+                    runner, config=config, issue_number=target_issue_number, issue_context=target_issue_context
+                )
+                if resolved_pr is not None:
+                    log(
+                        config,
+                        f"Issue #{target_issue_number}: resuming PR #{resolved_pr.pr_number} review for "
+                        "already-handed-off plan",
+                    )
+                    validate_pr_references_issue(
+                        runner,
+                        config=config,
+                        pr_number=resolved_pr.pr_number,
+                        issue_number=target_issue_number,
+                    )
+                    if staged_parent_issue is not None:
+                        validate_pr_body_does_not_close_issue(
+                            runner,
+                            config=config,
+                            pr_number=resolved_pr.pr_number,
+                            issue_number=staged_parent_issue,
+                        )
+                    if resolved_pr.source == "legacy":
+                        resumed_pr_context = get_pr_review_context(
+                            runner, config=config, pr_number=resolved_pr.pr_number
+                        )
+                        pr_url, pr_head_sha = require_pr_metadata_for_handoff(resumed_pr_context.metadata)
+                        post_issue_pr_handoff_comment(
+                            runner,
+                            config=config,
+                            issue_number=target_issue_number,
+                            pr_number=resolved_pr.pr_number,
+                            pr_url=pr_url,
+                            pr_head_sha=pr_head_sha,
+                            flow="approved-plan-implementation",
+                            plan_hash=plan_hash,
+                        )
+                    return run_pr_loop(
+                        runner,
+                        pr_number=resolved_pr.pr_number,
+                        config=config,
+                        issue_context=target_issue_context,
+                        usage_context=usage_context,
+                    )
+
                 existing_handoff = find_existing_one_shot_impl_handoff(
                     target_issue_context.comments,
                     parent_issue=target_issue_number,
@@ -4192,6 +4273,45 @@ def run_issue_loop(
         log(config, f"Validating issue #{issue_number}")
         validate_open_issue(runner, config=config, issue_number=issue_number)
         issue_context = get_issue_context(runner, config=config, issue_number=issue_number)
+
+        # Resolve the canonical AGENT_ISSUE_PR_HANDOFF record (or, failing
+        # that, the legacy exactly-one-open-PR search) before invoking a
+        # coder in either direct or plan-first mode, so a rerun after an
+        # interrupted PR review resumes that PR instead of creating a
+        # duplicate (#589).
+        resolved_pr = resolve_canonical_pr_for_issue(
+            runner, config=config, issue_number=issue_number, issue_context=issue_context
+        )
+        if resolved_pr is not None:
+            log(
+                config,
+                f"Issue #{issue_number}: resuming PR #{resolved_pr.pr_number} review instead of "
+                f"invoking {agent_display_name(config.coder)}.",
+            )
+            validate_pr_references_issue(
+                runner, config=config, pr_number=resolved_pr.pr_number, issue_number=issue_number
+            )
+            if resolved_pr.source == "legacy":
+                pr_context = get_pr_review_context(runner, config=config, pr_number=resolved_pr.pr_number)
+                pr_url, pr_head_sha = require_pr_metadata_for_handoff(pr_context.metadata)
+                post_issue_pr_handoff_comment(
+                    runner,
+                    config=config,
+                    issue_number=issue_number,
+                    pr_number=resolved_pr.pr_number,
+                    pr_url=pr_url,
+                    pr_head_sha=pr_head_sha,
+                    flow="issue-implementation",
+                    plan_hash=None,
+                )
+            return run_pr_loop(
+                runner,
+                pr_number=resolved_pr.pr_number,
+                config=config,
+                issue_context=issue_context,
+                usage_context=usage_context,
+            )
+
         memory = prepare_agent_memory(runner, config)
         if plan_first:
             return _run_plan_first_loop(
@@ -4271,6 +4391,17 @@ def run_issue_loop(
             issue_number=issue_number,
         )
         initial_pr_metadata = get_pr_review_context(runner, config=config, pr_number=pr_number).metadata
+        initial_pr_url, initial_pr_head_sha = require_pr_metadata_for_handoff(initial_pr_metadata)
+        post_issue_pr_handoff_comment(
+            runner,
+            config=config,
+            issue_number=issue_number,
+            pr_number=pr_number,
+            pr_url=initial_pr_url,
+            pr_head_sha=initial_pr_head_sha,
+            flow="issue-implementation",
+            plan_hash=None,
+        )
         post_pr_comment(
             runner,
             config=config,
