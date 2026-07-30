@@ -107,6 +107,20 @@ def test_decode_raises_on_unsupported_schema_version():
         _decode_issue_pr_handoff_metadata(_encode_issue_pr_handoff_metadata(metadata))
 
 
+def test_decode_raises_on_fractional_schema_version():
+    metadata = _metadata(schema_version=1.9)
+    with pytest.raises(AgentLoopError, match="`schema_version` must be an integer"):
+        _decode_issue_pr_handoff_metadata(_encode_issue_pr_handoff_metadata(metadata))
+
+
+def test_decode_raises_on_boolean_schema_version():
+    # `True` coerces to `1` (== SCHEMA_VERSION) via a naive `int(...)` cast; the decoder
+    # must reject bool outright rather than silently accepting it as a valid version.
+    metadata = _metadata(schema_version=True)
+    with pytest.raises(AgentLoopError, match="`schema_version` must be an integer"):
+        _decode_issue_pr_handoff_metadata(_encode_issue_pr_handoff_metadata(metadata))
+
+
 def test_decode_raises_on_unknown_flow():
     encoded = _encode_issue_pr_handoff_metadata(_metadata())
     payload = base64.urlsafe_b64decode(encoded)
@@ -136,6 +150,20 @@ def test_decode_raises_on_non_coercible_identifiers(field):
     bad_encoded = base64.urlsafe_b64encode(_json.dumps(data).encode("utf-8")).decode("ascii")
     with pytest.raises(AgentLoopError, match="must be integers"):
         _decode_issue_pr_handoff_metadata(bad_encoded)
+
+
+@pytest.mark.parametrize("field", ["issue_number", "pr_number"])
+def test_decode_raises_on_boolean_identifiers(field):
+    encoded = _encode_issue_pr_handoff_metadata(_metadata(**{field: True}))
+    with pytest.raises(AgentLoopError, match="must be integers"):
+        _decode_issue_pr_handoff_metadata(encoded)
+
+
+@pytest.mark.parametrize("field", ["issue_number", "pr_number"])
+def test_decode_raises_on_fractional_identifiers(field):
+    encoded = _encode_issue_pr_handoff_metadata(_metadata(**{field: 56.5}))
+    with pytest.raises(AgentLoopError, match="must be integers"):
+        _decode_issue_pr_handoff_metadata(encoded)
 
 
 @pytest.mark.parametrize("pr_url", [None, ""])

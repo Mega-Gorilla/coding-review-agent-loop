@@ -97,12 +97,13 @@ def _require_non_empty_str(payload: dict[str, object], key: str) -> str:
 
 def _decode_issue_pr_handoff_metadata(encoded: str) -> IssuePrHandoffMetadata:
     payload = _decode_json_payload(encoded)
-    try:
-        schema_version = int(payload["schema_version"])
-    except (KeyError, TypeError, ValueError) as exc:
+    raw_schema_version = payload.get("schema_version")
+    if isinstance(raw_schema_version, bool) or not isinstance(raw_schema_version, int):
         raise AgentLoopError(
-            "Invalid AGENT_ISSUE_PR_HANDOFF payload: missing/invalid `schema_version`."
-        ) from exc
+            "Invalid AGENT_ISSUE_PR_HANDOFF payload: `schema_version` must be an integer "
+            "(not a bool or fractional value)."
+        )
+    schema_version = raw_schema_version
     if schema_version != SCHEMA_VERSION:
         raise AgentLoopError(
             f"Invalid AGENT_ISSUE_PR_HANDOFF payload: unsupported schema_version {schema_version}."
@@ -110,13 +111,19 @@ def _decode_issue_pr_handoff_metadata(encoded: str) -> IssuePrHandoffMetadata:
     flow = payload.get("flow")
     if flow not in _VALID_FLOWS:
         raise AgentLoopError(f"Invalid AGENT_ISSUE_PR_HANDOFF payload: unknown flow {flow!r}.")
-    try:
-        issue_number = int(payload["issue_number"])
-        pr_number = int(payload["pr_number"])
-    except (KeyError, TypeError, ValueError) as exc:
+    raw_issue_number = payload.get("issue_number")
+    raw_pr_number = payload.get("pr_number")
+    if (
+        isinstance(raw_issue_number, bool)
+        or not isinstance(raw_issue_number, int)
+        or isinstance(raw_pr_number, bool)
+        or not isinstance(raw_pr_number, int)
+    ):
         raise AgentLoopError(
             "Invalid AGENT_ISSUE_PR_HANDOFF payload: `issue_number`/`pr_number` must be integers."
-        ) from exc
+        )
+    issue_number = raw_issue_number
+    pr_number = raw_pr_number
     if issue_number <= 0 or pr_number <= 0:
         raise AgentLoopError(
             "Invalid AGENT_ISSUE_PR_HANDOFF payload: `issue_number`/`pr_number` must be positive."
