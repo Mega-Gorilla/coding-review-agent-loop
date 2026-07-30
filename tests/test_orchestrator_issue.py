@@ -9,6 +9,7 @@ from coding_review_agent_loop.cli import AgentLoopError, run_issue_loop
 from coding_review_agent_loop.decomposition import approved_plan_hash, format_one_shot_impl_handoff_comment
 from coding_review_agent_loop.errors import QuotaResetExceededError
 from coding_review_agent_loop.github import get_issue_context
+from coding_review_agent_loop.issue_pr_handoff import format_issue_pr_handoff_comment
 from coding_review_agent_loop.orchestrator import (
     PostedRoundMetadata,
     _attach_round_metadata,
@@ -191,7 +192,7 @@ def test_issue_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
     command_names = [cmd[:2] for cmd, _cwd in runner.commands]
     assert ["claude", "--print"] in command_names
     assert ["codex", "exec"] in command_names
-    assert len(runner.comments) == 4
+    assert len(runner.comments) == 5
     assert runner.comments[-1].startswith("**Review verdict:** Approved\n\nLGTM.")
     assert list((tmp_path / "logs").glob("*-claude.log"))
     assert list((tmp_path / "logs").glob("*-codex.log"))
@@ -288,7 +289,7 @@ def test_issue_loop_can_use_codex_as_coder_and_claude_as_reviewer(tmp_path):
         ["codex", "exec"],
         ["claude", "--print"],
     ]
-    assert len(runner.comments) == 4
+    assert len(runner.comments) == 5
     assert runner.comments[-1].startswith("**Review verdict:** Approved\n\nLGTM.")
 
 def test_issue_loop_runs_pre_review_tests_after_coder_changes(tmp_path):
@@ -1959,10 +1960,11 @@ def test_issue_loop_plan_first_can_implement_after_approval(tmp_path):
     switch_index = command_index(runner.commands, ["git", "switch", "main"])
     second_claude_index = command_index(runner.commands, ["claude", "--print"], start=first_claude_index + 1)
     assert first_claude_index < fetch_index < switch_index < second_claude_index
-    assert len(runner.comments) == 6
-    assert "<!-- AGENT_PLAN_ONE_SHOT_IMPL:" in runner.comments[3]
-    assert runner.comments[4].startswith("Implemented approved plan.")
-    assert runner.comments[5].startswith("**Review verdict:** Approved\n\nLGTM.")
+    assert len(runner.comments) == 7
+    assert "<!-- AGENT_ISSUE_PR_HANDOFF:" in runner.comments[3]
+    assert "<!-- AGENT_PLAN_ONE_SHOT_IMPL:" in runner.comments[4]
+    assert runner.comments[5].startswith("Implemented approved plan.")
+    assert runner.comments[6].startswith("**Review verdict:** Approved\n\nLGTM.")
 
 
 def test_issue_loop_plan_first_can_override_implementation_model(tmp_path):
@@ -2005,7 +2007,7 @@ def test_issue_loop_plan_first_can_override_implementation_model(tmp_path):
     assert claude_calls[0][claude_calls[0].index("--model") + 1] == "claude-fable-5"
     assert claude_calls[1][claude_calls[1].index("--model") + 1] == "claude-sonnet-5"
     assert "--resume" not in claude_calls[1]
-    assert runner.comments[4].startswith("Implemented approved plan.")
+    assert runner.comments[5].startswith("Implemented approved plan.")
 
 
 def test_issue_loop_rejects_pr_without_issue_reference_in_body(tmp_path):
@@ -2308,9 +2310,9 @@ def test_issue_loop_plan_first_one_shot_resumes_existing_pr_after_crash_before_h
     )
 
     assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
-    handoff_comments = [c for c in runner.comments if "<!-- AGENT_PLAN_ONE_SHOT_IMPL:" in c]
+    handoff_comments = [c for c in runner.comments if "<!-- AGENT_ISSUE_PR_HANDOFF:" in c]
     assert len(handoff_comments) == 1
-    assert f"Plan hash: {approved_plan_hash(plan)}" in handoff_comments[0]
+    assert "Flow: issue-implementation" in handoff_comments[0]
     assert "PR #77" in handoff_comments[0]
 
 def test_issue_loop_plan_first_one_shot_resume_existing_pr_logs_clear_message(tmp_path, capsys):
@@ -2360,10 +2362,7 @@ def test_issue_loop_plan_first_one_shot_resume_existing_pr_logs_clear_message(tm
     )
 
     output = capsys.readouterr().err
-    assert (
-        f"Existing implementation PR #492 found for issue #56 / approved plan {approved_plan_hash(plan)}; "
-        "resuming PR review instead of invoking Claude." in output
-    )
+    assert "Issue #56: resuming PR #492 review instead of invoking Claude." in output
 
 def test_issue_loop_plan_first_one_shot_rerun_raises_on_ambiguous_existing_prs(tmp_path):
     plan = "Plan:\n- Make the change.\n<!-- AGENT_PLAN_STATE: blocking -->\n-- Anthropic Claude"
@@ -2411,6 +2410,141 @@ def test_issue_loop_plan_first_one_shot_rerun_raises_on_ambiguous_existing_prs(t
 
     assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
 
+def test_issue_loop_direct_mode_resumes_existing_canonical_pr(tmp_path, capsys):
+    """#589: direct `agent-loop issue <n>` (no --plan-first) must also consult
+    the canonical AGENT_ISSUE_PR_HANDOFF record before invoking a coder, so a
+    rerun after an interrupted PR review resumes the existing PR instead of
+    invoking the coder again and creating a duplicate."""
+    canonical_comment = {
+        "author": {"login": "bot"},
+        "createdAt": "2026-05-23T00:00:00Z",
+        "body": format_issue_pr_handoff_comment(
+            issue_number=56,
+            pr_number=77,
+            pr_url="https://github.com/OWNER/REPO/pull/77",
+            pr_head_sha="abc123",
+            flow="issue-implementation",
+            plan_hash=None,
+        ),
+    }
+    runner = FakeRunner(
+        issue_comments=[canonical_comment],
+        pr_payload={"body": "Fixes #56"},
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+    )
+    config = make_config(tmp_path, quiet=False)
+
+    assert run_issue_loop(runner, issue_number=56, config=config) == 0
+
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+    assert any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
+    assert not any("<!-- AGENT_ISSUE_PR_HANDOFF:" in c for c in runner.comments)
+    output = capsys.readouterr().err
+    assert "Issue #56: resuming PR #77 review instead of invoking Claude." in output
+
+
+def test_issue_loop_direct_mode_legacy_search_resumes_and_backfills_canonical_record(tmp_path):
+    """Legacy issues with no canonical record yet must still recover through
+    the exactly-one-open-PR GitHub search, and the resume should backfill a
+    canonical record so later reruns hit the fast canonical path (#589)."""
+    runner = FakeRunner(
+        open_prs_payload=[{"number": 77, "body": "Fixes #56"}],
+        pr_payload={"body": "Fixes #56"},
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+    )
+    config = make_config(tmp_path)
+
+    assert run_issue_loop(runner, issue_number=56, config=config) == 0
+
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+    handoff_comments = [c for c in runner.comments if "<!-- AGENT_ISSUE_PR_HANDOFF:" in c]
+    assert len(handoff_comments) == 1
+    assert "Flow: issue-implementation" in handoff_comments[0]
+    assert "PR #77" in handoff_comments[0]
+
+
+def test_issue_loop_direct_mode_stale_canonical_record_raises(tmp_path):
+    """A canonical record pointing at a closed/merged PR must fail safely
+    with an actionable message before any coder invocation, never falling
+    back to a fresh implementation (#589)."""
+    canonical_comment = {
+        "author": {"login": "bot"},
+        "createdAt": "2026-05-23T00:00:00Z",
+        "body": format_issue_pr_handoff_comment(
+            issue_number=56,
+            pr_number=77,
+            pr_url="https://github.com/OWNER/REPO/pull/77",
+            pr_head_sha="abc123",
+            flow="issue-implementation",
+            plan_hash=None,
+        ),
+    }
+    runner = FakeRunner(
+        issue_comments=[canonical_comment],
+        pr_payload={
+            "number": 77,
+            "state": "CLOSED",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "body": "Fixes #56",
+        },
+    )
+    config = make_config(tmp_path)
+
+    with pytest.raises(AgentLoopError, match=r"agent-loop pr 77"):
+        run_issue_loop(runner, issue_number=56, config=config)
+
+    assert not any(cmd[:1] in (["claude"], ["codex"]) for cmd, _cwd in runner.commands)
+
+
+def test_issue_loop_direct_mode_ambiguous_open_prs_raises(tmp_path):
+    """No canonical record and multiple open PRs referencing the issue must
+    stop before any coder invocation with an actionable message (#589)."""
+    runner = FakeRunner(
+        open_prs_payload=[
+            {"number": 77, "body": "Fixes #56"},
+            {"number": 78, "body": "Closes #56"},
+        ],
+    )
+    config = make_config(tmp_path)
+
+    with pytest.raises(AgentLoopError, match=r"Multiple open PRs \(#77, #78\)"):
+        run_issue_loop(runner, issue_number=56, config=config)
+
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+
+
+def test_issue_loop_direct_mode_canonical_record_mismatched_pr_body_raises(tmp_path):
+    """A canonical record whose PR no longer references the issue in its body
+    must fail safely via the existing mismatch error (#589)."""
+    canonical_comment = {
+        "author": {"login": "bot"},
+        "createdAt": "2026-05-23T00:00:00Z",
+        "body": format_issue_pr_handoff_comment(
+            issue_number=56,
+            pr_number=77,
+            pr_url="https://github.com/OWNER/REPO/pull/77",
+            pr_head_sha="abc123",
+            flow="issue-implementation",
+            plan_hash=None,
+        ),
+    }
+    runner = FakeRunner(
+        issue_comments=[canonical_comment],
+        pr_payload={
+            "number": 77,
+            "state": "OPEN",
+            "url": "https://github.com/OWNER/REPO/pull/77",
+            "body": "No reference here.",
+        },
+    )
+    config = make_config(tmp_path)
+
+    with pytest.raises(AgentLoopError, match="does not reference issue #56"):
+        run_issue_loop(runner, issue_number=56, config=config)
+
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+
+
 def test_codex_issue_loop_creates_pr_then_claude_approves(tmp_path):
     runner = FakeRunner(
         codex_outputs=[
@@ -2427,9 +2561,10 @@ def test_codex_issue_loop_creates_pr_then_claude_approves(tmp_path):
     command_names = [cmd[:2] for cmd, _cwd in runner.commands]
     assert ["codex", "exec"] in command_names
     assert ["claude", "--print"] in command_names
-    assert len(runner.comments) == 2
-    assert runner.comments[0].startswith("Fixed issue.")
-    assert runner.comments[1].startswith("**Review verdict:** Approved\n\nLooks good.")
+    assert len(runner.comments) == 3
+    assert "<!-- AGENT_ISSUE_PR_HANDOFF:" in runner.comments[0]
+    assert runner.comments[1].startswith("Fixed issue.")
+    assert runner.comments[2].startswith("**Review verdict:** Approved\n\nLooks good.")
 
 def test_codex_issue_loop_alternates_until_claude_approval(tmp_path):
     runner = FakeRunner(
@@ -2448,7 +2583,7 @@ def test_codex_issue_loop_alternates_until_claude_approval(tmp_path):
 
     assert run_issue_loop(runner, issue_number=56, config=config) == 0
 
-    assert len(runner.comments) == 4
+    assert len(runner.comments) == 5
     assert runner.comments[-1].startswith("**Review verdict:** Approved\n\nLGTM.")
 
 def test_codex_issue_loop_requires_codex_to_report_pr_number(tmp_path):
@@ -2605,9 +2740,10 @@ def test_gemini_issue_loop_creates_pr_then_codex_approves(tmp_path):
 
     agent_commands = [cmd[:2] for cmd, _cwd in runner.commands if cmd[:1] in (["gemini"], ["codex"])]
     assert agent_commands == [["gemini", "--prompt"], ["codex", "exec"]]
-    assert len(runner.comments) == 2
-    assert runner.comments[0].startswith("Fixed issue.")
-    assert runner.comments[1].startswith("**Review verdict:** Approved\n\nLooks good.")
+    assert len(runner.comments) == 3
+    assert "<!-- AGENT_ISSUE_PR_HANDOFF:" in runner.comments[0]
+    assert runner.comments[1].startswith("Fixed issue.")
+    assert runner.comments[2].startswith("**Review verdict:** Approved\n\nLooks good.")
 
 def test_gemini_issue_loop_resumes_session_for_followup(tmp_path):
     runner = FakeRunner(

@@ -247,14 +247,26 @@ The modes are:
   `agent-loop issue <child>`. Older decomposition summaries without this marker
   are treated as not yet handed off, so the first child handoff is recorded once.
 
-Before invoking the coder for an approved-plan implementation, the
-orchestrator also checks GitHub directly for an already-open PR that
-references the target issue, independent of any handoff marker. This closes a
-crash window that a marker-only check cannot cover: if implementation created
-a PR but the run aborted afterward — before the `AGENT_PLAN_ONE_SHOT_IMPL`
-handoff comment (or the first PR round-metadata comment) could be posted — a
-rerun still resumes PR review on that PR instead of invoking the coder again
-and creating a duplicate. If more than one open PR references the issue, the
+Before invoking a coder for an issue — in direct `agent-loop issue <n>` mode or
+approved-plan implementation alike — the orchestrator resolves the canonical
+`AGENT_ISSUE_PR_HANDOFF` record: an authoritative, machine-readable comment
+posted once an implementation PR passes validation, recording the PR number,
+URL, head SHA, flow (`issue-implementation` or `approved-plan-implementation`),
+and (for plan-first runs) the approved-plan hash. If a valid record names a
+still-open PR, the rerun resumes PR review on that PR directly instead of
+invoking the coder again. A record whose PR is closed, merged, or otherwise
+unresolvable fails safely with an actionable message rather than falling back
+to a fresh implementation; fix or select the correct PR and rerun
+`agent-loop pr <number>` directly.
+
+Issues that predate this marker (or crashed before it could be posted) fall
+back to the legacy check: searching GitHub directly for an already-open PR
+that already references the target issue, independent of any handoff marker.
+This closes the same crash window as before: if implementation created a PR
+but the run aborted afterward — before any handoff comment could be posted —
+a rerun still resumes PR review on that PR instead of invoking the coder again
+and creating a duplicate, and backfills a canonical handoff record so later
+reruns take the fast path. If more than one open PR references the issue, the
 orchestrator raises an error instead of guessing which one to resume; close or
 merge the extra PR and rerun `agent-loop pr <number>` directly.
 
