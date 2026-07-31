@@ -33,3 +33,51 @@ def test_non_retryable_overrides_transient_signal() -> None:
 def test_orchestrator_alias_preserves_identity() -> None:
     # orchestrator keeps the old private name as an alias to the moved implementation.
     assert orchestrator._is_transient_agent_output is transient.is_transient_agent_output
+
+
+def test_backgrounded_completion_phrases_match() -> None:
+    assert transient.looks_like_backgrounded_completion(
+        "I'll wait for the background test run to finish."
+    )
+    assert transient.looks_like_backgrounded_completion(
+        "Waiting for background tests to complete."
+    )
+    assert transient.looks_like_backgrounded_completion(
+        "I started the full suite in the background; will get notified when it finishes."
+    )
+    assert transient.looks_like_backgrounded_completion(
+        "You will be notified once the background build finishes."
+    )
+    assert transient.looks_like_backgrounded_completion(
+        "Let me wait for the tests in the background to complete before finishing this."
+    )
+    assert transient.looks_like_backgrounded_completion(
+        "Running the test suite in the background now."
+    )
+
+
+def test_unrelated_failure_text_does_not_match() -> None:
+    assert not transient.looks_like_backgrounded_completion(
+        "I do not have enough information to proceed."
+    )
+    assert not transient.looks_like_backgrounded_completion(
+        "Please wait while I review the diff."
+    )
+    assert not transient.looks_like_backgrounded_completion("The tests passed and the PR is ready.")
+    assert not transient.looks_like_backgrounded_completion("")
+
+
+def test_backgrounded_completion_phrase_matches_regardless_of_embedded_markers() -> None:
+    # The phrase heuristic is purely textual (#588): eligibility for a
+    # completion-recovery attempt is gated separately, by the caller's own
+    # terminal-result validator having already rejected the response -- not
+    # by whether some other (possibly invalid-for-that-validator) marker is
+    # present. An embedded AGENT_STATE: approved or a quoted AGENT_PLAN_STATE
+    # marker must never exempt matching text from this detector.
+    assert transient.looks_like_backgrounded_completion(
+        "I'll wait for the background test run to finish.\n<!-- AGENT_STATE: approved -->"
+    )
+    assert transient.looks_like_backgrounded_completion(
+        "As discussed in the prior round (<!-- AGENT_PLAN_STATE: blocking -->), "
+        "I'll wait for the background build to finish before continuing."
+    )

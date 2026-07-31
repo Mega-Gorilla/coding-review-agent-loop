@@ -89,7 +89,7 @@ class UsageCallRecord:
     usage: UsageMetadata
     validation_status: Literal["validated", "invalid"] = "invalid"
     raw_backend_usage: object | None = None
-    role: Literal["repair"] | None = None
+    role: Literal["repair", "completion-recovery"] | None = None
     model: str | None = None
     outcome: Literal[
         "succeeded", "nonzero_exit", "empty_output", "timeout", "spawn_error", "invalid_output",
@@ -198,7 +198,7 @@ class RunUsageContext:
         returncode: int | None,
         usage: UsageMetadata,
         raw_backend_usage: object | None = None,
-        role: Literal["repair"] | None = None,
+        role: Literal["repair", "completion-recovery"] | None = None,
         model: str | None = None,
         outcome: Literal[
             "succeeded", "nonzero_exit", "empty_output", "timeout", "spawn_error", "invalid_output",

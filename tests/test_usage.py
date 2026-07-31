@@ -1,5 +1,23 @@
 from agent_loop_helpers import *  # noqa: F403
 
+from coding_review_agent_loop.usage import RunUsageContext, UsageMetadata
+
+
+def test_completion_recovery_role_survives_record_and_summary(tmp_path):
+    context = RunUsageContext(run_id="run-1", summary_path=tmp_path / "usage.json")
+    record = context.add_record(
+        agent="claude",
+        session_id="sess-1",
+        returncode=0,
+        usage=UsageMetadata(mode="estimated", input_tokens=10, output_tokens=5, total_tokens=15),
+        role="completion-recovery",
+    )
+    assert record.role == "completion-recovery"
+    assert record.to_dict()["role"] == "completion-recovery"
+
+    payload = context.summary_payload()
+    assert payload["calls"][0]["role"] == "completion-recovery"
+
 
 def test_codex_usage_summary_records_exact_tokens_from_jsonl_and_public_response(tmp_path):
     public_response = "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"

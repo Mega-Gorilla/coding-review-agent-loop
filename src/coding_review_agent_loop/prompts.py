@@ -87,7 +87,12 @@ def _coder_test_reporting_guidance() -> str:
         "Before opening or updating the PR, run the relevant tests you can run "
         "locally. In your final response, include a short `Tests:` line listing "
         "the exact commands run and whether they passed. If you cannot run tests, "
-        "explain why in that `Tests:` line.\n"
+        "explain why in that `Tests:` line. Run tests and any other required "
+        "completion work (builds, commits, pushes, PR creation) in the "
+        "foreground and wait for them to finish before ending this turn. Do not "
+        "launch them in the background and end the turn saying you will wait for "
+        "them; a turn that ends without a real terminal marker because required "
+        "work is still running in the background cannot be validated.\n"
     )
 
 
@@ -519,6 +524,40 @@ def _agent_unavailable_guidance(signature: str) -> str:
 -- {signature}
 
 Use `retryable: true` only when a fresh invocation may succeed without changing code or configuration. This is an agent-operational failure, not review feedback; do not use it for a genuine code blocker, a request for clarification, or a normal disagreement.
+"""
+
+
+def _issue_implementation_terminal_marker_guidance(
+    *, reviewer_name: str, coder_signature: str
+) -> str:
+    """Shared terminal-marker grammar for a direct issue-implementation turn.
+
+    Used by build_issue_prompt, build_issue_implementation_prompt, and
+    build_completion_recovery_prompt so all three stay in sync on the exact
+    marker grammar (#588); a discrepancy here would let a completion-recovery
+    resume diverge from what the original turn was told.
+    """
+    return f"""{_agent_unavailable_guidance(coder_signature)}
+Do not wait for {reviewer_name} yourself; this local orchestrator will run
+{reviewer_name} after you create the PR. Use blocking here to hand the PR to
+{reviewer_name} for review. If you cannot safely proceed and cannot create a
+PR, explain the blocker and end with `AGENT_STATE: blocking` (without an
+`AGENT_PR` marker), or ask a final focused question with `AGENT_CLARIFY`.
+Otherwise, use a positive PR number. Do not invent placeholder identifiers such
+as `AGENT_PR: 0`. Do not place your signature before the AGENT_STATE marker.
+Your response must end with, in this exact order for a completed implementation:
+
+<!-- AGENT_PR: <number> -->
+<!-- AGENT_STATE: blocking -->
+-- {coder_signature}
+
+For a no-PR blocking result:
+<!-- AGENT_STATE: blocking -->
+-- {coder_signature}
+
+For clarification:
+<!-- AGENT_CLARIFY -->
+-- {coder_signature}
 """
 
 
@@ -987,27 +1026,7 @@ run relevant tests, commit, push, and open a pull request against {config.base}.
 {_memory_block(memory)}
 {_salvage_summary_block(salvage_summary)}
 
-{_agent_unavailable_guidance(coder_signature)}
-Do not wait for {reviewer_name} yourself; this local orchestrator will run {reviewer_name} after
-you create the PR. Use blocking here to hand the PR to {reviewer_name} for review. If you cannot
-safely proceed and cannot create a PR, explain the blocker and end with `AGENT_STATE: blocking`
-(without an `AGENT_PR` marker), or ask a final focused question with `AGENT_CLARIFY`. Otherwise,
-use a positive PR number; do not invent placeholders such as `AGENT_PR: 0`. Do not place your
-signature before the AGENT_STATE marker. Your response must end with, in this exact order for a
-completed implementation:
-
-<!-- AGENT_PR: <number> -->
-<!-- AGENT_STATE: blocking -->
--- {coder_signature}
-
-For a no-PR blocking result:
-<!-- AGENT_STATE: blocking -->
--- {coder_signature}
-
-For clarification:
-<!-- AGENT_CLARIFY -->
--- {coder_signature}
-"""
+{_issue_implementation_terminal_marker_guidance(reviewer_name=reviewer_name, coder_signature=coder_signature)}"""
 
 
 def build_issue_plan_prompt(
@@ -1606,28 +1625,37 @@ Approved implementation plan:
 
 {approved_plan}
 
-{_agent_unavailable_guidance(coder_signature)}
-Do not wait for {reviewer_name} yourself; this local orchestrator will run
-{reviewer_name} after you create the PR. Use blocking here to hand the PR to
-{reviewer_name} for review. If you cannot safely proceed and cannot create a
-PR, explain the blocker and end with `AGENT_STATE: blocking` (without an
-`AGENT_PR` marker), or ask a final focused question with `AGENT_CLARIFY`.
-Otherwise, use a positive PR number. Do not invent placeholder identifiers such
-as `AGENT_PR: 0`. Do not place your signature before the AGENT_STATE marker.
-Your response must end with, in this exact order for a completed implementation:
+{_issue_implementation_terminal_marker_guidance(reviewer_name=reviewer_name, coder_signature=coder_signature)}"""
 
-<!-- AGENT_PR: <number> -->
-<!-- AGENT_STATE: blocking -->
--- {coder_signature}
 
-For a no-PR blocking result:
-<!-- AGENT_STATE: blocking -->
--- {coder_signature}
+def build_completion_recovery_prompt(config: AgentLoopConfig) -> str:
+    """One bounded same-session continuation for a stalled implementation turn (#588).
 
-For clarification:
-<!-- AGENT_CLARIFY -->
--- {coder_signature}
-"""
+    Sent via ``claude --resume <session>`` when a prior implementation turn
+    ended with no valid terminal marker and language suggesting it deferred to
+    background work still pending. This is the only continuation the agent
+    gets: the orchestrator will not send another one, regardless of what this
+    turn's own text says about retrying.
+    """
+    reviewer_name = format_agent_list(reviewers(config))
+    coder_signature = agent_signature(config.coder, config)
+    return f"""Your previous turn on this same implementation ended without a valid
+terminal response, and its text suggested required work (tests, a build, or
+similar) was left running in the background instead of being finished before
+the turn ended. This is a one-time, bounded continuation of that same session;
+the orchestrator will not send another one after this turn.
+{_coder_workdir_guidance(config)}
+{_scratch_file_guidance()}
+
+Inspect the existing checkout now (`git status`, `git diff`, `git log`) to see
+what you already did. Do not restart the implementation from scratch. Finish
+only foreground work from here: if you started tests or a build in the
+background, check on it or re-run it in the foreground now and wait for it to
+finish; do not launch anything new in the background. Then commit, push, and
+open the pull request if that is not already done, or continue exactly where
+you left off.
+{_coder_test_reporting_guidance()}{_coder_documentation_guidance()}
+{_issue_implementation_terminal_marker_guidance(reviewer_name=reviewer_name, coder_signature=coder_signature)}"""
 
 
 def build_task_prompt(

@@ -107,6 +107,7 @@ def test_coder_prompts_include_assigned_workdir_rule(tmp_path):
         build_task_prompt("Fix the bug.", config),
         build_followup_prompt(77, 1, "Needs tests.", config),
         build_same_pr_followup_prompt(77, 1, "Tighten docs.", config),
+        build_completion_recovery_prompt(config),
     ]
 
     for prompt in prompts:
@@ -115,6 +116,66 @@ def test_coder_prompts_include_assigned_workdir_rule(tmp_path):
         assert "must stay in that directory" in prompt
         assert "Do not `cd` into sibling, home, deployment, or duplicate clones" in prompt
         assert "`pwd` and `git status --branch --short`" in prompt
+
+
+def test_coder_test_reporting_guidance_forbids_background_completion_work(tmp_path):
+    config = make_config(tmp_path)
+
+    prompts = [
+        build_issue_prompt(56, config),
+        build_issue_implementation_prompt(56, "1. Fix it.", config),
+        build_task_prompt("Fix the bug.", config),
+        build_completion_recovery_prompt(config),
+    ]
+
+    for prompt in prompts:
+        assert "run the relevant tests you can run" in prompt
+        assert "in the foreground and wait for them to finish" in prompt
+        assert "Do not launch them in the background" in prompt
+
+
+def test_completion_recovery_prompt_includes_workdir_and_scratch_guidance(tmp_path):
+    config = make_config(tmp_path, coder="claude")
+    assigned = str(config.claude_dir.resolve())
+
+    prompt = build_completion_recovery_prompt(config)
+
+    assert f"Assigned checkout: `{assigned}`" in prompt
+    assert "`AGENT_LOOP_WORKDIR` is set to this path" in prompt
+    assert "must stay in that directory" in prompt
+    assert "write them outside the repository checkout" in prompt
+
+
+def test_completion_recovery_prompt_instructs_foreground_only_continuation(tmp_path):
+    config = make_config(tmp_path, coder="claude")
+
+    prompt = build_completion_recovery_prompt(config)
+
+    assert "one-time, bounded continuation" in prompt
+    assert "will not send another one after this turn" in prompt
+    assert "Do not restart the implementation from scratch" in prompt
+    assert "do not launch anything new in the background" in prompt
+    assert "Inspect the existing checkout now" in prompt
+
+
+def test_completion_recovery_prompt_shares_terminal_marker_grammar_with_implementation_prompt(
+    tmp_path,
+):
+    config = make_config(tmp_path, coder="claude")
+
+    recovery_prompt = build_completion_recovery_prompt(config)
+    implementation_prompt = build_issue_implementation_prompt(56, "1. Fix it.", config)
+
+    for marker_line in (
+        "<!-- AGENT_PR: <number> -->",
+        "<!-- AGENT_STATE: blocking -->",
+        "<!-- AGENT_CLARIFY -->",
+        "<!-- AGENT_UNAVAILABLE -->",
+        "For a no-PR blocking result:",
+        "For clarification:",
+    ):
+        assert marker_line in recovery_prompt
+        assert marker_line in implementation_prompt
 
 
 def test_issue_plan_prompt_requires_complete_structured_plan_state_contract(tmp_path):

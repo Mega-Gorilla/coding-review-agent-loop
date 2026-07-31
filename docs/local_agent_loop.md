@@ -1197,6 +1197,29 @@ an agent exits or returns only diagnostics, empty output, or normal prose
 without the required marker, the loop fails locally with `AgentLoopError` and
 the attempt log path instead of posting that raw output as a review.
 
+Coder prompts for a direct issue implementation explicitly forbid launching
+required tests or other completion work (builds, commits, pushes, PR creation)
+in the background and ending the turn early; the coder must finish that work
+in the foreground and wait for it before responding. If a Claude
+implementation turn still ends this way — no valid `AGENT_PR`/`AGENT_STATE`/
+`AGENT_CLARIFY` marker, and text like "I'll wait for the background test run
+to finish" or "you'll be notified when it's done" — the loop performs one
+bounded `claude --resume <session>` completion-recovery pass instead of
+failing immediately. The resume turn is told to inspect the existing checkout,
+finish only foreground work, and either complete the PR or end with a real
+terminal marker. Its result is validated exactly like a normal implementation
+response: a valid PR, a no-PR `AGENT_STATE: blocking`, or `AGENT_CLARIFY` is
+accepted and posted like any other outcome. If the resume turn instead
+declares `AGENT_UNAVAILABLE` itself, or if the resume command fails or still
+does not produce a valid terminal response, the loop renders (or reuses the
+agent's own verbatim) protocol-valid `AGENT_UNAVAILABLE` text, persists it to
+that attempt's own response file, and posts it to the GitHub issue before
+failing locally with `AgentLoopError` and the usual salvage artifacts — there
+is never more than one resume attempt, regardless of what the agent's own
+response says about retrying. A genuine, non-recovery no-PR
+`AGENT_STATE: blocking` or `AGENT_CLARIFY` result is likewise posted to the
+issue, matching how a successful PR-creating implementation is already posted.
+
 For structured plan reviews, plan revisions, PR reviews, and coder follow-ups,
 a present but malformed structured response may get a repair pass before the
 local failure is raised. By default the repair pass calls Antigravity through

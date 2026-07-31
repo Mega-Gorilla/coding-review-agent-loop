@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace as dataclasses_replace
 from pathlib import Path
 
 from .agents.base import AgentName, AgentResult
-from .agents.registry import agent_display_name, get_backend, run_agent_result
+from .agents.registry import agent_display_name, agent_signature, get_backend, run_agent_result
 from .config import (
     AgentLoopConfig,
     ensure_agent_workdirs,
@@ -102,6 +102,7 @@ from .prompts import (
     build_discuss_answer_confirmation_prompt,
     build_discuss_semantic_comparison_prompt,
     build_discuss_review_prompt,
+    build_completion_recovery_prompt,
     build_followup_prompt,
     build_issue_implementation_prompt,
     build_issue_plan_prompt,
@@ -189,6 +190,7 @@ from .transient import (
     NON_RETRYABLE_AGENT_OUTPUT_RE,
     TRANSIENT_AGENT_OUTPUT_RE,
     is_transient_agent_output,
+    looks_like_backgrounded_completion,
 )
 from .usage import RunUsageContext, UsageMetadata, estimate_usage
 from .workdirs import active_workdir
@@ -226,6 +228,7 @@ from .comment_rendering import (
     normalize_freeform_signature,
     render_discuss_round_summary_comment,
     render_public_agent_comment,
+    render_agent_unavailable_comment,
     render_canonical_plan_revision,
     render_canonical_plan_steps,
     _render_discuss_agenda_lines,
@@ -1753,6 +1756,241 @@ def _run_structured_repair(
     )
 
 
+@dataclass(frozen=True)
+class CompletionRecoveryPolicy:
+    """Explicit opt-in for the bounded same-session completion-recovery pass (#588).
+
+    Passed only by the direct issue-implementation call sites that already
+    validate with `_require_issue_implementation_result`; every other
+    `_run_validated_agent` caller (planning, plan/PR review, discuss, task,
+    and the coder follow-up/PR loop) leaves this `None` and is therefore
+    ineligible by construction -- eligibility is never inferred from the
+    agent name or response text alone.
+    """
+
+    issue_number: int
+
+
+@dataclass(frozen=True)
+class _CompletionRecoveryOutcome:
+    validated: ValidatedAgentResponse | None
+    result: AgentResult
+    error: str
+    classification_text: str
+    failure_category: str
+    # Protocol-valid text already persisted to the recovery attempt's own
+    # response file and posted to the GitHub issue; set only when validated
+    # is None.
+    terminal_public_response: str | None
+
+
+def _post_completion_recovery_terminal_comment(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    completion_recovery: CompletionRecoveryPolicy,
+    recovery_result: AgentResult,
+    terminal_text: str,
+) -> None:
+    if recovery_result.response_file_path is not None:
+        recovery_result.response_file_path.write_text(terminal_text, encoding="utf-8")
+    post_issue_comment(
+        runner,
+        config=config,
+        issue_number=completion_recovery.issue_number,
+        body=terminal_text,
+    )
+
+
+def _synthesized_completion_recovery_unavailable(
+    *, config: AgentLoopConfig, recovery_result: AgentResult, category: str, summary: str
+) -> tuple[AgentUnavailable, str]:
+    unavailable = AgentUnavailable(
+        schema_version=1,
+        kind="agent_unavailable",
+        retryable=False,
+        category=category,
+        summary=summary,
+        suggested_action=(
+            "Inspect the completion-recovery log and salvage artifacts, "
+            "then retry the implementation manually."
+        ),
+    )
+    signature = agent_signature("claude", config, model_used=recovery_result.model_used)
+    return unavailable, render_agent_unavailable_comment(unavailable, signature=signature)
+
+
+def _attempt_claude_completion_recovery(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    completion_recovery: CompletionRecoveryPolicy,
+    session_id: str,
+    validate: Callable[[str], object],
+    usage_context: RunUsageContext | None,
+    run_id: str | None,
+    role: str | None,
+    label: str | None,
+    timeout_seconds: float | None,
+) -> _CompletionRecoveryOutcome:
+    """One bounded ``claude --resume`` completion-recovery pass (#588).
+
+    Entirely self-contained and attempt-local: every variable here is scoped
+    to this one recovery call, never the caller's original (failed) attempt.
+    The caller's original ``AgentResult`` is not even passed in, so isolation
+    is structural rather than merely asserted. Three outcomes:
+
+    - a valid PR/blocking/clarify per ``validate()`` -> success, returned as
+      a normal ``ValidatedAgentResponse`` subject to ordinary PR validation;
+    - the resume turn itself declares a protocol-valid ``AGENT_UNAVAILABLE``
+      -> terminal, posted/persisted verbatim, never passed to ``validate()``,
+      and always terminal regardless of its own ``retryable`` flag (the
+      bounded one-recovery-attempt policy overrides the agent's preference);
+    - anything else (transport failure, or text that still fails
+      ``validate()``) -> terminal, with a synthesized non-retryable
+      ``AGENT_UNAVAILABLE`` rendered, persisted, and posted.
+
+    In every terminal case there is exactly one ``--resume`` call total.
+    """
+    recovery_prompt = build_completion_recovery_prompt(config)
+    recovery_result = run_agent_result(
+        runner,
+        agent="claude",
+        config=config,
+        prompt=recovery_prompt,
+        session_id=session_id,
+        run_id=run_id,
+        role=role,
+        label=label,
+        timeout_seconds=timeout_seconds,
+    )
+    if usage_context is not None:
+        recovery_usage = _resolve_usage_metadata(
+            config=config, prompt=recovery_prompt, result=recovery_result
+        )
+        if recovery_usage is not None:
+            usage_context.add_record(
+                agent="claude",
+                session_id=recovery_result.session_id,
+                returncode=recovery_result.returncode,
+                usage=recovery_usage,
+                raw_backend_usage=recovery_result.raw_usage,
+                role="completion-recovery",
+            )
+    else:
+        recovery_usage = None
+
+    def _terminal(category: str, summary: str, *, error: str) -> _CompletionRecoveryOutcome:
+        _unavailable, rendered = _synthesized_completion_recovery_unavailable(
+            config=config, recovery_result=recovery_result, category=category, summary=summary
+        )
+        _post_completion_recovery_terminal_comment(
+            runner,
+            config=config,
+            completion_recovery=completion_recovery,
+            recovery_result=recovery_result,
+            terminal_text=rendered,
+        )
+        return _CompletionRecoveryOutcome(
+            validated=None,
+            result=recovery_result,
+            error=error,
+            classification_text=recovery_result.raw_output or recovery_result.text,
+            failure_category="agent-unavailable",
+            terminal_public_response=rendered,
+        )
+
+    if recovery_result.returncode is None:
+        limit = f" after {timeout_seconds:g}s" if timeout_seconds is not None else ""
+        return _terminal(
+            "environment",
+            "The bounded claude --resume completion-recovery pass timed out.",
+            error=f"completion-recovery resume timed out{limit}",
+        )
+    if recovery_result.returncode != 0:
+        return _terminal(
+            "tooling",
+            "The bounded claude --resume completion-recovery pass exited with a non-zero status.",
+            error=f"completion-recovery resume exited with {recovery_result.returncode}",
+        )
+    recovery_text = recovery_result.text
+    if not recovery_text.strip():
+        return _terminal(
+            "tooling",
+            "The bounded claude --resume completion-recovery pass produced no output.",
+            error="completion-recovery resume produced no output",
+        )
+
+    try:
+        unavailable = parse_agent_unavailable(recovery_text)
+    except AgentLoopError:
+        unavailable = None
+    if unavailable is not None:
+        # Agent-declared: post/persist verbatim, never validate()'d, and
+        # always terminal regardless of unavailable.retryable.
+        _post_completion_recovery_terminal_comment(
+            runner,
+            config=config,
+            completion_recovery=completion_recovery,
+            recovery_result=recovery_result,
+            terminal_text=recovery_text,
+        )
+        return _CompletionRecoveryOutcome(
+            validated=None,
+            result=recovery_result,
+            error=(
+                "agent explicitly reported it cannot continue after completion "
+                f"recovery ({unavailable.category}): {unavailable.summary}"
+            ),
+            classification_text=recovery_text,
+            failure_category="agent-unavailable",
+            terminal_public_response=recovery_text,
+        )
+
+    try:
+        marker_value = validate(recovery_text)
+    except AgentLoopError as exc:
+        _unavailable, rendered = _synthesized_completion_recovery_unavailable(
+            config=config,
+            recovery_result=recovery_result,
+            category="tooling",
+            summary=(
+                "The bounded claude --resume completion-recovery pass did not "
+                f"produce a valid terminal response: {exc}"
+            ),
+        )
+        _post_completion_recovery_terminal_comment(
+            runner,
+            config=config,
+            completion_recovery=completion_recovery,
+            recovery_result=recovery_result,
+            terminal_text=rendered,
+        )
+        return _CompletionRecoveryOutcome(
+            validated=None,
+            result=recovery_result,
+            error=str(exc),
+            classification_text=recovery_text,
+            failure_category="agent-unavailable",
+            terminal_public_response=rendered,
+        )
+
+    return _CompletionRecoveryOutcome(
+        validated=ValidatedAgentResponse(
+            text=recovery_text,
+            session_id=recovery_result.session_id,
+            marker_value=marker_value,
+            usage=recovery_usage,
+            model_used=recovery_result.model_used,
+        ),
+        result=recovery_result,
+        error="",
+        classification_text="",
+        failure_category="",
+        terminal_public_response=None,
+    )
+
+
 def _log_repair_attempts(config: AgentLoopConfig, prefix: str, attempts: Sequence[RepairAttemptResult]) -> None:
     for attempt in attempts:
         diagnostic = attempt.diagnostic or "(none)"
@@ -1789,6 +2027,7 @@ def _run_validated_agent(
     timeout_seconds: float | None = None,
     salvage_context: SalvageContext | None = None,
     operation_description: str | None = None,
+    completion_recovery: CompletionRecoveryPolicy | None = None,
 ) -> ValidatedAgentResponse:
     agent_name = agent_display_name(agent)
     operation_description = operation_description or _operation_description_from_context(
@@ -1804,6 +2043,13 @@ def _run_validated_agent(
     last_result: AgentResult | None = None
     last_classification_text = ""
     last_failure_category = "empty-response"
+    # Set only by an exhausted completion-recovery attempt (#588): the
+    # protocol-valid text already persisted to the recovery attempt's own
+    # response file and posted to the GitHub issue, attached to the final
+    # AgentInvocationError so callers/tests can assert on it without
+    # re-parsing the message.
+    terminal_public_response: str | None = None
+    completion_recovery_attempted = False
 
     for attempt in range(1, max_attempts + 1):
         result = run_agent_result(
@@ -1900,6 +2146,38 @@ def _run_validated_agent(
                     public_response=True,
                     repair_expected_kind=repair_expected_kind,
                 )
+                if (
+                    completion_recovery is not None
+                    and not completion_recovery_attempted
+                    and agent == "claude"
+                    and result.session_id
+                    and looks_like_backgrounded_completion(classification_text)
+                ):
+                    # At most one same-session resume, ever, for this call
+                    # (#588): mark it attempted before invoking so a failure
+                    # cannot loop back into this branch on a later attempt.
+                    completion_recovery_attempted = True
+                    recovery_outcome = _attempt_claude_completion_recovery(
+                        runner,
+                        config=config,
+                        completion_recovery=completion_recovery,
+                        session_id=result.session_id,
+                        validate=validate,
+                        usage_context=usage_context,
+                        run_id=usage_context.run_id if usage_context is not None else None,
+                        role=role,
+                        label=label,
+                        timeout_seconds=timeout_seconds,
+                    )
+                    if recovery_outcome.validated is not None:
+                        return recovery_outcome.validated
+                    last_result = recovery_outcome.result
+                    last_error = recovery_outcome.error
+                    last_classification_text = recovery_outcome.classification_text
+                    last_failure_category = recovery_outcome.failure_category
+                    terminal_public_response = recovery_outcome.terminal_public_response
+                    should_retry = False
+                    break
                 response_failure_is_unsupported = last_failure_category == "unsupported_model"
                 # Marker near-misses are a separate first-attempt nudge for common footer typos;
                 # structured JSON protocol drift still remains repairable when retries are exhausted.
@@ -2347,7 +2625,11 @@ def _run_validated_agent(
         classification_text=last_classification_text,
     )
     message += diagnostics.format_for_error()
-    raise AgentInvocationError(message, failure_category=last_failure_category)
+    raise AgentInvocationError(
+        message,
+        failure_category=last_failure_category,
+        terminal_public_response=terminal_public_response,
+    )
 
 
 @dataclass(frozen=True)
@@ -2379,6 +2661,32 @@ def _require_issue_implementation_result(text: str) -> int | _TerminalNoPrImplem
     raise AgentLoopError(
         f"Coder did not create a valid PR: {reference_error} "
         "or a terminal blocking/clarification marker."
+    )
+
+
+def _post_no_pr_implementation_terminal_comment(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    issue_number: int,
+    coder_response: ValidatedAgentResponse,
+) -> None:
+    """Post a genuine coder-declared no-PR blocking/clarify result to GitHub (#588).
+
+    Matches how a PR-success implementation result is already posted
+    (post_pr_comment / post_issue_pr_handoff_comment): the coder's own text
+    is the actionable public record, whether or not a PR was created.
+    """
+    post_issue_comment(
+        runner,
+        config=config,
+        issue_number=issue_number,
+        body=normalize_freeform_signature(
+            coder_response.text,
+            agent=config.coder,
+            config=config,
+            model_used=coder_response.model_used,
+        ),
     )
 
 
@@ -3151,10 +3459,17 @@ def _implement_approved_issue(
             approved_plan_hash=plan_hash,
         ),
         operation_description="approved-plan implementation",
+        completion_recovery=CompletionRecoveryPolicy(issue_number=issue_number),
     )
     coder_output = coder_response.text
     implementation_result = coder_response.marker_value
     if isinstance(implementation_result, _TerminalNoPrImplementation):
+        _post_no_pr_implementation_terminal_comment(
+            runner,
+            config=implementation_config,
+            issue_number=issue_number,
+            coder_response=coder_response,
+        )
         raise AgentLoopError(
             "Coder did not create a valid PR; implementation is " + implementation_result.state + "."
         )
@@ -4355,11 +4670,18 @@ def run_issue_loop(
                 run_id=usage_context.run_id,
             ),
             operation_description="issue implementation",
+            completion_recovery=CompletionRecoveryPolicy(issue_number=issue_number),
         )
         coder_output = coder_response.text
         coder_session_id = coder_response.session_id
         implementation_result = coder_response.marker_value
         if isinstance(implementation_result, _TerminalNoPrImplementation):
+            _post_no_pr_implementation_terminal_comment(
+                runner,
+                config=config,
+                issue_number=issue_number,
+                coder_response=coder_response,
+            )
             raise AgentLoopError(
                 "Coder did not create a valid PR; implementation is " + implementation_result.state + "."
             )

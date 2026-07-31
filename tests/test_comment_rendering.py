@@ -16,6 +16,7 @@ from coding_review_agent_loop.comment_rendering import (
     _render_public_pr_review_comment,
     decode_deferred_stages_marker,
     normalize_freeform_signature,
+    render_agent_unavailable_comment,
     render_deferred_stages_section,
     render_discuss_round_summary_comment,
 )
@@ -54,6 +55,26 @@ from agent_loop_helpers import (
     structured_plan_state,
     structured_pr_review,
 )
+
+
+def test_render_agent_unavailable_comment_round_trips_through_parser():
+    from coding_review_agent_loop.protocol import AgentUnavailable, parse_agent_unavailable
+
+    unavailable = AgentUnavailable(
+        schema_version=1,
+        kind="agent_unavailable",
+        retryable=False,
+        category="tooling",
+        summary="The bounded claude --resume completion-recovery pass timed out.",
+        suggested_action="Inspect the completion-recovery log and salvage artifacts.",
+    )
+
+    rendered = render_agent_unavailable_comment(unavailable, signature="Anthropic Claude")
+
+    assert rendered.startswith("{")
+    assert "<!-- AGENT_UNAVAILABLE -->" in rendered
+    assert rendered.endswith("-- Anthropic Claude")
+    assert parse_agent_unavailable(rendered) == unavailable
 
 
 def test_answer_research_rendering_ignores_failed_resume_placeholder():

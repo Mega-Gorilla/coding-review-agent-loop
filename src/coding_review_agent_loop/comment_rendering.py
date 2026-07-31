@@ -17,6 +17,7 @@ from .protocol import (
     PRIOR_UNRESOLVED_ITEM_DISPOSITIONS_HEADING_RE,
     PRIOR_UNRESOLVED_PLAN_ITEM_DISPOSITIONS_HEADING_RE,
     SIGNATURE_RE,
+    AgentUnavailable,
     DeferredStage,
     HumanRequirementDisposition,
     ParsedDiscussAgenda,
@@ -47,6 +48,27 @@ _AGENT_BY_DISPLAY_NAME = {
     agent_display_name(agent): agent
     for agent in ("claude", "codex", "gemini", "antigravity")
 }
+
+
+def render_agent_unavailable_comment(unavailable: AgentUnavailable, *, signature: str) -> str:
+    """Render a protocol-valid ``agent_unavailable`` envelope that parse_agent_unavailable accepts.
+
+    Used only for orchestrator-synthesized outcomes (e.g. an exhausted
+    completion-recovery attempt, #588) where there is no agent-authored
+    envelope to post verbatim. The JSON payload, footer, and signature must
+    exactly match the grammar in protocol.py's
+    _consume_agent_unavailable_footer_and_signature: no prose between the JSON
+    and the footer, and nothing but the signature after it.
+    """
+    payload = {
+        "schema_version": unavailable.schema_version,
+        "kind": "agent_unavailable",
+        "retryable": unavailable.retryable,
+        "category": unavailable.category,
+        "summary": unavailable.summary,
+        "suggested_action": unavailable.suggested_action,
+    }
+    return f"{json.dumps(payload, ensure_ascii=False)}\n<!-- AGENT_UNAVAILABLE -->\n-- {signature}"
 
 
 def _review_freeform_summary_text(text: str) -> str:
