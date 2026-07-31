@@ -2613,7 +2613,9 @@ def test_issue_loop_stops_before_pr_lookup_for_invalid_pr_terminal_result(
 
     assert not any(cmd[:3] == ["gh", "pr", "view"] for cmd, _cwd in runner.commands)
     assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
-    assert runner.comments == []
+    # A genuine coder-declared no-PR terminal is posted to the issue like a
+    # PR-success implementation result already is (#588).
+    assert runner.comments == [f"Cannot proceed.\n<!-- AGENT_PR: 0 -->\n{terminal_marker}\n-- OpenAI Codex"]
 
 
 def test_issue_loop_invalid_pr_without_terminal_state_is_protocol_error(tmp_path):
@@ -3364,7 +3366,9 @@ def test_approved_plan_no_pr_terminal_result_bypasses_human_requirements_and_pr_
 
     assert not any(cmd[:3] == ["gh", "pr", "view"] for cmd, _cwd in runner.commands)
     assert not any(cmd[:1] == ["codex"] for cmd, _cwd in runner.commands)
-    assert runner.comments == []
+    # A genuine coder-declared no-PR terminal is posted to the issue like a
+    # PR-success implementation result already is (#588).
+    assert runner.comments == [f"Cannot proceed.\n<!-- AGENT_PR: 0 -->\n{terminal_marker}\n-- Anthropic Claude"]
 
 
 def test_approved_plan_implementation_rerun_ignores_remote_salvage_on_plan_hash_mismatch(tmp_path):

@@ -37,9 +37,20 @@ class AgentInvocationError(AgentLoopError):
     without re-parsing the message.
     """
 
-    def __init__(self, message: str, *, failure_category: str | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_category: str | None = None,
+        terminal_public_response: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.failure_category = failure_category
+        # Protocol-valid text (agent-declared AGENT_UNAVAILABLE text verbatim,
+        # or an orchestrator-synthesized rendering) already persisted/posted by
+        # a bounded completion-recovery attempt (#588). None for every other
+        # failure path, which is unchanged.
+        self.terminal_public_response = terminal_public_response
 
 
 class QuotaResetExceededError(AgentLoopError):

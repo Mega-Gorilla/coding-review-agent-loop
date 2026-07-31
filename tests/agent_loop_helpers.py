@@ -138,6 +138,7 @@ from coding_review_agent_loop.prompts import (
     _build_followup_guidance,
     _build_unresolved_items_guidance,
     _phased_plan_guard,
+    build_completion_recovery_prompt,
     build_followup_prompt,
     build_issue_implementation_prompt,
     build_issue_plan_prompt,

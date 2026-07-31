@@ -37,3 +37,34 @@ def is_transient_agent_output(text: str) -> bool:
     return bool(TRANSIENT_AGENT_OUTPUT_RE.search(text)) and not bool(
         NON_RETRYABLE_AGENT_OUTPUT_RE.search(text)
     )
+
+
+# Phrases an agent uses when it has started required work (tests, builds) in
+# the background and ends its turn waiting on it instead of finishing in the
+# foreground (#588). This is purely textual: it makes no assumption about
+# marker presence/absence. Eligibility for completion recovery is gated
+# separately by the caller's own terminal-result validator having already
+# rejected the response, so an embedded (but invalid-for-that-validator)
+# marker never exempts a response from matching here.
+BACKGROUNDED_COMPLETION_RE = re.compile(
+    r"(?i)"
+    r"\bi(?:'|')?ll wait\b|"
+    r"\bwait(?:ing)? for (?:the )?background|"
+    r"\brun(?:s|ning)? (?:it |them )?in the background\b|"
+    r"\b(?:test|build|suite)\w*\b.{0,60}\bin the background\b|"
+    r"\bin the background\b.{0,60}\b(?:test|build|suite)|"
+    r"\b(?:you(?:'|')?ll|i(?:'|')?ll|we(?:'|')?ll) (?:get|be) notified\b|"
+    r"\bwill (?:get|be) notified\b|"
+    r"\blet me wait for\b|"
+    r"\bonce (?:the |it )?(?:background )?(?:test|build|suite).{0,40}finish"
+)
+
+
+def looks_like_backgrounded_completion(text: str) -> bool:
+    """Return True if ``text`` reads like the agent deferred to background work.
+
+    Purely a phrase match; callers must independently confirm the response
+    failed the relevant terminal-result validator before treating this as
+    grounds for a completion-recovery attempt (#588).
+    """
+    return bool(BACKGROUNDED_COMPLETION_RE.search(text))
