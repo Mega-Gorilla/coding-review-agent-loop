@@ -1846,9 +1846,11 @@ def _attempt_claude_completion_recovery(
       -> terminal, posted/persisted verbatim, never passed to ``validate()``,
       and always terminal regardless of its own ``retryable`` flag (the
       bounded one-recovery-attempt policy overrides the agent's preference);
-    - anything else (transport failure, or text that still fails
-      ``validate()``) -> terminal, with a synthesized non-retryable
-      ``AGENT_UNAVAILABLE`` rendered, persisted, and posted.
+    - transport failures, or text that still fails ``validate()`` -> terminal
+      with a synthesized non-retryable ``AGENT_UNAVAILABLE`` rendered,
+      persisted, and posted; except a second background-wait-only response,
+      which is a deterministic protocol failure rather than an operational
+      unavailability.
 
     In every terminal case there is exactly one ``--resume`` call total.
     """
@@ -1950,6 +1952,22 @@ def _attempt_claude_completion_recovery(
     try:
         marker_value = validate(recovery_text)
     except AgentLoopError as exc:
+        if looks_like_backgrounded_completion(recovery_text):
+            # A completed CLI turn that again says it is waiting for
+            # background work is not an environment/provider outage. Do not
+            # overwrite the real diagnostic with AGENT_UNAVAILABLE or post a
+            # misleading operational-failure comment (#593).
+            return _CompletionRecoveryOutcome(
+                validated=None,
+                result=recovery_result,
+                error=(
+                    "completion-recovery resume again deferred to background work "
+                    f"without a terminal response: {exc}"
+                ),
+                classification_text=recovery_text,
+                failure_category="deterministic",
+                terminal_public_response=None,
+            )
         _unavailable, rendered = _synthesized_completion_recovery_unavailable(
             config=config,
             recovery_result=recovery_result,
