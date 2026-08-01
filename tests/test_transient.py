@@ -43,6 +43,9 @@ def test_backgrounded_completion_phrases_match() -> None:
         "Waiting for background tests to complete."
     )
     assert transient.looks_like_backgrounded_completion(
+        "Waiting on the background test run and the exit-monitor; I'll continue once results arrive."
+    )
+    assert transient.looks_like_backgrounded_completion(
         "I started the full suite in the background; will get notified when it finishes."
     )
     assert transient.looks_like_backgrounded_completion(

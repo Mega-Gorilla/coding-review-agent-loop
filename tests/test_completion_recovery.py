@@ -344,6 +344,38 @@ def test_issue_loop_recovers_after_one_bounded_resume_then_succeeds(tmp_path):
     )
 
 
+def test_issue_loop_recovers_from_claude_waiting_on_background_wording(tmp_path):
+    """Match the exact #531 completion text, not only ``waiting for`` variants."""
+    runner = FakeRunner(
+        claude_outputs=[
+            json.dumps(
+                {
+                    "result": (
+                        "Waiting on the background test run and the exit-monitor; "
+                        "I'll continue once results arrive."
+                    ),
+                    "session_id": "sess-waiting-on",
+                }
+            ),
+            "Created PR.\n<!-- AGENT_PR: 88 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+            "Fixed review.\n<!-- AGENT_STATE: blocking -->",
+        ],
+        codex_outputs=[
+            "LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex",
+        ],
+        pr_payload={"body": "Fixes #56"},
+    )
+    config = make_config(tmp_path)
+
+    assert run_issue_loop(runner, issue_number=56, config=config) == 0
+
+    resume_commands = [
+        cmd for cmd in _claude_resume_commands(runner) if "--resume" in cmd
+    ]
+    assert len(resume_commands) == 1
+    assert resume_commands[0][resume_commands[0].index("--resume") + 1] == "sess-waiting-on"
+
+
 def test_issue_loop_exhausts_recovery_and_raises_with_terminal_public_response(tmp_path):
     runner = FakeRunner(
         claude_outputs=[
