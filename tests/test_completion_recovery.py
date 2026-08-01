@@ -221,7 +221,7 @@ def test_recovery_transport_failure_timeout_synthesizes_unavailable(tmp_path):
     assert len(_claude_resume_commands(runner)) == 1
 
 
-def test_recovery_still_incomplete_text_synthesizes_unavailable(tmp_path):
+def test_recovery_repeated_background_wait_is_deterministic_not_unavailable(tmp_path):
     # Two incomplete textual responses in a row (the original attempt and the
     # resume attempt): the resume attempt still has no valid PR/blocking/
     # clarify marker.
@@ -244,12 +244,10 @@ def test_recovery_still_incomplete_text_synthesizes_unavailable(tmp_path):
     )
 
     assert outcome.validated is None
-    assert outcome.failure_category == "agent-unavailable"
-    parsed = parse_agent_unavailable(outcome.terminal_public_response)
-    assert parsed is not None
-    assert parsed.retryable is False
-    assert parsed.category == "tooling"
-    assert "did not create a valid PR" in outcome.error
+    assert outcome.failure_category == "deterministic"
+    assert outcome.terminal_public_response is None
+    assert "again deferred to background work" in outcome.error
+    assert runner.comments == []
     assert len(_claude_resume_commands(runner)) == 1
 
 
@@ -374,6 +372,30 @@ def test_issue_loop_recovers_from_claude_waiting_on_background_wording(tmp_path)
     ]
     assert len(resume_commands) == 1
     assert resume_commands[0][resume_commands[0].index("--resume") + 1] == "sess-waiting-on"
+
+
+def test_issue_loop_repeated_background_wait_reports_deterministic_failure(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            json.dumps(
+                {
+                    "result": "I'll wait for the background test run to finish.",
+                    "session_id": "sess-repeat-wait",
+                }
+            ),
+            "I'll wait for the background test run to finish again.",
+        ],
+    )
+    config = make_config(tmp_path)
+
+    with pytest.raises(AgentInvocationError) as excinfo:
+        run_issue_loop(runner, issue_number=56, config=config)
+
+    assert excinfo.value.failure_category == "deterministic"
+    assert excinfo.value.terminal_public_response is None
+    assert "again deferred to background work" in str(excinfo.value)
+    assert len(_claude_resume_commands(runner)) == 2
+    assert runner.comments == []
 
 
 def test_issue_loop_exhausts_recovery_and_raises_with_terminal_public_response(tmp_path):
