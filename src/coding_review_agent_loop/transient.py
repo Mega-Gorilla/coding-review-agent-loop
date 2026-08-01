@@ -49,7 +49,7 @@ def is_transient_agent_output(text: str) -> bool:
 BACKGROUNDED_COMPLETION_RE = re.compile(
     r"(?i)"
     r"\bi(?:'|')?ll wait\b|"
-    r"\bwait(?:ing)? for (?:the )?background|"
+    r"\bwait(?:ing)? (?:for|on) (?:the )?background|"
     r"\brun(?:s|ning)? (?:it |them )?in the background\b|"
     r"\b(?:test|build|suite)\w*\b.{0,60}\bin the background\b|"
     r"\bin the background\b.{0,60}\b(?:test|build|suite)|"
