@@ -725,6 +725,59 @@ Two companion flags apply in both sequential and parallel discuss runs:
     vote can never match real outcomes — so a partial final round ends in a
     `needs-human` deadlock, with the failures noted in the summary.
 
+### Parallel plan/PR reviewer execution
+
+`--review-parallel` (#594) runs same-round plan or PR reviewers concurrently
+instead of one after another. It is accepted by `issue`, `pr`, and `task`
+only — `discuss` rejects it with a usage error since it has its own
+`--discuss-parallel`, which this flag does not change:
+
+```bash
+agent-loop pr 456 --repo OWNER/REPO \
+  --reviewer codex --reviewer antigravity \
+  --review-parallel
+```
+
+Execution model:
+
+- Every pending reviewer's prompt is built up front from the same pre-round
+  plan/PR state (current plan or PR diff, prior unresolved items, PR checks
+  snapshot), then all pending turns are submitted to a thread pool. Same-round
+  reviewers never see each other's in-progress output.
+- All outcomes are collected before any round state is mutated. Healthy
+  reviewers are applied — comment posted, unresolved items numbered, session
+  IDs recorded — from the main thread, in configured `--reviewer` order, so
+  transcripts and resume state stay deterministic regardless of completion
+  order.
+- Only after every healthy outcome is applied does the orchestrator raise a
+  fatal failure, if any: a quota-reset failure takes priority; otherwise the
+  first failure in configured `--reviewer` order. Because healthy reviewers
+  were already posted, a rerun resumes them instead of re-invoking them.
+- Existing per-reviewer policies are unchanged and isolated per turn: retry,
+  structured repair, the unavailable-reviewer / incomplete-review
+  distinction, and the PR flow's single-reviewer-fatal rule. One reviewer's
+  failure never cancels a healthy concurrent reviewer's turn.
+- For PR review, a reviewer's pre-launch `sync_reviewer_pr_before_review` is
+  attempted for every pending reviewer before any turn launches; a sync
+  failure only removes that reviewer from the launch set and is classified
+  (fatal or unavailable) alongside turn failures after the round settles, so
+  the remaining reviewers still launch. A single shared PR-checks snapshot is
+  used for every concurrently launched reviewer's prompt in the round,
+  instead of one fetch per reviewer as sequential mode does.
+- Resume works unchanged: already-posted round reviews are reused without
+  re-invoking their reviewers, and when every configured reviewer's review
+  resumes from comments (or a round is entirely skipped, e.g. head-advance
+  recovery routing), no thread pool is constructed at all.
+- Parallel mode requires a distinct workdir per reviewer and rejects the run
+  otherwise — deliberately not bypassed by `--allow-shared-dir`, the same
+  guardrail `--discuss-parallel` uses, because concurrent git/tool activity in
+  a single worktree can corrupt it. The coder may still share a reviewer's
+  directory since it only runs after the reviewer synchronization point.
+- The coder is never parallelized with reviewers, and review rounds never
+  overlap with each other.
+- Sequential execution remains the default; prefer it when concurrent
+  quota/API pressure across providers is a concern.
+
 ### Split issue materialization
 
 By default, a discuss `split` consensus or a plan-first plan that narrows
