@@ -87,7 +87,7 @@ override or `--antigravity-models MODEL [MODEL ...]` for a custom ordered chain;
 the two model options are mutually exclusive. Customize fallback detection with
 `--antigravity-quota-signatures SIGNATURE [SIGNATURE ...]`. Each `agy --print`
 call passes `--print-timeout` from `--antigravity-print-timeout-seconds`
-(default `3600`, i.e. one hour, matching the `agent-loop` CLI), overriding
+(default `600`, i.e. ten minutes, matching the `agent-loop` CLI), overriding
 `agy`'s own five-minute print-mode default so long turns are not cut short.
 These options are available on every skill command that can invoke an
 external agent.

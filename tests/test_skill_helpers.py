@@ -3917,7 +3917,7 @@ class TestAntigravitySkill:
     @pytest.mark.parametrize(
         ("extra_args", "expected_timeout"),
         [
-            ((), 3600),
+            ((), 600),
             (("--antigravity-print-timeout-seconds", "900"), 900),
         ],
     )
