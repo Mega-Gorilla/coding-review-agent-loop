@@ -168,7 +168,7 @@ def build_parser() -> argparse.ArgumentParser:
             default=DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS,
             metavar="SECONDS",
             help=(
-                "Maximum wait for each agy --print invocation (default: 3600). "
+                "Maximum wait for each agy --print invocation (default: 600). "
                 "Overrides agy's five-minute print-mode default."
             ),
         )

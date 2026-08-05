@@ -93,7 +93,7 @@ legacy single-model override or `--antigravity-models MODEL [MODEL ...]` for a
 custom ordered chain; these options are mutually exclusive. Use
 `--antigravity-quota-signatures SIGNATURE [SIGNATURE ...]` to customize the
 output signatures that trigger fallback. Use
-`--antigravity-print-timeout-seconds SECONDS` (default `3600`, matching the
+`--antigravity-print-timeout-seconds SECONDS` (default `600`, matching the
 `agent-loop` CLI) to override the `--print-timeout` passed to each `agy
 --print` call, which otherwise falls back to `agy`'s own five-minute
 print-mode default. These options are available on plan, task, PR-review,

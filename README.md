@@ -124,7 +124,7 @@ guidance. Notes: Antigravity turns are single-shot (no cross-round session
 resume) and report estimated token usage (`agy` emits no token counts).
 
 Each `agy --print` invocation is run with `--print-timeout` set from
-`--antigravity-print-timeout-seconds` (default 3600, i.e. one hour), which
+`--antigravity-print-timeout-seconds` (default 600, i.e. ten minutes), which
 overrides `agy`'s own five-minute print-mode default so long coder/reviewer
 turns are not cut short. Raise or lower it with, for example,
 `--antigravity-print-timeout-seconds 1800`.
