@@ -15,6 +15,12 @@ The default coder is Claude and the default reviewer is Codex. Reverse the direc
 
 Gemini CLI consumer access (free / Google AI Pro / Ultra) is retiring on June 18, 2026; personal-account `gemini` users should migrate to the Antigravity CLI (`agy`) with `--coder antigravity` / `--reviewer antigravity` (pick the model via `--antigravity-model`, default `Gemini 3.1 Pro (High)`). Enterprise / API-key Gemini CLI paths may remain available for organizations that still have access, so the `gemini` backend is retained for those users. Direct Gemini CLI support is best-effort: maintainers without enterprise Gemini CLI access need reporter-provided `.agent-loop-logs/*gemini.log` output, response-file contents, CLI version, and any sharable account/access context to debug live `gemini` failures. Antigravity turns are single-shot (no cross-round session resume) and report estimated usage.
 
+Every `agy --print` call passes `--print-timeout` from
+`--antigravity-print-timeout-seconds` (default `3600`, i.e. one hour), which
+overrides `agy`'s own five-minute print-mode default so long turns are not
+cut short. Override it per run, e.g. `--antigravity-print-timeout-seconds
+1800`.
+
 ## Architecture
 
 The tool is a local orchestrator. It does not call model APIs directly; it shells
