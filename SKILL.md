@@ -85,8 +85,12 @@ With no override, it uses the ordered fallback chain `Gemini 3.1 Pro (High)` →
 `Gemini 3.5 Flash (High)`. Use `--model MODEL` for the legacy single-model
 override or `--antigravity-models MODEL [MODEL ...]` for a custom ordered chain;
 the two model options are mutually exclusive. Customize fallback detection with
-`--antigravity-quota-signatures SIGNATURE [SIGNATURE ...]`. These options are
-available on every skill command that can invoke an external agent.
+`--antigravity-quota-signatures SIGNATURE [SIGNATURE ...]`. Each `agy --print`
+call passes `--print-timeout` from `--antigravity-print-timeout-seconds`
+(default `3600`, i.e. one hour, matching the `agent-loop` CLI), overriding
+`agy`'s own five-minute print-mode default so long turns are not cut short.
+These options are available on every skill command that can invoke an
+external agent.
 
 ---
 

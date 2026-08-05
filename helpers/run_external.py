@@ -141,6 +141,15 @@ def main() -> None:
         default=None,
         help="Output signatures that trigger fallback to the next Antigravity model.",
     )
+    parser.add_argument(
+        "--antigravity-print-timeout-seconds",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Maximum wait for each agy --print invocation (default: 3600, "
+             "matching the agent-loop CLI). Overrides agy's five-minute "
+             "print-mode default.",
+    )
     parser.add_argument("--output", required=True, help="Path to write the agent response.")
     parser.add_argument("--workdir", required=True, help="Working directory for the agent.")
     parser.add_argument(
@@ -255,6 +264,7 @@ def main() -> None:
     from coding_review_agent_loop.agents.codex import CodexBackend
     from coding_review_agent_loop.agents.gemini import GeminiBackend
     from coding_review_agent_loop.config import (
+        DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS,
         DEFAULT_ANTIGRAVITY_QUOTA_SIGNATURES,
         AgentLoopConfig,
         AgentName,
@@ -277,6 +287,11 @@ def main() -> None:
         tuple(args.antigravity_quota_signatures)
         if args.antigravity_quota_signatures is not None
         else DEFAULT_ANTIGRAVITY_QUOTA_SIGNATURES
+    )
+    antigravity_print_timeout_seconds = (
+        args.antigravity_print_timeout_seconds
+        if args.antigravity_print_timeout_seconds is not None
+        else DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS
     )
 
     # Build a minimal config sufficient for backend.run()
@@ -304,6 +319,7 @@ def main() -> None:
         antigravity_args=("--dangerously-skip-permissions",),
         antigravity_model=None,
         antigravity_models=antigravity_models,
+        antigravity_print_timeout_seconds=antigravity_print_timeout_seconds,
         antigravity_quota_signatures=antigravity_quota_signatures,
         gh_cmd="gh",
         claude_args=(),

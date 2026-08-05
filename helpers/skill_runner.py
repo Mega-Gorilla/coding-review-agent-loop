@@ -559,7 +559,7 @@ def _workdir_for_agent(agent: str, args: argparse.Namespace) -> str:
 
 
 def _add_antigravity_options(parser: argparse.ArgumentParser) -> None:
-    """Add Antigravity model-chain overrides shared by external-agent commands."""
+    """Add Antigravity backend overrides shared by external-agent commands."""
     models = parser.add_mutually_exclusive_group()
     models.add_argument(
         "--model",
@@ -578,6 +578,15 @@ def _add_antigravity_options(parser: argparse.ArgumentParser) -> None:
         default=None,
         help="Output signatures that trigger fallback to the next Antigravity model.",
     )
+    parser.add_argument(
+        "--antigravity-print-timeout-seconds",
+        type=int,
+        default=None,
+        metavar="SECONDS",
+        help="Maximum wait for each agy --print invocation (default: 3600, "
+             "matching the agent-loop CLI). Overrides agy's five-minute "
+             "print-mode default.",
+    )
 
 
 def _add_gemini_cmd_option(parser: argparse.ArgumentParser) -> None:
@@ -595,6 +604,7 @@ def _run_external_antigravity_args(args: argparse.Namespace) -> tuple[str, ...]:
     model = getattr(args, "model", None)
     models = getattr(args, "antigravity_models", None)
     quota_signatures = getattr(args, "antigravity_quota_signatures", None)
+    print_timeout_seconds = getattr(args, "antigravity_print_timeout_seconds", None)
     if model is not None:
         result.extend(("--model", model))
     elif models is not None:
@@ -603,6 +613,8 @@ def _run_external_antigravity_args(args: argparse.Namespace) -> tuple[str, ...]:
     if quota_signatures is not None:
         result.append("--antigravity-quota-signatures")
         result.extend(quota_signatures)
+    if print_timeout_seconds is not None:
+        result.extend(("--antigravity-print-timeout-seconds", str(print_timeout_seconds)))
     return tuple(result)
 
 
