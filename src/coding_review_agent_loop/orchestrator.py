@@ -3650,6 +3650,47 @@ def _decompose_approved_plan(
     return created
 
 
+@dataclass(frozen=True)
+class _ReviewerTurnResult:
+    """Outcome of one plan/PR reviewer turn: a validated response or a captured failure.
+
+    Worker threads in the --review-parallel path return these instead of
+    raising, so exceptions never cross the thread boundary; the main thread
+    applies the existing failure policy in configured reviewer order after
+    every launched turn settles (#594).
+    """
+
+    reviewer_name: str
+    response: ValidatedAgentResponse | None = None
+    error: AgentLoopError | None = None
+
+
+def _launch_reviewer_turns(
+    runner: Runner,
+    pending: Sequence[AgentName],
+    *,
+    thread_name_prefix: str,
+    run_turn: Callable[[AgentName], _ReviewerTurnResult],
+) -> dict[AgentName, _ReviewerTurnResult]:
+    """Run one worker per pending reviewer concurrently and join before returning.
+
+    ``run_turn`` must never let an exception escape; it is responsible for
+    capturing any failure into the returned ``_ReviewerTurnResult`` so the
+    thread pool never needs to propagate a worker exception. On
+    KeyboardInterrupt, active agent processes are killed so worker wait loops
+    return promptly before the interrupt is re-raised.
+    """
+    executor = ThreadPoolExecutor(max_workers=len(pending), thread_name_prefix=thread_name_prefix)
+    try:
+        futures = {reviewer: executor.submit(run_turn, reviewer) for reviewer in pending}
+        return {reviewer: future.result() for reviewer, future in futures.items()}
+    except KeyboardInterrupt:
+        runner.terminate_active_processes()
+        raise
+    finally:
+        executor.shutdown(wait=True, cancel_futures=True)
+
+
 def _run_plan_first_loop(
     runner: Runner,
     *,
@@ -3660,6 +3701,8 @@ def _run_plan_first_loop(
     implement_after_approval: bool,
     usage_context: RunUsageContext,
 ) -> int:
+    if config.review_parallel:
+        _ensure_parallel_reviewer_workdirs(config, flag_name="--review-parallel", role_label="reviewer")
     coder_name = agent_display_name(config.coder)
     configured_reviewers = reviewers(config)
     coder_session_id: str | None = None
@@ -3785,6 +3828,99 @@ def _run_plan_first_loop(
         resumed_by_name = {
             record.metadata.agent: record for record in (current_resume.completed_reviews if current_resume is not None else ())
         }
+
+        def _build_plan_review_prompt(reviewer: AgentName) -> str:
+            # Built once per reviewer from pre-round state only, so the same
+            # prompt is produced regardless of sequential or parallel launch.
+            return build_plan_review_prompt(
+                issue_number,
+                round_number,
+                current_plan,
+                config,
+                reviewer=reviewer,
+                memory=memory,
+                issue_context=issue_context,
+                unresolved_items=prior_unresolved_items,
+                compact_context=use_compact_context,
+                compact_prior=CompactPriorContext(tuple(compact_prior_summaries)),
+                compact_tail=CompactPlanTailContext(
+                    subject=current_plan_subject,
+                    action=(
+                        "Review the current plan for correctness, architecture fit, "
+                        "missing edge cases, test strategy, and ambiguity."
+                    ),
+                ),
+            )
+
+        plan_fatal_errors: list[tuple[str, AgentLoopError]] = []
+        plan_turn_results: dict[AgentName, _ReviewerTurnResult] = {}
+        if config.review_parallel:
+            pending_plan_reviewers = [
+                reviewer for reviewer in configured_reviewers
+                if resumed_by_name.get(agent_display_name(reviewer)) is None
+            ]
+            if pending_plan_reviewers:
+                plan_prompts = {
+                    reviewer: _build_plan_review_prompt(reviewer) for reviewer in pending_plan_reviewers
+                }
+                pending_plan_names = [agent_display_name(reviewer) for reviewer in pending_plan_reviewers]
+                log(
+                    config,
+                    f"Planning round {round_number}: invoking {', '.join(pending_plan_names)} "
+                    f"in parallel on issue #{issue_number}",
+                )
+
+                def _plan_reviewer_worker(reviewer: AgentName) -> _ReviewerTurnResult:
+                    reviewer_name = agent_display_name(reviewer)
+                    try:
+                        response = _run_validated_agent(
+                            runner,
+                            agent=reviewer,
+                            config=config,
+                            prompt=plan_prompts[reviewer],
+                            session_id=reviewer_session_ids.get(reviewer),
+                            marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
+                            validate=lambda text, reviewer_name=reviewer_name: _validate_plan_review_response(
+                                text,
+                                reviewer=reviewer_name,
+                                unresolved_items=prior_unresolved_items,
+                                # Never share the mutable round_new_unresolved_items list
+                                # with concurrent workers (#594): it only enriches the
+                                # UnknownPriorItemDispositionError message, so an empty
+                                # tuple here changes no validation outcome.
+                                current_round_items=(),
+                                surfaced_requirement_ids=_surfaced_reviewer_requirement_ids(
+                                    issue_context.human_requirements,
+                                    requirement_scope="planning requirements",
+                                ),
+                            ),
+                            usage_context=usage_context,
+                            use_repair=True,
+                            repair_expected_kind="plan_review",
+                            repair_reviewer_requirement_ids=_surfaced_reviewer_requirement_ids(
+                                issue_context.human_requirements,
+                                requirement_scope="planning requirements",
+                            ),
+                            repair_allowed_prior_item_ids=tuple(
+                                item.item_id for item in prior_unresolved_items
+                            ),
+                            ledger_incomplete=round_ledger_incomplete,
+                            role="reviewer",
+                            operation_description="plan review",
+                        )
+                    except AgentLoopError as exc:
+                        # Includes QuotaResetExceededError: captured here and
+                        # re-raised on the main thread with priority.
+                        return _ReviewerTurnResult(reviewer_name=reviewer_name, error=exc)
+                    return _ReviewerTurnResult(reviewer_name=reviewer_name, response=response)
+
+                plan_turn_results = _launch_reviewer_turns(
+                    runner,
+                    pending_plan_reviewers,
+                    thread_name_prefix=f"plan-review-r{round_number}",
+                    run_turn=_plan_reviewer_worker,
+                )
+
         for reviewer in configured_reviewers:
             reviewer_name = agent_display_name(reviewer)
             resumed_record = resumed_by_name.get(reviewer_name)
@@ -3812,6 +3948,34 @@ def _run_plan_first_loop(
                 review_state = parsed_review.state
                 log(config, f"Planning round {round_number}: resuming {reviewer_name}'s completed review")
                 reviewer_new_unresolved_items = list(resumed_record.metadata.new_items)
+            elif config.review_parallel:
+                turn = plan_turn_results[reviewer]
+                if turn.error is not None:
+                    category = getattr(turn.error, "failure_category", None) or "error"
+                    log(
+                        config,
+                        f"Planning round {round_number}: {reviewer_name} failed ({category}); "
+                        "will raise after the remaining reviewers in this round are applied",
+                    )
+                    plan_fatal_errors.append((reviewer_name, turn.error))
+                    continue
+                review_response = turn.response
+                assert review_response is not None
+                review_output = review_response.text
+                review_model_used = review_response.model_used
+                reviewer_session_ids[reviewer] = review_response.session_id
+                parsed_review = review_response.marker_value
+                assert isinstance(parsed_review, ParsedPlanReview)
+                parsed_review = dataclasses_replace(
+                    parsed_review,
+                    items=_drop_repeated_carried_plan_future_followups(
+                        parsed_review.items,
+                        prior_items=prior_unresolved_items,
+                        dispositions=parsed_review.dispositions,
+                    ),
+                )
+                review_state = parsed_review.state
+                reviewer_new_unresolved_items = []
             else:
                 log(
                     config,
@@ -3822,25 +3986,7 @@ def _run_plan_first_loop(
                     runner,
                     agent=reviewer,
                     config=config,
-                    prompt=build_plan_review_prompt(
-                        issue_number,
-                        round_number,
-                        current_plan,
-                        config,
-                        reviewer=reviewer,
-                        memory=memory,
-                        issue_context=issue_context,
-                        unresolved_items=prior_unresolved_items,
-                        compact_context=use_compact_context,
-                        compact_prior=CompactPriorContext(tuple(compact_prior_summaries)),
-                        compact_tail=CompactPlanTailContext(
-                            subject=current_plan_subject,
-                            action=(
-                                "Review the current plan for correctness, architecture fit, "
-                                "missing edge cases, test strategy, and ambiguity."
-                            ),
-                        ),
-                    ),
+                    prompt=_build_plan_review_prompt(reviewer),
                     session_id=reviewer_session_ids.get(reviewer),
                     marker_description="<!-- AGENT_PLAN_STATE: approved|blocking -->",
                     validate=lambda text, reviewer_name=reviewer_name, items=prior_unresolved_items: _validate_plan_review_response(
@@ -3888,12 +4034,16 @@ def _run_plan_first_loop(
                     "and reported no actionable blocking plan issues or Same-Plan follow-ups; "
                     "stopping without a coder follow-up",
                 )
-                raise AgentLoopError(
+                incomplete_review_error = AgentLoopError(
                     f"{reviewer_name} did not complete plan review and reported no actionable "
                     "blocking plan issues or Same-Plan follow-ups. This is a reviewer-internal error; "
                     "agent-loop stopped before a coder follow-up. Rerun or switch the reviewer/model "
                     "after resolving the reviewer environment."
                 )
+                if config.review_parallel:
+                    plan_fatal_errors.append((reviewer_name, incomplete_review_error))
+                    continue
+                raise incomplete_review_error
 
             log(
                 config,
@@ -3982,6 +4132,16 @@ def _run_plan_first_loop(
                 )
             else:
                 round_new_unresolved_items.extend(reviewer_new_unresolved_items)
+
+        if plan_fatal_errors:
+            # Every healthy reviewer above was already applied (comment
+            # posted, items numbered) in configured order, so a rerun resumes
+            # them instead of re-invoking (#594). Raise only now: quota resets
+            # take priority, otherwise the first configured-order failure.
+            for _reviewer_name, error in plan_fatal_errors:
+                if isinstance(error, QuotaResetExceededError):
+                    raise error
+            raise plan_fatal_errors[0][1]
 
         unresolved_items, _ = _apply_unresolved_item_dispositions(
             prior_unresolved_items,
@@ -4990,6 +5150,8 @@ def run_pr_loop(
         )
         if not workdirs_ready:
             ensure_agent_workdirs(config, runner)
+        if config.review_parallel:
+            _ensure_parallel_reviewer_workdirs(config, flag_name="--review-parallel", role_label="reviewer")
         log(config, f"Validating PR #{pr_number}")
         validate_open_pr(runner, config=config, pr_number=pr_number)
         memory = prepare_agent_memory(runner, config)
@@ -5093,6 +5255,161 @@ def run_pr_loop(
                     "without current-head coder metadata; routing recovered prior items "
                     f"through {coder_name} before review",
                 )
+
+            pr_fatal_errors: list[tuple[str, AgentLoopError]] = []
+            pr_prep_failures: dict[AgentName, AgentLoopError] = {}
+            pr_turn_results: dict[AgentName, _ReviewerTurnResult] = {}
+            shared_reviewer_pr_checks: PullRequestChecks | None = None
+
+            def _pr_reviewer_prelaunch_kind(reviewer: AgentName) -> str:
+                # Pure classification, no agent calls: mirrors the resumed/
+                # carried-approval branching below so the pre-round parallel
+                # launch list matches what the per-reviewer loop would decide.
+                reviewer_name = agent_display_name(reviewer)
+                if reviewer in unavailable_reviewer_failures:
+                    return "skip"
+                if resumed_by_name.get(reviewer_name) is not None:
+                    return "resumed"
+                prior_approval = unchanged_head_approvals.get(reviewer_name)
+                if (
+                    prior_approval is not None
+                    and prior_approval.metadata.round_number < round_number
+                    and (
+                        not human_requirements
+                        or (
+                            human_requirements_resolved(prior_approval.body)
+                            and set(surfaced_reviewer_requirement_ids).issubset(
+                                prior_approval.metadata.surfaced_reviewer_requirement_ids
+                            )
+                        )
+                    )
+                ):
+                    return "carried"
+                return "turn"
+
+            if config.review_parallel and not skip_reviewers_for_recovery:
+                pending_pr_reviewers = [
+                    reviewer for reviewer in configured_reviewers
+                    if _pr_reviewer_prelaunch_kind(reviewer) == "turn"
+                ]
+                if pending_pr_reviewers:
+                    launchable_pr_reviewers: list[AgentName] = []
+                    for reviewer in pending_pr_reviewers:
+                        reviewer_name = agent_display_name(reviewer)
+                        try:
+                            sync_reviewer_pr_before_review(config, runner, reviewer, pr_number, pr_metadata)
+                        except AgentLoopError as exc:
+                            log(
+                                config,
+                                f"Round {round_number}: {reviewer_name} failed pre-review PR sync "
+                                f"({getattr(exc, 'failure_category', None) or 'error'}); skipping its "
+                                "launch while the remaining reviewers still run",
+                            )
+                            pr_prep_failures[reviewer] = exc
+                            continue
+                        launchable_pr_reviewers.append(reviewer)
+                    if launchable_pr_reviewers:
+                        # One shared checks snapshot for the whole round (#594),
+                        # instead of one fetch per reviewer as sequential mode
+                        # does, so every concurrently launched prompt and the
+                        # post-turn pending-CI-only downgrade agree.
+                        shared_reviewer_pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
+                        pr_parallel_compact_tail = (
+                            CompactPrReviewTailContext(
+                                head_sha=pr_metadata.head_sha,
+                                round_number=round_number,
+                            )
+                            if use_compact_pr_context
+                            else None
+                        )
+                        pr_prompts = {
+                            reviewer: build_review_prompt(
+                                pr_number,
+                                round_number,
+                                config,
+                                reviewer=reviewer,
+                                pr_metadata=pr_metadata,
+                                pr_checks=shared_reviewer_pr_checks,
+                                memory=memory,
+                                issue_context=issue_context,
+                                human_requirements=human_requirements,
+                                unresolved_items=prior_unresolved_items,
+                                compact_context=use_compact_pr_context,
+                                compact_prior=(
+                                    CompactPriorContext(tuple(pr_compact_prior_summaries))
+                                    if use_compact_pr_context
+                                    else None
+                                ),
+                                compact_tail=pr_parallel_compact_tail,
+                                compact_coder_summary=compact_coder_summary,
+                                compact_coder_tests_run=compact_coder_tests_run,
+                            )
+                            for reviewer in launchable_pr_reviewers
+                        }
+                        launchable_pr_names = [
+                            agent_display_name(reviewer) for reviewer in launchable_pr_reviewers
+                        ]
+                        log(
+                            config,
+                            f"Round {round_number}: invoking {', '.join(launchable_pr_names)} "
+                            f"in parallel on PR #{pr_number}",
+                        )
+
+                        def _pr_reviewer_worker(reviewer: AgentName) -> _ReviewerTurnResult:
+                            reviewer_name = agent_display_name(reviewer)
+                            try:
+                                response = _run_validated_agent(
+                                    runner,
+                                    agent=reviewer,
+                                    config=config,
+                                    prompt=pr_prompts[reviewer],
+                                    session_id=(
+                                        None if use_compact_pr_context else reviewer_session_ids.get(reviewer)
+                                    ),
+                                    marker_description="<!-- AGENT_STATE: approved|blocking -->",
+                                    validate=lambda text, reviewer_name=reviewer_name: _validate_review_response(
+                                        text,
+                                        reviewer=reviewer_name,
+                                        unresolved_items=prior_unresolved_items,
+                                        # Never share the mutable round_new_unresolved_items
+                                        # list with concurrent workers (#594): it only
+                                        # enriches the UnknownPriorItemDispositionError
+                                        # message, so an empty tuple changes no outcome.
+                                        current_round_items=(),
+                                    ),
+                                    usage_context=usage_context,
+                                    use_repair=True,
+                                    repair_expected_kind="pr_review",
+                                    repair_reviewer_requirement_ids=_surfaced_reviewer_requirement_ids(
+                                        human_requirements,
+                                        requirement_scope="PR requirements",
+                                    ),
+                                    repair_allowed_prior_item_ids=tuple(
+                                        item.item_id for item in prior_unresolved_items
+                                    ),
+                                    ledger_incomplete=round_ledger_incomplete,
+                                    role="reviewer",
+                                    operation_description="PR review",
+                                )
+                            except AgentLoopError as exc:
+                                # Includes QuotaResetExceededError: captured here
+                                # and re-raised on the main thread with priority.
+                                return _ReviewerTurnResult(reviewer_name=reviewer_name, error=exc)
+                            return _ReviewerTurnResult(reviewer_name=reviewer_name, response=response)
+
+                        pr_turn_results = _launch_reviewer_turns(
+                            runner,
+                            launchable_pr_reviewers,
+                            thread_name_prefix=f"pr-review-r{round_number}",
+                            run_turn=_pr_reviewer_worker,
+                        )
+                    else:
+                        log(
+                            config,
+                            f"Round {round_number}: every pending reviewer failed pre-review "
+                            "PR sync; nothing to launch in parallel this round",
+                        )
+
             for reviewer in (() if skip_reviewers_for_recovery else configured_reviewers):
                 reviewer_name = agent_display_name(reviewer)
                 if reviewer in unavailable_reviewer_failures:
@@ -5149,6 +5466,46 @@ def run_pr_loop(
                         f"Round {round_number}: skipping {reviewer_name}; it approved unchanged "
                         f"PR head {current_pr_subject} in round {prior_approval.metadata.round_number}",
                     )
+                elif config.review_parallel:
+                    review_failure: AgentInvocationError | AgentLoopError | None = (
+                        pr_prep_failures.get(reviewer)
+                    )
+                    turn = pr_turn_results.get(reviewer) if review_failure is None else None
+                    if turn is not None and turn.error is not None:
+                        review_failure = turn.error
+                    if review_failure is not None:
+                        if (
+                            len(configured_reviewers) == 1
+                            or getattr(review_failure, "failure_category", None) in {None, "deterministic"}
+                        ):
+                            pr_fatal_errors.append((reviewer_name, review_failure))
+                            continue
+                        unavailable_reviewer_failures[reviewer] = review_failure
+                        category = getattr(review_failure, "failure_category", None) or "unknown"
+                        log(
+                            config,
+                            f"Round {round_number}: {reviewer_name} became unavailable "
+                            f"({category}); continuing with the remaining reviewers",
+                        )
+                        continue
+                    assert turn is not None and turn.response is not None
+                    review_response = turn.response
+                    reviewer_pr_checks = shared_reviewer_pr_checks
+                    review_output = review_response.text
+                    review_model_used = review_response.model_used
+                    reviewer_session_ids[reviewer] = review_response.session_id
+                    parsed_review = review_response.marker_value
+                    assert isinstance(parsed_review, ParsedReview)
+                    parsed_review = dataclasses_replace(
+                        parsed_review,
+                        followups=_drop_repeated_carried_future_followups(
+                            parsed_review.followups,
+                            prior_items=prior_unresolved_items,
+                            dispositions=parsed_review.dispositions,
+                        ),
+                    )
+                    review_state = parsed_review.state
+                    reviewer_new_unresolved_items = []
                 else:
                     context_mode = "compact" if use_compact_pr_context else "full"
                     log(
@@ -5266,12 +5623,16 @@ def run_pr_loop(
 
                 if _is_incomplete_pr_review(parsed_review):
                     if len(configured_reviewers) == 1:
-                        raise AgentLoopError(
+                        incomplete_pr_review_error = AgentLoopError(
                             f"{reviewer_name} did not complete PR review and reported no actionable "
                             "blocking items or Same-PR follow-ups. This is a reviewer-internal error; "
                             "agent-loop stopped before a coder follow-up. Rerun or switch the reviewer/model "
                             "after resolving the reviewer environment."
                         )
+                        if config.review_parallel:
+                            pr_fatal_errors.append((reviewer_name, incomplete_pr_review_error))
+                            continue
+                        raise incomplete_pr_review_error
                     unavailable_reviewer_failures[reviewer] = AgentInvocationError(
                         f"{reviewer_name} reported an incomplete PR review without actionable "
                         "blocking items or Same-PR follow-ups.",
@@ -5451,6 +5812,17 @@ def run_pr_loop(
                 else:
                     if resumed_record is not None:
                         round_new_unresolved_items.extend(reviewer_new_unresolved_items)
+
+            if pr_fatal_errors:
+                # Every healthy reviewer above was already applied (comment
+                # posted, items numbered, unavailable failures recorded) in
+                # configured order, so a rerun resumes them instead of
+                # re-invoking (#594). Raise only now: quota resets take
+                # priority, otherwise the first configured-order failure.
+                for _reviewer_name, error in pr_fatal_errors:
+                    if isinstance(error, QuotaResetExceededError):
+                        raise error
+                raise pr_fatal_errors[0][1]
 
             if use_compact_pr_context:
                 unresolved_items, future_from_prior_items = _apply_unresolved_item_dispositions(
@@ -6595,29 +6967,34 @@ class _DiscussDebaterTurnResult:
         return getattr(self.error, "failure_category", None) or "error"
 
 
-def _ensure_parallel_discuss_workdirs(config: AgentLoopConfig) -> None:
-    """Reject shared workdirs among concurrently scheduled debaters (#475).
+def _ensure_parallel_reviewer_workdirs(
+    config: AgentLoopConfig, *, flag_name: str, role_label: str
+) -> None:
+    """Reject shared workdirs among concurrently scheduled reviewers (#475, #594).
 
     Deliberately NOT bypassed by --allow-shared-dir: concurrent git/tool
-    activity from two agents in one worktree can race and corrupt it. The
-    analyzer (or the coder) may still share a debater's directory because it
-    runs only after the debater synchronization point.
+    activity from two agents in one worktree can race and corrupt it. A
+    later, non-concurrent role (the discuss analyzer, the plan/PR coder) may
+    still share a reviewer's directory because it only runs after the
+    reviewer synchronization point.
     """
-    from .config import reviewers as _reviewers
-
     seen: dict[Path, AgentName] = {}
-    for reviewer in _reviewers(config):
+    for reviewer in reviewers(config):
         path = get_backend(reviewer).workdir(config).resolve()
         other = seen.get(path)
         if other is not None:
             raise AgentLoopError(
-                "--discuss-parallel requires a distinct workdir per debater: "
+                f"{flag_name} requires a distinct workdir per {role_label}: "
                 f"{agent_display_name(other)} and {agent_display_name(reviewer)} "
-                f"both resolve to {path}. Use separate clones/worktrees per debater "
-                "or drop --discuss-parallel; --allow-shared-dir does not lift this "
+                f"both resolve to {path}. Use separate clones/worktrees per {role_label} "
+                f"or drop {flag_name}; --allow-shared-dir does not lift this "
                 "requirement."
             )
         seen[path] = reviewer
+
+
+def _ensure_parallel_discuss_workdirs(config: AgentLoopConfig) -> None:
+    _ensure_parallel_reviewer_workdirs(config, flag_name="--discuss-parallel", role_label="debater")
 
 
 def _validate_structured_discuss_vote_with_evidence(

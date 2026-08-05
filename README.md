@@ -494,6 +494,30 @@ fresh evaluation from round 1. If a resumed run's next round would exceed a
 orchestrator immediately posts a final `deadlock` summary from the last
 completed round instead of silently exiting without a result.
 
+Pass `--review-parallel` to `issue`, `pr`, or `task` to run same-round plan or
+PR reviewers concurrently instead of sequentially (`discuss` mode is rejected;
+it has its own `--discuss-parallel`, unaffected by this flag). Every
+reviewer's prompt is built from the same pre-round plan/PR state before any
+reviewer launches, and same-round reviewers never see each other's feedback.
+All outcomes are collected before any round state is mutated: healthy
+reviewers are applied — comment posted, items numbered — in configured
+reviewer order, then any fatal failure is raised only afterward (a quota
+failure takes priority; otherwise the first configured-order failure), so a
+rerun resumes the reviewers that already succeeded instead of re-invoking
+them. Existing per-reviewer retry, repair, unavailable-reviewer, and
+incomplete-review policies are unchanged, and one failed reviewer never
+cancels a healthy concurrent review. Parallel mode requires a distinct
+workdir per reviewer — even with `--allow-shared-dir` — following the same
+guardrail as `--discuss-parallel`. The coder is never parallelized with
+reviewers, and review rounds never overlap. Sequential execution remains the
+default; keep it if you are concerned about concurrent quota/API pressure.
+
+```bash
+agent-loop pr 456 --repo OWNER/REPO \
+  --reviewer codex --reviewer antigravity \
+  --review-parallel
+```
+
 When `--base` is omitted, `pr` mode uses the pull request's base branch.
 `issue` and `task` modes use the repository default branch. If PR metadata does
 not include a base branch, `pr` mode also falls back to the repository default.

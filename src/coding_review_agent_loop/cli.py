@@ -60,6 +60,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
+    def add_review_parallel(subparser: argparse.ArgumentParser) -> None:
+        subparser.add_argument(
+            "--review-parallel",
+            action="store_true",
+            help=(
+                "Run same-round plan/PR reviewers concurrently instead of "
+                "sequentially (#594). Every reviewer's prompt is built from the "
+                "same pre-round state before any reviewer is launched, and "
+                "same-round reviewers never see one another's feedback. "
+                "Sequential remains the default. Requires a distinct workdir "
+                "per reviewer, even with --allow-shared-dir. Discuss mode has "
+                "its own --discuss-parallel flag."
+            ),
+        )
+
     def add_common(subparser: argparse.ArgumentParser) -> None:
         subparser.add_argument("--repo", help="GitHub repo as owner/name. Defaults to gh repo view.")
         subparser.add_argument(
@@ -472,10 +487,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     add_common(issue)
+    add_review_parallel(issue)
 
     pr = subparsers.add_parser("pr", help="Run the reviewer/coder loop on an existing PR.")
     pr.add_argument("pr_number", type=int)
     add_common(pr)
+    add_review_parallel(pr)
 
     task = subparsers.add_parser(
         "task",
@@ -505,6 +522,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Maximum clarification rounds when --interactive is set (default: 3).",
     )
     add_common(task)
+    add_review_parallel(task)
 
     discuss = subparsers.add_parser(
         "discuss",

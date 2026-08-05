@@ -146,6 +146,10 @@ class AgentLoopConfig:
     # working with the new behavior enabled.
     salvage_comments: bool = True
     salvage_comment_patch_max_bytes: int = 20000
+    # Parallel plan/PR reviewer execution (#594). Opt-in for `issue`/`pr`/`task`
+    # only; sequential stays the default. Distinct from --discuss-parallel
+    # (#475), which covers discuss-mode debaters and is unaffected.
+    review_parallel: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.reviewer, str):
@@ -884,6 +888,7 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
         split_stage=getattr(args, "split_stage", None),
         salvage_comments=getattr(args, "salvage_comments", True),
         salvage_comment_patch_max_bytes=getattr(args, "salvage_comment_patch_max_bytes", 20000),
+        review_parallel=getattr(args, "review_parallel", False),
         test_command=test_command,
         pre_review_tests=args.pre_review_tests,
         ci_check_name=args.ci_check_name,
