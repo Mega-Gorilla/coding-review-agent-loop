@@ -212,7 +212,14 @@ class AntigravityBackend:
                 with_public_response_file_instruction(prompt, response_path)
             )
             oversized_prompt = len(prompt_text.encode("utf-8")) > STDIN_PROMPT_THRESHOLD_BYTES
-            args = [config.antigravity_cmd, "--model", model, *config.antigravity_args]
+            args = [
+                config.antigravity_cmd,
+                "--model",
+                model,
+                "--print-timeout",
+                f"{config.antigravity_print_timeout_seconds}s",
+                *config.antigravity_args,
+            ]
             if role in {"reviewer", "repair"}:
                 args = [a for a in args if a != "--dangerously-skip-permissions"]
             # agy resumes by conversation id (not gemini's --resume). agy --print does

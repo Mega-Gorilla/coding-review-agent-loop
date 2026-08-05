@@ -14,6 +14,7 @@ from .agents.registry import (
     agent_signature,
 )
 from .config import (
+    DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS,
     DEFAULT_REPAIR_MODELS,
     DEFAULT_ANTIGRAVITY_QUOTA_SIGNATURES,
     AgentLoopConfig,
@@ -161,6 +162,16 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--codex-cmd", default="codex")
         subparser.add_argument("--gemini-cmd", default="gemini")
         subparser.add_argument("--antigravity-cmd", default="agy")
+        subparser.add_argument(
+            "--antigravity-print-timeout-seconds",
+            type=int,
+            default=DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS,
+            metavar="SECONDS",
+            help=(
+                "Maximum wait for each agy --print invocation (default: 3600). "
+                "Overrides agy's five-minute print-mode default."
+            ),
+        )
         subparser.add_argument(
             "--repair-backend",
             choices=("antigravity", "gemini"),

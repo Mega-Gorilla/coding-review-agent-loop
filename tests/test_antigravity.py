@@ -20,6 +20,7 @@ def test_antigravity_backend_command_and_prefers_response_file(tmp_path):
     cmd = runner.commands[-1][0]
     assert cmd[0] == "agy"
     assert cmd[cmd.index("--model") + 1] == "Gemini 3.1 Pro (High)"
+    assert cmd[cmd.index("--print-timeout") + 1] == "3600s"
     assert "--dangerously-skip-permissions" in cmd
     # The prompt is the value of --print and must be the last argument (agy's
     # --print/--prompt consumes the next token, not a trailing positional).
@@ -39,6 +40,24 @@ def test_antigravity_backend_stdout_fallback(tmp_path):
     result = AntigravityBackend().run(runner, config, "Review this PR.", run_id="run-1")
     assert result.text == "plain stdout review"
     assert result.text_source == "stdout"
+
+
+def test_antigravity_backend_uses_configured_print_timeout(tmp_path):
+    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+
+    agy_dir = tmp_path / "antigravity"
+    agy_dir.mkdir(parents=True, exist_ok=True)
+    runner = FakeRunner(antigravity_outputs=[("ok", 0)])
+    config = make_config(
+        tmp_path,
+        antigravity_dir=agy_dir,
+        antigravity_print_timeout_seconds=900,
+    )
+
+    AntigravityBackend().run(runner, config, "Review this PR.", run_id="run-1")
+
+    cmd = runner.commands[-1][0]
+    assert cmd[cmd.index("--print-timeout") + 1] == "900s"
 
 
 def test_antigravity_backend_places_large_prompt_in_injected_gemini_md(tmp_path):
@@ -423,6 +442,7 @@ def test_config_from_args_antigravity_defaults(tmp_path):
     assert config.antigravity_cmd == "agy"
     assert config.antigravity_model is None
     assert config.antigravity_models == ("Gemini 3.5 Flash (High)", "Gemini 3.1 Pro (High)")
+    assert config.antigravity_print_timeout_seconds == 3600
     assert config.antigravity_quota_signatures == ("quota", "rate limit", "resource exhausted", "RESOURCE_EXHAUSTED", "429")
     assert config.antigravity_args == ("--dangerously-skip-permissions",)
     assert config.antigravity_dir == default_agent_workdir("OWNER/REPO", "antigravity").resolve()
@@ -449,6 +469,18 @@ def test_antigravity_models_default_chain_from_constant(tmp_path):
     parser = build_parser()
     args = parser.parse_args(["pr", "123", "--repo", "OWNER/REPO", "--codex-dir", str(tmp_path / "codex")])
     assert config_from_args(args, FakeRunner()).antigravity_models == DEFAULT_ANTIGRAVITY_MODELS
+
+
+def test_antigravity_print_timeout_cli_override_and_validation(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args([
+        "pr", "123", "--repo", "OWNER/REPO", "--codex-dir", str(tmp_path / "codex"),
+        "--antigravity-print-timeout-seconds", "900",
+    ])
+    assert config_from_args(args, FakeRunner()).antigravity_print_timeout_seconds == 900
+
+    with pytest.raises(AgentLoopError, match="--antigravity-print-timeout-seconds"):
+        make_config(tmp_path, antigravity_print_timeout_seconds=0)
 
 def test_cli_rejects_both_antigravity_model_flags():
     parser = build_parser()

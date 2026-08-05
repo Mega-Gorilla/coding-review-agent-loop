@@ -123,6 +123,12 @@ auth/quota error near or after the cutoff, the tool surfaces this migration
 guidance. Notes: Antigravity turns are single-shot (no cross-round session
 resume) and report estimated token usage (`agy` emits no token counts).
 
+Each `agy --print` invocation is run with `--print-timeout` set from
+`--antigravity-print-timeout-seconds` (default 3600, i.e. one hour), which
+overrides `agy`'s own five-minute print-mode default so long coder/reviewer
+turns are not cut short. Raise or lower it with, for example,
+`--antigravity-print-timeout-seconds 1800`.
+
 Direct Gemini CLI support is best-effort because maintainers without enterprise
 Gemini CLI access cannot reproduce live `gemini` failures locally. If you report
 a Gemini CLI-specific bug, include the exact command, the raw

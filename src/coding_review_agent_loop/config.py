@@ -37,6 +37,9 @@ DEFAULT_ANTIGRAVITY_MODELS: tuple[str, ...] = (
     "Gemini 3.5 Flash (High)",
     "Gemini 3.1 Pro (High)",
 )
+# `agy --print` otherwise defaults to five minutes, which is too short for
+# complex reviews and causes it to exit with "timeout waiting for response".
+DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS = 60 * 60
 DEFAULT_REPAIR_MODELS: tuple[str, ...] = ("Gemini 3.5 Flash (Medium)",)
 
 # Discuss-mode research policy values (#477). The CLI flag choices, the config
@@ -99,6 +102,7 @@ class AgentLoopConfig:
     antigravity_args: tuple[str, ...] = ()
     antigravity_model: str | None = None
     antigravity_models: tuple[str, ...] = ()
+    antigravity_print_timeout_seconds: int = DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS
     antigravity_quota_signatures: tuple[str, ...] = DEFAULT_ANTIGRAVITY_QUOTA_SIGNATURES
     # Declared model / reasoning effort for the dynamic signature (#332). Empty
     # means "not declared" (the agent runs its own default and the signature
@@ -162,6 +166,8 @@ class AgentLoopConfig:
             object.__setattr__(self, "antigravity_models", DEFAULT_ANTIGRAVITY_MODELS)
         if any(not m.strip() for m in self.antigravity_models):
             raise AgentLoopError("antigravity_models chain cannot be empty or contain blank entries.")
+        if self.antigravity_print_timeout_seconds <= 0:
+            raise AgentLoopError("--antigravity-print-timeout-seconds must be greater than zero.")
         if self.repair_backend not in {"antigravity", "gemini"}:
             raise AgentLoopError("--repair-backend must be either 'antigravity' or 'gemini'.")
         if not self.repair_models or any(not model.strip() for model in self.repair_models):
@@ -864,6 +870,11 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
         ),
         antigravity_model=args.antigravity_model,
         antigravity_models=tuple(args.antigravity_models) if getattr(args, "antigravity_models", None) is not None else (),
+        antigravity_print_timeout_seconds=getattr(
+            args,
+            "antigravity_print_timeout_seconds",
+            DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS,
+        ),
         antigravity_quota_signatures=tuple(
             getattr(args, "antigravity_quota_signatures", None)
             or DEFAULT_ANTIGRAVITY_QUOTA_SIGNATURES

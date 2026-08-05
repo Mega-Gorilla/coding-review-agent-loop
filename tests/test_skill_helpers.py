@@ -3914,6 +3914,47 @@ class TestAntigravitySkill:
         assert config.antigravity_models == expected_models
         assert config.antigravity_quota_signatures == expected_signatures
 
+    @pytest.mark.parametrize(
+        ("extra_args", "expected_timeout"),
+        [
+            ((), 3600),
+            (("--antigravity-print-timeout-seconds", "900"), 900),
+        ],
+    )
+    def test_run_external_resolves_antigravity_print_timeout(
+        self, monkeypatch, tmp_path, extra_args, expected_timeout,
+    ) -> None:
+        import helpers.run_external as rex
+        from coding_review_agent_loop.agents.base import AgentResult
+
+        captured = {}
+
+        class FakeBackend:
+            def run(self, runner, config, prompt):
+                captured["config"] = config
+                return AgentResult(text="review complete", returncode=0)
+
+        monkeypatch.setattr(
+            "coding_review_agent_loop.agents.antigravity.AntigravityBackend",
+            FakeBackend,
+        )
+        prompt = tmp_path / "prompt.md"
+        output = tmp_path / "output.md"
+        prompt.write_text("review this", encoding="utf-8")
+        monkeypatch.setattr(sys, "argv", [
+            "run_external",
+            "--agent", "agy",
+            "--prompt-file", str(prompt),
+            "--output", str(output),
+            "--workdir", str(tmp_path),
+            "--max-retries", "0",
+            *extra_args,
+        ])
+
+        rex.main()
+
+        assert captured["config"].antigravity_print_timeout_seconds == expected_timeout
+
     def test_run_external_rejects_single_model_and_chain_together(self, tmp_path) -> None:
         result = _run(
             "helpers.run_external",
@@ -3947,6 +3988,10 @@ class TestAntigravitySkill:
                     "--antigravity-models", "Model A", "Model B",
                     "--antigravity-quota-signatures", "Quota Hit", "429",
                 ),
+            ),
+            (
+                types.SimpleNamespace(antigravity_print_timeout_seconds=900),
+                ("--antigravity-print-timeout-seconds", "900"),
             ),
         ],
     )
@@ -3992,10 +4037,12 @@ def test_run_task_round_forwards_antigravity_options():
         "run-task-round",
         "--antigravity-models", "Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (High)",
         "--antigravity-quota-signatures", "quota", "429",
+        "--antigravity-print-timeout-seconds", "900",
     ])
     assert sr._run_external_antigravity_args(args) == (
         "--antigravity-models", "Gemini 3.1 Pro (High)", "Gemini 3.5 Flash (High)",
         "--antigravity-quota-signatures", "quota", "429",
+        "--antigravity-print-timeout-seconds", "900",
     )
     # Legacy single-model override forwards as --model.
     legacy = parser.parse_args(["run-task-round", "--model", "Gemini 3.1 Pro (High)"])
