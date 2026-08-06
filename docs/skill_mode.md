@@ -113,6 +113,11 @@ has already been approved:
   `decompose-only`.
 - `run-implement-by-phase` decomposes with mode `implement-by-phase`, then
   implements phase 1 only when that phase is `agent-pr`.
+
+Both helpers already create one detailed child issue per phase; do not also
+pass `--materialize-split-issues` for the same run. See [Phased decomposition
+versus split materialization](local_agent_loop.md#phased-decomposition-versus-split-materialization)
+for the decision rule and the duplicate-issue failure mode it prevents.
 - `run-pr-fix` addresses a settled blocking PR review for an externally opened
   PR. The target PR must be `OPEN`; `--reviewers` must exactly match the reviewer
   set used by the prior `run-pr-round`; and `--workdir` must be a clean,
