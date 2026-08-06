@@ -38,6 +38,7 @@ DEFAULT_ANTIGRAVITY_MODELS: tuple[str, ...] = (
     "Gemini 3.5 Flash (High)",
     "Gemini 3.1 Pro (High)",
 )
+DEFAULT_MAX_ROUNDS = 10
 # `agy --print` otherwise defaults to five minutes, which is too short for
 # complex reviews and causes it to exit with "timeout waiting for response".
 DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS = 10 * 60

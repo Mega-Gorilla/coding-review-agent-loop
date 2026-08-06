@@ -9,7 +9,7 @@ The default flow is:
 1. A coder agent creates or updates a PR.
 2. One or more reviewer agents review the PR.
 3. If any reviewer finds blockers, the coder fixes the PR.
-4. The loop repeats until every reviewer approves in the same round or `--max-rounds` is reached.
+4. The loop repeats until every reviewer approves in the same round or `--max-rounds` is reached (default: 10).
 
 The default coder is Claude and the default reviewer is Codex. Reverse the direction with `--coder codex --reviewer claude`, or use Gemini with `--coder gemini` / `--reviewer gemini`. Repeat `--reviewer` to require multiple reviewer approvals.
 

@@ -1446,6 +1446,25 @@ def test_omitted_cli_base_is_preserved_for_runtime_resolution(tmp_path):
     assert config_from_args(args, FakeRunner()).base is None
 
 
+def test_max_rounds_cli_default_is_shared_constant(tmp_path):
+    from coding_review_agent_loop.config import DEFAULT_MAX_ROUNDS
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "pr",
+        "77",
+        "--repo",
+        "OWNER/REPO",
+        "--claude-dir",
+        str(tmp_path / "claude"),
+        "--codex-dir",
+        str(tmp_path / "codex"),
+    ])
+
+    assert args.max_rounds == DEFAULT_MAX_ROUNDS == 10
+    assert config_from_args(args, FakeRunner()).max_rounds == DEFAULT_MAX_ROUNDS
+
+
 def test_discuss_max_rounds_cli_is_discuss_only():
     parser = build_parser()
     args = parser.parse_args([
