@@ -261,6 +261,11 @@ REJECTED_NARRATIVE_URLS = [
     "Tests: `pytest tests/unit` passed; also ran curl https://live.example/health",
     "Tests: ran curl https://live.example/health to verify.",
     "Tests: did not run unit tests but ran curl https://live.example",
+    # The attached URL sits behind an earlier, non-URL prepositional object;
+    # only scanning the first preposition would read this as benign prose.
+    "Tests: ran the suite against the production environment at https://live.example",
+    "Tests: ran the smoke suite on staging targeting https://live.example",
+    "Tests: retested the checkout suite via the shared runner against https://live.example",
 ]
 
 
@@ -323,6 +328,10 @@ ACCEPTED_NARRATIVE_TEXTS = [
     "Tests: pytest tests/test_foo.py -q - did not run the https://dev.aispar.app e2e suite.",
     "Tests: pytest tests/test_foo.py -q passed. Deployment notes live at https://dev.aispar.app/docs.",
     "Tests: ran pytest tests/test_foo.py -q, release notes at https://dev.aispar.app/notes.",
+    # Negation still wins over the full-phrase preposition scan, both when the
+    # verb itself is negated and when the negation precedes the preposition.
+    "Tests: Did not run the suite against the production environment at https://live.example.",
+    "Tests: ran the unit suite against the local stub and never against https://live.example.",
 ]
 
 

@@ -1092,9 +1092,14 @@ check described below, but never from path containment.
 A URL is rejected as a live remote target when it appears in command syntax
 (a structured entry, or backtick-quoted command text in a `Tests:` report) or
 is reported as the target of an affirmative execution phrase in prose (`ran
-curl https://...`, `hit https://...`, `ran the suite against https://...`); a
-negated execution phrase (`Did not run curl https://...`) and unattached
-URL-like prose (deployment notes, session-cookie mentions) are accepted, and
+curl https://...`, `hit https://...`, `ran the suite against https://...`).
+The whole execution phrase is scanned for the attached URL, so an earlier
+non-URL prepositional object does not hide the real target (`ran the suite
+against the production environment at https://...` is still rejected); the
+phrase ends at a negation word or at the next execution verb. A negated
+execution phrase (`Did not run curl https://...`, `ran the suite against the
+local stub and never against https://...`) and unattached URL-like prose
+(deployment notes, session-cookie mentions) are accepted, and
 this narrower prose latitude does not extend to command syntax. If an explicit
 test location is outside the assigned checkout, or a live remote target is
 detected, the loop fails with an `AgentLoopError` naming the offending

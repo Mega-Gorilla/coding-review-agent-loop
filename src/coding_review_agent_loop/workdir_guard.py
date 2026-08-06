@@ -564,6 +564,45 @@ def _head_opened_span_targets(clause: _Clause) -> list[str]:
     return _walk_span(tokens, head_idx, n)
 
 
+def _execution_phrase_end(tokens: Sequence[str], start: int, n: int) -> int:
+    """End (exclusive) of the phrase attached to an execution verb.
+
+    The phrase stops at a negation word or at the next execution verb, so a
+    later negated or separately-reported clause never lends its URL to this
+    verb (and vice versa: the next verb gets its own phrase, subject to its
+    own negation check).
+    """
+    j = start
+    while j < n:
+        word = _word(tokens[j])
+        if _is_negation_word(word) or word in EXECUTION_VERBS:
+            break
+        j += 1
+    return j
+
+
+def _prepositional_url_targets(tokens: Sequence[str], start: int, end: int) -> list[str]:
+    """URLs attached to any target preposition within ``tokens[start:end]``.
+
+    Scanning every preposition in the phrase -- not just the first one --
+    matters because an earlier, non-URL prepositional object would otherwise
+    hide the real target ("ran the suite against the production environment
+    at https://live.example").
+    """
+    found: list[str] = []
+    for k in range(start, end):
+        if _word(tokens[k]) not in TARGET_PREPOSITIONS:
+            continue
+        if _is_negated_occurrence(tokens, k):
+            continue
+        m = k + 1
+        if m < end and _word(tokens[m]) in DETERMINERS:
+            m += 1
+        if m < end and _is_url_token(tokens[m]):
+            found.append(tokens[m])
+    return found
+
+
 def _verb_based_targets(clause: _Clause) -> list[str]:
     tokens = clause.tokens
     n = len(tokens)
@@ -581,18 +620,11 @@ def _verb_based_targets(clause: _Clause) -> list[str]:
             targets.append(tokens[j])
             continue
 
-        prep_idx = None
-        for k in range(idx + 1, n):
-            if _word(tokens[k]) in TARGET_PREPOSITIONS:
-                prep_idx = k
-                break
-        if prep_idx is not None:
-            k = prep_idx + 1
-            if k < n and _word(tokens[k]) in DETERMINERS:
-                k += 1
-            if k < n and _is_url_token(tokens[k]):
-                targets.append(tokens[k])
-                continue
+        phrase_end = _execution_phrase_end(tokens, idx + 1, n)
+        attached = _prepositional_url_targets(tokens, idx + 1, phrase_end)
+        if attached:
+            targets.extend(attached)
+            continue
 
         if idx + 1 < n and _is_command_shaped(tokens[idx + 1]):
             targets.extend(_walk_span(tokens, idx + 1, n))
