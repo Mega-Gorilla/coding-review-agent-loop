@@ -474,7 +474,10 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "With --plan-first, choose what happens after approval: plan-only, "
             "decompose-only, implement-one-shot, or implement-by-phase. "
-            "Defaults to plan-only unless --implement-after-approval is used."
+            "Defaults to plan-only unless --implement-after-approval is used. "
+            "decompose-only/implement-by-phase already create one detailed child "
+            "issue per phase; do not also pass --materialize-split-issues for the "
+            "same run. See docs/local_agent_loop.md#phased-decomposition-versus-split-materialization."
         ),
     )
     issue.add_argument(
@@ -483,7 +486,10 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "File a linked child GitHub issue for each remaining discuss `split` proposal "
             "or plan `deferred_stages` entry instead of leaving them as unfiled text "
-            "(default: off, warning-only)."
+            "(default: off, warning-only). Do not combine with "
+            "--plan-execution-mode decompose-only or implement-by-phase, which already "
+            "create detailed child issues. See "
+            "docs/local_agent_loop.md#phased-decomposition-versus-split-materialization."
         ),
     )
     issue.add_argument(
@@ -618,7 +624,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "On a `split` consensus, file a linked child GitHub issue for each proposed "
-            "sub-issue instead of leaving them as unfiled text (default: off, warning-only)."
+            "sub-issue instead of leaving them as unfiled text (default: off, warning-only). "
+            "See docs/local_agent_loop.md#phased-decomposition-versus-split-materialization "
+            "for when to use this versus a plan-first decompose-only/implement-by-phase run."
         ),
     )
     add_common(discuss)

@@ -1,0 +1,77 @@
+import re
+from pathlib import Path
+
+from coding_review_agent_loop.cli import build_parser
+
+REPO_ROOT = Path(__file__).parent.parent
+LOCAL_AGENT_LOOP_DOC = REPO_ROOT / "docs" / "local_agent_loop.md"
+README = REPO_ROOT / "README.md"
+
+HEADING_TEXT = "Phased decomposition versus split materialization"
+
+
+def _github_anchor(heading_text: str) -> str:
+    """Approximate GitHub's markdown heading-to-anchor slug algorithm."""
+    slug = heading_text.lower()
+    slug = re.sub(r"[^\w\- ]", "", slug)
+    slug = slug.replace(" ", "-")
+    return slug
+
+
+def test_local_agent_loop_doc_has_decision_heading_and_table():
+    text = LOCAL_AGENT_LOOP_DOC.read_text(encoding="utf-8")
+    assert f"### {HEADING_TEXT}" in text
+    assert "`--plan-execution-mode decompose-only`" in text
+    assert "`--plan-execution-mode implement-by-phase`" in text
+    assert "`--materialize-split-issues`" in text
+
+
+def test_local_agent_loop_doc_warns_about_combining_mechanisms():
+    text = LOCAL_AGENT_LOOP_DOC.read_text(encoding="utf-8")
+    section_start = text.index(f"### {HEADING_TEXT}")
+    next_heading = text.index("### Split issue materialization", section_start)
+    section = text[section_start:next_heading]
+
+    assert "Do not combine" in section
+    assert "decompose-only" in section
+    assert "implement-by-phase" in section
+    assert "duplicate" in section.lower()
+
+
+def test_readme_links_to_decision_section_with_derived_anchor():
+    doc_text = LOCAL_AGENT_LOOP_DOC.read_text(encoding="utf-8")
+    assert f"### {HEADING_TEXT}" in doc_text, "heading moved; update HEADING_TEXT"
+    expected_anchor = _github_anchor(HEADING_TEXT)
+
+    readme_text = README.read_text(encoding="utf-8")
+    normalized_readme_text = " ".join(readme_text.split())
+    assert f"docs/local_agent_loop.md#{expected_anchor}" in readme_text
+    assert "`--plan-execution-mode decompose-only`" in readme_text
+    assert "`--materialize-split-issues`" in readme_text
+    assert "duplicate children" in normalized_readme_text
+
+
+def test_cli_help_points_to_decision_section():
+    parser = build_parser()
+    issue_parser = None
+    discuss_parser = None
+    for action in parser._actions:
+        if hasattr(action, "choices") and isinstance(action.choices, dict):
+            issue_parser = action.choices.get("issue", issue_parser)
+            discuss_parser = action.choices.get("discuss", discuss_parser)
+    assert issue_parser is not None
+    assert discuss_parser is not None
+
+    def _help_for(subparser, option_string):
+        for sub_action in subparser._actions:
+            if option_string in getattr(sub_action, "option_strings", []):
+                return sub_action.help
+        raise AssertionError(f"{option_string} not found in parser")
+
+    plan_execution_mode_help = _help_for(issue_parser, "--plan-execution-mode")
+    issue_materialize_help = _help_for(issue_parser, "--materialize-split-issues")
+    discuss_materialize_help = _help_for(discuss_parser, "--materialize-split-issues")
+
+    anchor = "phased-decomposition-versus-split-materialization"
+    for help_text in (plan_execution_mode_help, issue_materialize_help, discuss_materialize_help):
+        assert anchor in help_text

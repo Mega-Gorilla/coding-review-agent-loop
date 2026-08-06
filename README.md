@@ -308,6 +308,33 @@ coder is Codex, either explicitly with `--implementation-coder codex` or because
 declared Codex model via `--implementation-coder-model` or `--codex-model` so
 the implementation signature can name the model reliably.
 
+### Choosing a child-issue mechanism
+
+`decompose-only` / `implement-by-phase` and `--materialize-split-issues` are
+two separate child-issue creation paths. Combining them files duplicate
+children — decompose modes already create one detailed issue per phase, and
+`--materialize-split-issues` is not suppressed by them.
+
+| Situation | Correct mechanism |
+| --- | --- |
+| Approved detailed staged plan with phase contracts | `--plan-execution-mode decompose-only` |
+| Same plan, implement only the first phase now | `--plan-execution-mode implement-by-phase` |
+| Approved plan implemented as a single PR | `--plan-execution-mode implement-one-shot` |
+| Plan review only, no child issues | `--plan-execution-mode plan-only` (default) |
+| Discuss `split` consensus or plan-only deferred work, no phase decomposition | `--materialize-split-issues` |
+
+```bash
+agent-loop issue 123 --repo OWNER/REPO --plan-first --plan-execution-mode decompose-only
+agent-loop issue 123 --repo OWNER/REPO --plan-first --plan-execution-mode implement-by-phase
+agent-loop discuss 123 --repo OWNER/REPO --materialize-split-issues
+agent-loop issue 123 --repo OWNER/REPO --plan-first --plan-execution-mode plan-only --materialize-split-issues
+```
+
+See [Phased decomposition versus split
+materialization](docs/local_agent_loop.md#phased-decomposition-versus-split-materialization)
+for the full decision rule, stop points, worked examples, and the
+duplicate-issue failure mode.
+
 Each generated child issue copies the relevant parent-plan slice, constraints
 and invariants, dependency notes, scope and non-goals, rollout risk,
 validation/soak requirements, automation classification, and instructions for
@@ -326,7 +353,9 @@ the specific child the plan covers (via a unique title match or an explicit
 `--split-stage <child>` flag) instead of treating the whole parent as solved,
 and the resulting PR is required to use `Refs #<parent>` rather than a closing
 keyword against it. See [`docs/local_agent_loop.md`](docs/local_agent_loop.md#split-issue-materialization)
-for details.
+for details, and [Choosing a child-issue
+mechanism](#choosing-a-child-issue-mechanism) above if you are deciding
+between this and `decompose-only` / `implement-by-phase`.
 
 Provide a one-off task directly when there is no issue yet:
 

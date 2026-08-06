@@ -253,6 +253,12 @@ The modes are:
   `agent-loop issue <child>`. Older decomposition summaries without this marker
   are treated as not yet handed off, so the first child handoff is recorded once.
 
+`decompose-only` and `implement-by-phase` already create one detailed child
+issue per phase; see [Phased decomposition versus split
+materialization](#phased-decomposition-versus-split-materialization) before
+also passing `--materialize-split-issues`, which is a separate,
+non-suppressed child-issue creation path.
+
 Before invoking a coder for an issue — in direct `agent-loop issue <n>` mode or
 approved-plan implementation alike — the orchestrator resolves the canonical
 `AGENT_ISSUE_PR_HANDOFF` record: an authoritative, machine-readable comment
@@ -305,7 +311,10 @@ implementation signature can name the model reliably.
 If the plan narrows scope (via `deferred_stages` or a prior discuss `split`
 consensus), see [Split issue materialization](#split-issue-materialization)
 below for how those follow-up stages are filed (or warned about) and how
-`implement-one-shot` targets the correct stage instead of the whole parent.
+`implement-one-shot` targets the correct stage instead of the whole parent. If
+you are deciding between that mechanism and `decompose-only` /
+`implement-by-phase`, read [Phased decomposition versus split
+materialization](#phased-decomposition-versus-split-materialization) first.
 
 Generated child issues are self-contained: each body includes the parent issue
 link, the relevant approved parent-plan slice, constraints/invariants,
@@ -783,6 +792,113 @@ Execution model:
   overlap with each other.
 - Sequential execution remains the default; prefer it when concurrent
   quota/API pressure across providers is a concern.
+
+### Phased decomposition versus split materialization
+
+There are two separate child-issue creation paths, and combining them files
+duplicate children. Pick the one row that matches your situation:
+
+| Situation | Correct mechanism |
+| --- | --- |
+| Approved detailed staged plan with phase contracts | `--plan-execution-mode decompose-only` |
+| Same plan, but implement only the first phase now | `--plan-execution-mode implement-by-phase` |
+| Approved plan you want implemented as a single PR, no phase breakdown | `--plan-execution-mode implement-one-shot` (or `--implement-after-approval`) |
+| Plan review only, no implementation, no detailed child issues | `--plan-execution-mode plan-only` (the default) |
+| Discuss `split` consensus, or plan-only deferred work with no detailed phase decomposition | `--materialize-split-issues` |
+
+**Do not combine `--materialize-split-issues` with `--plan-execution-mode
+decompose-only` or `implement-by-phase`.** Those two modes already create one
+detailed child issue per phase. `--materialize-split-issues` is a second,
+independent child-issue creation path — the CLI does not suppress it in
+decompose modes, and it is not suppressed by them either, so combining the
+two yields two overlapping sets of children: shallow generic `[#<parent>
+stage] ...` placeholders from split materialization *and* detailed per-phase
+issues from decomposition, describing overlapping work. Nothing closes the
+duplicates automatically; someone has to notice and close them by hand. This
+is the exact failure mode this section exists to prevent.
+
+What each mechanism produces and where the run stops:
+
+- **`plan-only`** (default): posts the approved-plan summary and stops. No
+  implementation, no detailed child issues. One nuance: if
+  `--materialize-split-issues` is also passed, generic split children are
+  still filed even in `plan-only`, because that materialization step runs
+  before the mode is dispatched — `plan-only` only skips decomposition and
+  implementation, not split materialization.
+- **`decompose-only`**: validates the coder's structured phase decomposition
+  (max 8 phases; an over-cap response is a validation failure and must be
+  consolidated, never silently truncated), creates one child issue per phase,
+  posts the parent summary table, and stops. The summary table is not a
+  substitute for the child issues.
+- **`implement-by-phase`**: creates every phase child issue, records a
+  one-time `AGENT_PLAN_PHASE_IMPLEMENTATION` handoff, then implements only the
+  first `agent-pr` phase and stops after that phase's PR review loop. If the
+  first phase is `human-action` or `manual-close`, it stops after creating the
+  child issues without implementing anything. Resume the remaining phases with
+  `agent-loop issue <child>`, not by rerunning the parent.
+- **`--materialize-split-issues`**: files one linked, generic child issue per
+  remaining discuss `split` proposal or plan `deferred_stages` entry. It is
+  idempotent (tracked by the parent's `AGENT_DISCUSS_SPLIT` marker), capped at
+  8 children per parent, and files nothing from free-form prose narrowing
+  alone — only from the two structured signals above.
+
+Copyable commands, one per workflow, each stopping where noted:
+
+```bash
+# Detailed staged plan: create phase children, stop (review/resume each child separately)
+agent-loop issue 123 --repo OWNER/REPO --plan-first --plan-execution-mode decompose-only
+
+# Same plan, but also implement phase 1 now; stops after phase 1's PR review loop
+agent-loop issue 123 --repo OWNER/REPO --plan-first --plan-execution-mode implement-by-phase
+
+# Discuss-mode split consensus: file generic linked children, stop (no implementation in discuss mode)
+agent-loop discuss 123 --repo OWNER/REPO --materialize-split-issues
+
+# Plan-only run whose deferred_stages should still be filed as generic children; stops after plan approval
+agent-loop issue 123 --repo OWNER/REPO --plan-first --plan-execution-mode plan-only --materialize-split-issues
+
+# Pick work back up on a child created by either path
+agent-loop issue <child-issue-number> --repo OWNER/REPO
+```
+
+Anti-example — do not run this; it duplicates children:
+
+```bash
+# WRONG: decompose-only already creates one child per phase; --materialize-split-issues
+# creates an unrelated, overlapping set of generic children for the same deferred work.
+agent-loop issue 123 --repo OWNER/REPO --plan-first \
+  --plan-execution-mode decompose-only --materialize-split-issues
+```
+
+Two worked examples:
+
+1. **Plan-first staged master issue.** Run `--plan-first` with reviewers
+   until the plan is approved, then run `--plan-execution-mode decompose-only`
+   to create the phase children. Continue with
+   `agent-loop issue <first-child>` per phase (or use `implement-by-phase`
+   instead of `decompose-only` to have phase 1 implemented in the same run).
+   `--materialize-split-issues` is not used anywhere in this flow — the phase
+   children already are the detailed decomposition.
+2. **Discuss-mode split consensus.** Run
+   `agent-loop discuss 123 --repo OWNER/REPO --materialize-split-issues` to
+   get a `split` consensus filed as generic linked child issues, then plan or
+   implement each child separately with `agent-loop issue <child>`. A later
+   `agent-loop issue 123 --repo OWNER/REPO --plan-first --implement-after-approval`
+   run on the parent resolves which specific child the approved plan covers
+   via a unique title match, or `--split-stage <child>` when the match is
+   ambiguous or missing.
+
+`--implement-after-approval` (the `implement-one-shot` alias) combined with
+`--materialize-split-issues` is not the failure mode above — it is the
+supported split-stage handoff flow described in [Split issue
+materialization](#split-issue-materialization) below. The warning here is
+scoped to `decompose-only` and `implement-by-phase` specifically, since only
+those two modes already create detailed per-phase children.
+
+Skill mode's `run-decompose` and `run-implement-by-phase` helper commands
+(see [`docs/skill_mode.md`](skill_mode.md)) drive the same
+`decompose-only` / `implement-by-phase` modes and are subject to the same
+rule.
 
 ### Split issue materialization
 
