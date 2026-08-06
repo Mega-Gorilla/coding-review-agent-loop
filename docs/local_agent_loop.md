@@ -1073,20 +1073,38 @@ and to avoid sibling, home, deployment, or duplicate clones such as `~/REPO` or
 `~/claude-code/REPO`.
 
 The orchestrator validates coder-reported test commands before posting normal
-coder progress. For `Tests:` reports and structured `tests_run` entries, it
-checks shell tokens that explicitly carry location information, such as `cd
-<path>`, `-C <path>`, `--directory <path>`, `--directory=<path>`, or a command
-token that begins with `/`, `$HOME/`, or `~/`. Prose-only environment details,
-including virtualenv notes or URL-like text, are not treated as test working
-directories. If an explicit test location is outside the assigned checkout, the
-loop fails with an `AgentLoopError` naming the offending command and assigned
-checkout. When that failure happens after a PR was already created or detected,
-the error also confirms the PR state and tells the user to continue with
-`agent-loop pr <number>` instead of rerunning implementation and creating a
-duplicate PR. For initial issue, task, and approved-plan implementations, the
-loop also checks that the assigned checkout `HEAD` advanced when the coder
-reports a PR; unchanged `HEAD` is rejected before the coder PR comment is
-posted.
+coder progress. For `Tests:` reports and structured `tests_run` entries, it is
+role-aware rather than pattern-only: an explicit working directory (`cd
+<path>`, `-C <path>`, `--directory[=]<path>`, `--chdir[=]`, `--cwd[=]`,
+`--rootdir[=]`) is always validated, and so is any ordinary target, checkout,
+or artifact path (a positional test path, a redirect target, an `--rootdir`
+value, and so on). An absolute interpreter, runner, or package-manager
+executable in *program position* -- for example `/usr/bin/python3`, a venv's
+`.venv/bin/pytest`, or a wrapper like `sudo`/`env` in front of one -- is not
+treated as a test location, and neither is the value of a narrow set of
+interpreter-valued flags/env-vars (`--python`, `PYTHONPATH=`, and similar).
+These exemptions are gated on command position or on a specific
+interpreter-valued construct, not on path components, so a toolchain-shaped
+path used as an ordinary argument (`pytest /outside/bin/tests/test_foo.py`)
+still fails containment. Package acquisition (`pip install ...`, including the
+`python -m pip install ...` form) is exempted from the separate live-target
+check described below, but never from path containment.
+A URL is rejected as a live remote target when it appears in command syntax
+(a structured entry, or backtick-quoted command text in a `Tests:` report) or
+is reported as the target of an affirmative execution phrase in prose (`ran
+curl https://...`, `hit https://...`, `ran the suite against https://...`); a
+negated execution phrase (`Did not run curl https://...`) and unattached
+URL-like prose (deployment notes, session-cookie mentions) are accepted, and
+this narrower prose latitude does not extend to command syntax. If an explicit
+test location is outside the assigned checkout, or a live remote target is
+detected, the loop fails with an `AgentLoopError` naming the offending
+command/URL and assigned checkout. When that failure happens after a PR was
+already created or detected, the error also confirms the PR state and tells
+the user to continue with `agent-loop pr <number>` instead of rerunning
+implementation and creating a duplicate PR. For initial issue, task, and
+approved-plan implementations, the loop also checks that the assigned checkout
+`HEAD` advanced when the coder reports a PR; unchanged `HEAD` is rejected
+before the coder PR comment is posted.
 
 These temporary checkouts may disappear after reboot or `/tmp` cleanup. Large
 projects and long-lived agent setups should use explicit persistent workdirs to

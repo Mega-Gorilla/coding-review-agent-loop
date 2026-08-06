@@ -2705,6 +2705,60 @@ def test_issue_loop_outside_workdir_after_reported_pr_hedges_unconfirmed_pr(tmp_
     assert runner.comments == []
     assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
 
+def test_issue_loop_accepts_absolute_interpreter_test_command_through_response_path(tmp_path):
+    # Regression for #584: an absolute system-interpreter path in program
+    # position (the only path outside the assigned checkout) must not be
+    # misclassified as an external test location when reported through the
+    # freeform `Tests:` response path (origin='response', orchestrator.py
+    # line ~3286/6223), matching the PR #484 follow-up reproducer.
+    runner = FakeRunner(
+        codex_outputs=[
+            "Fixed issue.\n"
+            "Tests: `/usr/bin/python3 -m pytest tests/test_durable_jobs.py -q` "
+            "- 12 passed, run from the assigned checkout.\n"
+            "<!-- AGENT_PR: 77 -->\n"
+            "<!-- AGENT_STATE: blocking -->\n"
+            "-- OpenAI Codex",
+        ],
+        claude_outputs=[
+            "Looks good.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+    )
+    config = make_config(tmp_path, coder="codex", reviewer="claude")
+
+    assert run_issue_loop(runner, issue_number=56, config=config) == 0
+    assert len(runner.comments) >= 1
+
+def test_issue_loop_live_target_after_reported_pr_mentions_confirmed_resume(tmp_path):
+    # Same post-PR guidance wrapper as the outside-workdir case above, but
+    # triggered by a live-remote-target rejection instead of a path
+    # rejection, proving the URL pass also reaches
+    # _validate_response_tests_with_post_pr_context.
+    runner = FakeRunner(
+        codex_outputs=[
+            "Fixed issue.\n"
+            "Tests: ran curl https://live.example/health to verify.\n"
+            "<!-- AGENT_PR: 77 -->\n"
+            "<!-- AGENT_STATE: blocking -->\n"
+            "-- OpenAI Codex",
+        ],
+        claude_outputs=[
+            "Looks good.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+    )
+    config = make_config(tmp_path, coder="codex", reviewer="claude")
+
+    with pytest.raises(AgentLoopError) as exc_info:
+        run_issue_loop(runner, issue_number=56, config=config)
+
+    message = str(exc_info.value)
+    assert "live remote target" in message
+    assert "PR #77 was confirmed open" in message
+    assert "handoff/reviewer comments were not posted" in message
+    assert "agent-loop pr 77" in message
+    assert runner.comments == []
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+
 def test_issue_loop_rejects_reported_pr_when_assigned_head_unchanged(tmp_path):
     runner = FakeRunner(
         codex_outputs=[

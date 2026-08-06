@@ -4004,6 +4004,39 @@ def test_pr_loop_rejects_structured_followup_outside_workdir_tests_before_postin
     assert runner.comments[0].startswith("**Review verdict:** Blocking")
     assert not any("Added the test." in comment for comment in runner.comments)
 
+def test_pr_loop_rejects_structured_followup_live_target_tests_before_posting(tmp_path):
+    # Regression for #584: a structured `tests_run` entry (origin='structured',
+    # orchestrator.py line ~6197) must apply STRICT-COMMAND URL classification
+    # -- any URL in the clause is a live-target rejection, matching the same
+    # rule freeform `Tests:` prose gets.
+    runner = FakeRunner(
+        claude_outputs=[
+            structured_pr_review(
+                state="blocking",
+                summary="Needs a test.",
+                blocking_items=["Add a regression test."],
+                reviewer="Anthropic Claude",
+            ),
+            "Looks good.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            structured_coder_followup(
+                summary="Added the test.",
+                addressed_items=["item-1"],
+                tests_run=["pytest tests/test_foo.py https://live.example"],
+                reviewer="OpenAI Codex",
+            ),
+        ],
+    )
+    config = make_config(tmp_path, coder="codex", reviewer="claude")
+
+    with pytest.raises(AgentLoopError, match="live remote target"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert len(runner.comments) == 1
+    assert runner.comments[0].startswith("**Review verdict:** Blocking")
+    assert not any("Added the test." in comment for comment in runner.comments)
+
 def test_gemini_review_loop_prefers_public_response_file_over_stdout(tmp_path):
     runner = FakeRunner(
         gemini_outputs=[
