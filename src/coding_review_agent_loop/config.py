@@ -39,7 +39,7 @@ DEFAULT_ANTIGRAVITY_MODELS: tuple[str, ...] = (
 )
 # `agy --print` otherwise defaults to five minutes, which is too short for
 # complex reviews and causes it to exit with "timeout waiting for response".
-DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS = 60 * 60
+DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS = 10 * 60
 DEFAULT_REPAIR_MODELS: tuple[str, ...] = ("Gemini 3.5 Flash (Medium)",)
 
 # Discuss-mode research policy values (#477). The CLI flag choices, the config

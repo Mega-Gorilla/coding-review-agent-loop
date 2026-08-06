@@ -146,7 +146,7 @@ def main() -> None:
         type=int,
         default=None,
         metavar="SECONDS",
-        help="Maximum wait for each agy --print invocation (default: 3600, "
+        help="Maximum wait for each agy --print invocation (default: 600, "
              "matching the agent-loop CLI). Overrides agy's five-minute "
              "print-mode default.",
     )
