@@ -6,6 +6,7 @@ import re
 from collections.abc import Sequence
 
 from .errors import AgentLoopError, UnknownPriorItemDispositionError
+from .github import PullRequestMergeability
 from .prompts import render_coder_human_requirements_prompt_context
 from .protocol import (
     ParsedPlanReview,
@@ -22,6 +23,7 @@ from .protocol import (
 )
 
 HUMAN_REQUIREMENTS_ACK_ITEM_ID = "item-human-requirements-acknowledgement"
+MERGE_CONFLICT_ITEM_ID = "item-merge-conflict"
 CODER_DISPUTE_NOTE_PREFIX = "Coder disputes this item"
 ALL_RESOLVED_PROSE_RE = re.compile(
     r"^all (?:prior items|listed items|carried-forward items) are resolved\.?$"
@@ -265,13 +267,67 @@ def _reconcile_human_requirements_ack_item(
     return _clear_human_requirements_ack_item(unresolved_items)
 
 
+def _upsert_merge_conflict_item(
+    unresolved_items: Sequence[UnresolvedReviewItem],
+    *,
+    source_round: int,
+    text: str,
+) -> list[UnresolvedReviewItem]:
+    retained = [item for item in unresolved_items if item.item_id != MERGE_CONFLICT_ITEM_ID]
+    retained.append(
+        UnresolvedReviewItem(
+            item_id=MERGE_CONFLICT_ITEM_ID,
+            reviewer="Orchestrator",
+            source_round=source_round,
+            text=text,
+            status="blocking",
+            source_status="blocking",
+        )
+    )
+    return retained
+
+
+def _clear_merge_conflict_item(
+    unresolved_items: Sequence[UnresolvedReviewItem],
+) -> list[UnresolvedReviewItem]:
+    return [item for item in unresolved_items if item.item_id != MERGE_CONFLICT_ITEM_ID]
+
+
+def _reconcile_merge_conflict_item(
+    unresolved_items: Sequence[UnresolvedReviewItem],
+    *,
+    mergeability: PullRequestMergeability,
+    source_round: int,
+) -> list[UnresolvedReviewItem]:
+    """Keep the synthetic conflict item in sync with the latest GitHub probe.
+
+    A confirmed `conflicted` state (re-)adds the blocking item; `mergeable`
+    or `unknown` clears it -- `unknown` is deliberately treated the same as
+    `mergeable` here so a transient GitHub mergeability computation window
+    does not leave a stale blocking item in the ledger (#606).
+    """
+    if mergeability.state != "conflicted":
+        return _clear_merge_conflict_item(unresolved_items)
+    base = mergeability.base_branch or "the base branch"
+    head = mergeability.head_sha or "the current head"
+    text = (
+        f"PR branch has a merge conflict with `{base}` (GitHub reports "
+        f"mergeable={mergeability.mergeable_raw or 'unknown'}, "
+        f"mergeStateStatus={mergeability.merge_state_raw or 'unknown'}) at head `{head}`. "
+        "Merge or rebase onto the current base and resolve the conflict before this "
+        "PR can be reviewed or merged."
+    )
+    return _upsert_merge_conflict_item(unresolved_items, source_round=source_round, text=text)
+
+
 def _validate_structured_coder_followup_items(
     parsed: StructuredCoderFollowup,
     *,
     unresolved_items: Sequence[UnresolvedReviewItem],
 ) -> None:
+    excluded_synthetic_ids = {HUMAN_REQUIREMENTS_ACK_ITEM_ID, MERGE_CONFLICT_ITEM_ID}
     allowed_ids = [
-        item.item_id for item in unresolved_items if item.item_id != HUMAN_REQUIREMENTS_ACK_ITEM_ID
+        item.item_id for item in unresolved_items if item.item_id not in excluded_synthetic_ids
     ]
     # Future follow-ups are informational carry-forwards, not actionable this round --
     # they are not shown in the same-PR-only follow-up prompt, so the coder cannot
@@ -280,7 +336,7 @@ def _validate_structured_coder_followup_items(
     required_ids = [
         item.item_id
         for item in unresolved_items
-        if item.item_id != HUMAN_REQUIREMENTS_ACK_ITEM_ID and item.status != "future"
+        if item.item_id not in excluded_synthetic_ids and item.status != "future"
     ]
     listed_ids = [*parsed.addressed_items, *parsed.remaining_items, *parsed.disputed_items]
     duplicates = sorted({item_id for item_id in listed_ids if listed_ids.count(item_id) > 1})

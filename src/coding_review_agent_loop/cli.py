@@ -344,6 +344,21 @@ def build_parser() -> argparse.ArgumentParser:
             ),
         )
         subparser.add_argument(
+            "--mergeability-poll-attempts",
+            type=int,
+            default=3,
+            help=(
+                "How many times to re-check GitHub mergeability while it reports "
+                "'UNKNOWN' before treating it as unresolved (default: 3)."
+            ),
+        )
+        subparser.add_argument(
+            "--mergeability-poll-interval-seconds",
+            type=int,
+            default=5,
+            help="Delay between mergeability re-checks while GitHub reports 'UNKNOWN' (default: 5).",
+        )
+        subparser.add_argument(
             "--quiet",
             action="store_true",
             help="Suppress progress logs.",
