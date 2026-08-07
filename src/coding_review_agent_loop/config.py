@@ -165,6 +165,10 @@ class AgentLoopConfig:
     # from a confirmed conflict, which is never re-polled here (#606).
     mergeability_poll_attempts: int = 3
     mergeability_poll_interval_seconds: int = 5
+    # Opt-in foreground full-board CI watch after reviewer approval (#587).
+    # These are defaulted to keep direct AgentLoopConfig constructors compatible.
+    watch_pending_ci: bool = False
+    invocation_argv: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.reviewer, str):
@@ -922,6 +926,7 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
         ci_check_name=args.ci_check_name,
         ci_timeout_seconds=args.ci_timeout_seconds,
         ci_poll_interval_seconds=args.ci_poll_interval_seconds,
+        watch_pending_ci=getattr(args, "watch_pending_ci", False),
         ci_queued_grace_seconds=getattr(args, "ci_queued_grace_seconds", 1200),
         mergeability_poll_attempts=getattr(args, "mergeability_poll_attempts", 3),
         mergeability_poll_interval_seconds=getattr(args, "mergeability_poll_interval_seconds", 5),

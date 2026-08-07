@@ -1314,6 +1314,58 @@ class CiWaitOutcome:
     mergeability: PullRequestMergeability | None = None
 
 
+@dataclass(frozen=True)
+class CiWatchOutcome:
+    """Terminal result from the opt-in full-board post-approval watcher."""
+
+    status: Literal["passed", "no_checks", "failed", "timeout", "infrastructure_stall", "merge_conflict", "head_changed", "dry_run"]
+    pr_checks: PullRequestChecks | None = None
+    failed_checks: tuple[PullRequestCheck, ...] = ()
+    mergeability: PullRequestMergeability | None = None
+    head_sha: str | None = None
+
+
+def watch_pr_checks(
+    runner: Runner,
+    config: AgentLoopConfig,
+    pr_number: int,
+    *,
+    metadata: PullRequestMetadata,
+    attempts: int | None = None,
+) -> CiWatchOutcome:
+    """Synchronously watch the complete current-head check board.
+
+    This deliberately sits beside the legacy single-check ``wait_for_ci``.
+    It has no worker or persisted process; interrupting the foreground runner
+    stops it immediately and a later invocation simply fetches fresh state.
+    """
+    if config.dry_run:
+        return CiWatchOutcome(status="dry_run", head_sha=metadata.head_sha)
+    limit = attempts if attempts is not None else max(1, config.ci_timeout_seconds // config.ci_poll_interval_seconds)
+    latest: PullRequestChecks | None = None
+    for attempt in range(limit):
+        current_head = get_pr_head_sha(runner, config, pr_number)
+        if metadata.head_sha and current_head != metadata.head_sha:
+            return CiWatchOutcome(status="head_changed", pr_checks=latest, head_sha=current_head)
+        mergeability = get_pr_mergeability(runner, config=config, pr_number=pr_number)
+        if mergeability.state == "conflicted":
+            return CiWatchOutcome(status="merge_conflict", pr_checks=latest, mergeability=mergeability, head_sha=current_head)
+        snapshot = get_pr_checks(runner, config=config, metadata=metadata)
+        latest = snapshot
+        if is_wholly_infrastructure_blocked(snapshot):
+            return CiWatchOutcome(status="infrastructure_stall", pr_checks=snapshot, head_sha=current_head)
+        if snapshot.state == "failing":
+            return CiWatchOutcome(status="failed", pr_checks=snapshot, failed_checks=snapshot.failing, head_sha=current_head)
+        reliable = snapshot.check_query_status == "ok" and snapshot.branch_protection_status in {"configured", "not_found"}
+        if snapshot.state == "passing" and reliable and not snapshot.pending and not snapshot.missing_required:
+            return CiWatchOutcome(status="passed", pr_checks=snapshot, head_sha=current_head)
+        if snapshot.state == "no_checks" and reliable and not snapshot.missing_required:
+            return CiWatchOutcome(status="no_checks", pr_checks=snapshot, head_sha=current_head)
+        if attempt < limit - 1:
+            runner.run(["sleep", str(config.ci_poll_interval_seconds)], cwd=active_workdir(config))
+    return CiWatchOutcome(status="timeout", pr_checks=latest, head_sha=metadata.head_sha)
+
+
 def wait_for_ci(
     runner: Runner,
     config: AgentLoopConfig,

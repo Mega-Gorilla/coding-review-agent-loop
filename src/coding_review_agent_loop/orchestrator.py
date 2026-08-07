@@ -6,6 +6,7 @@ import datetime
 import hashlib
 import json
 import re
+import shlex
 import sys
 import zoneinfo
 from collections.abc import Callable, Mapping, Sequence
@@ -63,6 +64,7 @@ from .github import (
     validate_pr_body_does_not_close_issue,
     validate_pr_references_issue,
     wait_for_ci,
+    watch_pr_checks,
 )
 from .issue_pr_handoff import (
     post_issue_pr_handoff_comment,
@@ -5286,7 +5288,15 @@ def run_pr_loop(
             next_unresolved_item_number = resumed_round.next_unresolved_item_number
             start_round_number = resumed_round.round_number
             log(config, f"PR #{pr_number}: resuming round {start_round_number}")
-        for round_number in range(start_round_number, config.max_rounds + 1):
+        watch_failure_extension_used = False
+        # One extra slot is only activated by a watcher-discovered failure on
+        # the configured final round; ordinary review failures retain the cap.
+        allowed_rounds = config.max_rounds
+        for round_number in range(start_round_number, config.max_rounds + 2):
+            if round_number > allowed_rounds:
+                raise AgentLoopError(
+                    f"One or more reviewers still reported blocking issues after round {allowed_rounds}; human review required."
+                )
             coder_name = agent_display_name(config.coder)
             if pre_review_test_pending:
                 run_pre_review_tests(runner, config)
@@ -6247,6 +6257,57 @@ def run_pr_loop(
                         "Actions runners recover."
                     )
                     return 0
+                if not must_fix_items and config.watch_pending_ci:
+                    log(config, f"Round {round_number}: watching GitHub checks for PR #{pr_number} in the foreground")
+                    watch_outcome = watch_pr_checks(runner, config, pr_number, metadata=pr_metadata)
+                    if watch_outcome.status == "dry_run":
+                        print(f"PR #{pr_number} approval found; dry-run preview did not perform live CI watching.")
+                        return 0
+                    if watch_outcome.status in {"passed", "no_checks"}:
+                        _publish_approved_followups(runner, config=config, pr_number=pr_number, head_sha=pr_metadata.head_sha, pr_comments=pr_comments, followups=future_followups)
+                        run_optional_tests(runner, config)
+                        if config.auto_merge:
+                            merge_pr(runner, config, pr_number)
+                            print(f"PR #{pr_number} merged after CI watch completed.")
+                        else:
+                            print(f"PR #{pr_number} is merge-ready after CI watch completed.")
+                        return 0
+                    if watch_outcome.status in {"timeout", "infrastructure_stall"}:
+                        _publish_approved_followups(runner, config=config, pr_number=pr_number, head_sha=pr_metadata.head_sha, pr_comments=pr_comments, followups=future_followups)
+                        details = (
+                            _pr_check_details(watch_outcome.pr_checks)
+                            if watch_outcome.pr_checks
+                            else ["No reliable check snapshot was available."]
+                        )
+                        post_pr_comment(runner, config=config, pr_number=pr_number, body=_pending_ci_stop_message(pr_number, "pending", details))
+                        rerun = shlex.join(config.invocation_argv) if config.invocation_argv else f"agent-loop pr {pr_number} --watch-pending-ci"
+                        note = "" if config.invocation_argv else " (deterministic fallback; original invocation unavailable)"
+                        print(
+                            f"PR #{pr_number} CI watch timed out or stalled: {'; '.join(details)}. "
+                            f"Rerun: {rerun}{note}"
+                        )
+                        return 0
+                    if watch_outcome.status == "head_changed":
+                        log(config, f"PR #{pr_number} head changed while watching; re-review is required")
+                        # Fresh state is fetched by the next normal round. Do not
+                        # publish approved follow-ups for the obsolete head.
+                        unresolved_items.append(_next_unresolved_item(item_number=next_unresolved_item_number, reviewer="GitHub PR checks", source_round=round_number, text="PR head changed while CI was being watched; re-review the new head.", status="blocking"))
+                        next_unresolved_item_number += 1
+                    elif watch_outcome.status == "merge_conflict":
+                        unresolved_items = _reconcile_merge_conflict_item(unresolved_items, mergeability=watch_outcome.mergeability, source_round=round_number, current_head_sha=pr_metadata.head_sha)
+                    elif watch_outcome.status == "failed":
+                        details = (
+                            _pr_check_details(watch_outcome.pr_checks)
+                            if watch_outcome.pr_checks
+                            else ["GitHub checks failed."]
+                        )
+                        log(config, f"Round {round_number}: CI watch failed; resuming coder")
+                        unresolved_items.append(_next_unresolved_item(item_number=next_unresolved_item_number, reviewer="GitHub PR checks", source_round=round_number, text=_pr_check_blocking_review(pr_number, "failing", details), status="blocking"))
+                        next_unresolved_item_number += 1
+                        if round_number == config.max_rounds and not watch_failure_extension_used:
+                            allowed_rounds += 1
+                            watch_failure_extension_used = True
+                    must_fix_items = [item for item in unresolved_items if item.status in {"blocking", "same-pr"}]
                 if not must_fix_items:
                     if pr_checks.state in {"pending", "unavailable"}:
                         details = _pr_check_details(pr_checks)
