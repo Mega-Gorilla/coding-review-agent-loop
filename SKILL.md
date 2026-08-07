@@ -345,6 +345,23 @@ python -m helpers.skill_runner run-task-round \
   `pending` > `blocking` > `incomplete` > `approved`.
 - **Merge is always a human decision.** The skill never runs CI-wait or
   auto-merge; every mode stops at "ready to merge."
+- **No unbounded CI waits.** Never run `gh run watch`, `gh pr checks --watch`,
+  or any other unbounded wait on a GitHub Actions check or workflow run —
+  including when fixing a reviewer-reported check failure as the host coder.
+  If you need to confirm CI status, take at most 3 status snapshots (`gh run
+  view <run-id> --json status,conclusion,startedAt` or `gh pr checks`), spaced
+  at least 30 seconds apart, for at most 120 seconds of total CI observation.
+  If a run is still `queued` past that bound, or was cancelled before any job
+  started (a GitHub-hosted-runner capacity outage), stop observing it and
+  report the round's result immediately, naming the affected check/run and
+  noting that work should resume once GitHub Actions runners recover — do not
+  treat this as a code defect. This does not apply to a check that is
+  actively running or that fails due to a real repository test failure; those
+  remain real work to fix. The `coding_review_agent_loop` CLI orchestrator
+  applies the equivalent bound and stall classification automatically (see
+  [External CI infrastructure stalls](docs/local_agent_loop.md#external-ci-infrastructure-stalls));
+  this bullet covers the skill-mode host-coder path, which drives its own
+  shell commands directly.
 
 ---
 

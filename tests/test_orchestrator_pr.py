@@ -1042,7 +1042,15 @@ def test_pr_loop_downgrades_pending_ci_only_blocking_review_with_auto_merge(tmp_
                 blocking_items=["GitHub check `test` is still pending/in_progress."],
             )
         ],
-        pr_check_runs_payload={"check_runs": []},
+        # "test" (the configured auto-merge check) is already green; "lint" is
+        # still running so the overall board is `pending` (driving the
+        # downgrade) without leaving the auto-merge wait polling forever.
+        pr_check_runs_payload={
+            "check_runs": [
+                {"name": "test", "status": "completed", "conclusion": "success"},
+                {"name": "lint", "status": "in_progress"},
+            ]
+        },
         pr_status_payload={"state": "pending", "statuses": []},
         pr_branch_protection_payload={"contexts": ["test"]},
     )
@@ -1123,6 +1131,358 @@ def test_pr_loop_stops_gracefully_when_github_checks_pending_without_auto_merge(
         in captured.out
     )
     _assert_pending_ci_stop_guidance(captured.out)
+
+_QUEUED_TOO_LONG_CHECK_RUNS_PAYLOAD = {
+    "check_runs": [
+        {
+            "id": 111,
+            "name": "test",
+            "status": "queued",
+            "conclusion": None,
+            "html_url": "https://github.com/OWNER/REPO/actions/runs/31123230205/job/1",
+            "created_at": "2020-01-01T00:00:00Z",
+            "started_at": None,
+            "completed_at": None,
+        }
+    ]
+}
+
+_RUNNER_UNAVAILABLE_CHECK_RUNS_PAYLOAD = {
+    "check_runs": [
+        {
+            "id": 222,
+            "name": "test",
+            "status": "completed",
+            "conclusion": "cancelled",
+            "html_url": "https://github.com/OWNER/REPO/actions/runs/31123230206/job/1",
+            "created_at": "2020-01-01T00:00:00Z",
+            "started_at": None,
+            "completed_at": "2020-01-01T00:05:00Z",
+        }
+    ]
+}
+
+
+def test_pr_loop_infrastructure_stall_canonical_blocking_item_downgrades(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(
+                state="blocking",
+                summary="Review complete.",
+                blocking_items=[
+                    "GitHub check `test` (workflow run 31123230206) was cancelled before "
+                    "execution because a hosted runner was unavailable; runner unavailable.",
+                ],
+            )
+        ],
+        pr_check_runs_payload=_RUNNER_UNAVAILABLE_CHECK_RUNS_PAYLOAD,
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_payload={"contexts": ["test"]},
+    )
+    config = make_config(tmp_path)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+    infra_comment = next(
+        comment for comment in runner.comments
+        if comment.startswith("External GitHub Actions infrastructure is blocking PR #77.")
+    )
+    assert "runner unavailable" in infra_comment.lower()
+    stop_comment = runner.comments[-1]
+    assert stop_comment.startswith(
+        "PR #77 is blocked on external GitHub Actions infrastructure, not a code defect."
+    )
+
+
+def test_pr_loop_infrastructure_stall_queued_too_long_on_approval(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="LGTM.")],
+        pr_check_runs_payload=_QUEUED_TOO_LONG_CHECK_RUNS_PAYLOAD,
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_payload={"contexts": ["test"]},
+    )
+    config = make_config(tmp_path)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+    assert any(
+        comment.startswith("External GitHub Actions infrastructure is blocking PR #77.")
+        for comment in runner.comments
+    )
+    assert any("queued" in comment.lower() for comment in runner.comments)
+
+
+def test_pr_loop_infrastructure_stall_pre_execution_cancel_no_synthetic_item(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="LGTM.")],
+        pr_check_runs_payload=_RUNNER_UNAVAILABLE_CHECK_RUNS_PAYLOAD,
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_payload={"contexts": ["test"]},
+    )
+    config = make_config(tmp_path)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+    assert not any("GitHub PR checks are failing" in comment for comment in runner.comments)
+
+
+def test_pr_loop_genuine_failure_alongside_stall_not_downgraded(tmp_path):
+    mixed_payload = {
+        "check_runs": [
+            {
+                "id": 111,
+                "name": "test",
+                "status": "completed",
+                "conclusion": "failure",
+                "html_url": "https://github.com/OWNER/REPO/actions/runs/1/job/1",
+            },
+            _RUNNER_UNAVAILABLE_CHECK_RUNS_PAYLOAD["check_runs"][0] | {"name": "lint"},
+        ]
+    }
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(
+                state="blocking",
+                summary="Missing null check in models.py causing a crash on empty input.",
+                blocking_items=["Missing null check in models.py causing a crash on empty input."],
+            ),
+        ],
+        pr_check_runs_payload=mixed_payload,
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_payload={"contexts": ["test"]},
+    )
+    config = make_config(tmp_path, max_rounds=1)
+
+    with pytest.raises(AgentLoopError, match="blocking issues after round 1"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+
+def test_pr_loop_mixed_single_item_stall_plus_defect_not_downgraded(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(
+                state="blocking",
+                summary="Review complete.",
+                blocking_items=[
+                    "GitHub check `test` (workflow run 31123230206) runner unavailable, and "
+                    "models.py is missing a null check that crashes on empty input.",
+                ],
+            ),
+        ],
+        pr_check_runs_payload=_RUNNER_UNAVAILABLE_CHECK_RUNS_PAYLOAD,
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_payload={"contexts": ["test"]},
+    )
+    config = make_config(tmp_path, max_rounds=1)
+
+    with pytest.raises(AgentLoopError, match="blocking issues after round 1"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+
+def test_pr_loop_generic_ci_keyword_item_not_downgraded(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(
+                state="blocking",
+                summary="Review complete.",
+                blocking_items=["CI infrastructure failed for this PR."],
+            ),
+        ],
+        pr_check_runs_payload=_RUNNER_UNAVAILABLE_CHECK_RUNS_PAYLOAD,
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_payload={"contexts": ["test"]},
+    )
+    config = make_config(tmp_path, max_rounds=1)
+
+    with pytest.raises(AgentLoopError, match="blocking issues after round 1"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+
+def test_pr_loop_stall_plus_missing_required_no_infra_stop(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="LGTM.")],
+        pr_check_runs_payload=_QUEUED_TOO_LONG_CHECK_RUNS_PAYLOAD,
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_payload={"contexts": ["test", "lint"]},
+    )
+    config = make_config(tmp_path)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert not any(
+        comment.startswith("External GitHub Actions infrastructure is blocking")
+        for comment in runner.comments
+    )
+    assert any(
+        comment.startswith("Reviewers approved PR #77, but GitHub checks are still pending.")
+        for comment in runner.comments
+    )
+
+
+def test_pr_loop_stall_plus_partial_query_no_infra_stop(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="LGTM.")],
+        pr_check_runs_payload=_QUEUED_TOO_LONG_CHECK_RUNS_PAYLOAD,
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_status_returncode=1,
+        pr_branch_protection_payload={"contexts": ["test"]},
+    )
+    config = make_config(tmp_path)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert not any(
+        comment.startswith("External GitHub Actions infrastructure is blocking")
+        for comment in runner.comments
+    )
+    assert any(
+        comment.startswith("Reviewers approved PR #77, but GitHub check status is unavailable.")
+        or comment.startswith("Reviewers approved PR #77, but GitHub checks are still pending.")
+        for comment in runner.comments
+    )
+
+
+def test_pr_loop_actively_running_check_unchanged_pending_behavior(tmp_path, capsys):
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="LGTM.")],
+        pr_check_runs_payload={
+            "check_runs": [
+                {
+                    "id": 333,
+                    "name": "test",
+                    "status": "in_progress",
+                    "conclusion": None,
+                    "created_at": "2020-01-01T00:00:00Z",
+                    "started_at": "2020-01-01T00:00:05Z",
+                }
+            ]
+        },
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_payload={"contexts": ["test"]},
+    )
+    config = make_config(tmp_path)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert not any(
+        comment.startswith("External GitHub Actions infrastructure is blocking")
+        for comment in runner.comments
+    )
+    stop_comment = runner.comments[-1]
+    assert stop_comment.startswith("Reviewers approved PR #77, but GitHub checks are still pending.")
+
+
+def test_pr_loop_coder_round_gets_stall_backstop_context(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(
+                state="blocking",
+                summary="Missing null check in models.py causing a crash on empty input.",
+                blocking_items=["Missing null check in models.py causing a crash on empty input."],
+            ),
+            structured_pr_review(
+                state="approved",
+                summary="Codex final approval.",
+                prior_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+            ),
+        ],
+        claude_outputs=[
+            structured_coder_followup(
+                state="blocking",
+                summary="Added the missing null check.",
+                addressed_items=["item-1"],
+                remaining_items=[],
+            ),
+        ],
+        pr_check_runs_payload={
+            "check_runs": [
+                _RUNNER_UNAVAILABLE_CHECK_RUNS_PAYLOAD["check_runs"][0],
+            ]
+        },
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_payload={"contexts": ["test"]},
+    )
+    config = make_config(tmp_path, max_rounds=2)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    followup_prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"])
+    assert "External CI infrastructure is currently blocking" in followup_prompt
+    assert "31123230206" in followup_prompt
+    assert "Do not wait for these checks" in followup_prompt
+
+
+def test_pr_loop_auto_merge_queued_too_long_stops_without_merge(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="LGTM.")],
+        pr_check_runs_payload=_QUEUED_TOO_LONG_CHECK_RUNS_PAYLOAD,
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_payload={"contexts": ["test"]},
+    )
+    config = make_config(tmp_path, auto_merge=True, ci_timeout_seconds=1200, ci_poll_interval_seconds=30)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert not any(cmd[:3] == ["gh", "pr", "merge"] for cmd, _cwd in runner.commands)
+    assert any(
+        comment.startswith("External GitHub Actions infrastructure is blocking")
+        for comment in runner.comments
+    )
+    sleep_commands = [cmd for cmd, _cwd in runner.commands if cmd[:1] == ["sleep"]]
+    assert len(sleep_commands) == 0
+
+
+def test_pr_loop_auto_merge_pre_execution_cancel_stops_without_merge(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="LGTM.")],
+        pr_check_runs_payload=_RUNNER_UNAVAILABLE_CHECK_RUNS_PAYLOAD,
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_payload={"contexts": ["test"]},
+    )
+    config = make_config(tmp_path, auto_merge=True, ci_timeout_seconds=1200, ci_poll_interval_seconds=30)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert not any(cmd[:3] == ["gh", "pr", "merge"] for cmd, _cwd in runner.commands)
+    assert any(
+        comment.startswith("External GitHub Actions infrastructure is blocking")
+        for comment in runner.comments
+    )
+
+
+def test_pr_loop_auto_merge_stall_plus_missing_required_keeps_waiting(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="LGTM.")],
+        pr_check_runs_payload=_QUEUED_TOO_LONG_CHECK_RUNS_PAYLOAD,
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_branch_protection_payload={"contexts": ["test", "lint"]},
+    )
+    config = make_config(tmp_path, auto_merge=True, ci_timeout_seconds=60, ci_poll_interval_seconds=30)
+
+    with pytest.raises(AgentLoopError, match="did not pass within"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert not any(cmd[:3] == ["gh", "pr", "merge"] for cmd, _cwd in runner.commands)
+
+
+def test_pr_loop_auto_merge_stall_plus_partial_query_keeps_waiting(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="LGTM.")],
+        pr_check_runs_payload=_QUEUED_TOO_LONG_CHECK_RUNS_PAYLOAD,
+        pr_status_payload={"state": "pending", "statuses": []},
+        pr_status_returncode=1,
+        pr_branch_protection_payload={"contexts": ["test"]},
+    )
+    config = make_config(tmp_path, auto_merge=True, ci_timeout_seconds=60, ci_poll_interval_seconds=30)
+
+    with pytest.raises(AgentLoopError, match="did not pass within"):
+        run_pr_loop(runner, pr_number=77, config=config)
+
+    assert not any(cmd[:3] == ["gh", "pr", "merge"] for cmd, _cwd in runner.commands)
+
 
 def test_pr_loop_summarizes_approved_followups_before_pending_check_stop(tmp_path):
     runner = FakeRunner(

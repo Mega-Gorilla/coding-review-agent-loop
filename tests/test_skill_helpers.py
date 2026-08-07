@@ -1565,6 +1565,33 @@ class TestPromptCheckoutPath:
         assert wd in prompt
         assert self._no_bare_skill_runner(prompt) == 0
 
+    def test_pr_fix_prompt_carries_no_unbounded_ci_wait_guidance(self) -> None:
+        # #602: helpers/prompt_builders.py's run-pr-fix prompt delegates to
+        # coding_review_agent_loop.prompts.build_followup_prompt, which must
+        # carry the same bounded CI-observation policy as the CLI orchestrator
+        # so the skill's external-coder path can't wait indefinitely either.
+        from helpers.prompt_builders import build_pr_fix_prompt_for_skill
+        wd = "/tmp/coding-review-agent-loop/skill-runner-codex"
+        prompt = build_pr_fix_prompt_for_skill(
+            295,
+            [{
+                "item_id": "item-1",
+                "reviewer": "codex",
+                "source_round": 1,
+                "text": "Fix the bug.",
+                "status": "blocking",
+            }],
+            1,
+            repo="wwind123/coding-review-agent-loop",
+            coder="codex",
+            reviewers=["gemini"],
+            workdir=wd,
+        )
+        assert "gh run watch" in prompt
+        assert "at most 3" in prompt
+        assert "120 seconds" in prompt
+        assert "resume once GitHub Actions runners recover" in prompt
+
 
 # ---------------------------------------------------------------------------
 # helpers/skill_runner.py  _run_test_gate (#296, increment 2)

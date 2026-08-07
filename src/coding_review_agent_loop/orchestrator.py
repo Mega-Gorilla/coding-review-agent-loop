@@ -201,7 +201,10 @@ from .workdir_guard import (
     validate_test_commands_within_workdir,
 )
 from .checks import (
+    _ci_infrastructure_details,
+    _format_ci_infrastructure_comment,
     _format_pr_checks_comment,
+    _ci_infrastructure_stop_message,
     _pending_ci_status_summary,
     _pending_ci_stop_guidance,
     _pending_ci_stop_message,
@@ -209,6 +212,12 @@ from .checks import (
     _pr_check_details,
     run_optional_tests,
     run_pre_review_tests,
+)
+from .ci_health import (
+    CiInfrastructureStall,
+    StalledCheck,
+    is_canonical_stall_only_text,
+    is_wholly_infrastructure_blocked,
 )
 from .comment_rendering import (
     DEFERRED_STAGES_MARKER_RE,
@@ -2942,6 +2951,65 @@ def _is_pending_ci_only_review(parsed_review: ParsedReview, pr_checks: PullReque
     return True
 
 
+def _coder_infrastructure_stall_notice(stalls: Sequence[StalledCheck]) -> str:
+    """Prepended to a coder follow-up review when checks are wholly
+    infrastructure-blocked (#602), so the coder never has to discover this
+    itself by waiting on the stalled check.
+    """
+    if not stalls:
+        return ""
+    bullets = "\n".join(f"- {stall.describe()}" for stall in stalls)
+    return (
+        "External CI infrastructure is currently blocking the following GitHub "
+        "checks; this is not a code defect and there is no fix for it in this PR:\n"
+        f"{bullets}\n\n"
+        "Do not wait for these checks to leave queued state and do not attempt to "
+        "retrigger them. Fix only the genuine review items below. If your terminal "
+        "response needs to mention CI status, name the affected check/run above and "
+        "say that work should resume once GitHub Actions runners recover.\n\n"
+    )
+
+
+_BOILERPLATE_REVIEW_SUMMARIES = {"Review complete.", "Plan review complete."}
+
+
+def _is_infrastructure_ci_only_review(parsed_review: ParsedReview, pr_checks: PullRequestChecks) -> bool:
+    """Detect a blocking review whose only content is a canonical restatement of
+    an external CI infrastructure stall (a queued check that never started a
+    job, or one cancelled before execution because a hosted runner was
+    unavailable), rather than an actionable code-level finding.
+
+    Unlike `_is_pending_ci_only_review`'s keyword heuristic, this requires the
+    whole check board to already be classified `is_wholly_infrastructure_blocked`
+    and every blocking item (and non-boilerplate summary) to pass the closed-
+    vocabulary `is_canonical_stall_only_text` check. Any failure aborts the
+    downgrade for the whole review, so a mixed item that names the stalled run
+    and then describes an unrelated code defect reaches the coder unchanged.
+    """
+    if not is_wholly_infrastructure_blocked(pr_checks):
+        return False
+    if parsed_review.followups.same_pr:
+        return False
+    if any(item.disposition in {"blocking", "same-pr"} for item in parsed_review.dispositions):
+        return False
+    candidate_texts = [
+        item.text for item in parsed_review.blocking_items if item.text and item.text.strip()
+    ]
+    if not candidate_texts:
+        return False
+    stalls = pr_checks.infrastructure_stalls
+    if not all(is_canonical_stall_only_text(text, stalls=stalls) for text in candidate_texts):
+        return False
+    summary = (parsed_review.summary or "").strip()
+    if (
+        summary
+        and summary not in _BOILERPLATE_REVIEW_SUMMARIES
+        and not is_canonical_stall_only_text(summary, stalls=stalls)
+    ):
+        return False
+    return True
+
+
 def _should_record_new_blocking_item(summary: str, *, had_prior_items: bool, had_dispositions: bool) -> bool:
     if not summary:
         return False
@@ -5621,6 +5689,20 @@ def run_pr_loop(
                     parsed_review = dataclasses_replace(parsed_review, state="approved", blocking_items=())
                     review_state = parsed_review.state
 
+                if (
+                    resumed_record is None
+                    and review_state == "blocking"
+                    and _is_infrastructure_ci_only_review(parsed_review, reviewer_pr_checks)
+                ):
+                    log(
+                        config,
+                        f"Round {round_number}: {reviewer_name} blocking review only restates "
+                        "an external CI infrastructure stall; treating as approved instead of "
+                        "starting a new coder follow-up round",
+                    )
+                    parsed_review = dataclasses_replace(parsed_review, state="approved", blocking_items=())
+                    review_state = parsed_review.state
+
                 if _is_incomplete_pr_review(parsed_review):
                     if len(configured_reviewers) == 1:
                         incomplete_pr_review_error = AgentLoopError(
@@ -5869,6 +5951,7 @@ def run_pr_loop(
                         f"disagreement.\n\nDisputed items still unresolved:\n{item_summaries}"
                     )
 
+            pr_checks: PullRequestChecks | None = None
             if not must_fix_items:
                 if human_requirements:
                     missing_acknowledgements = [
@@ -6029,6 +6112,47 @@ def run_pr_loop(
                     next_unresolved_item_number += 1
                     must_fix_items = [item for item in unresolved_items if item.status in {"blocking", "same-pr"}]
                 pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
+                if not must_fix_items and is_wholly_infrastructure_blocked(pr_checks):
+                    # Every remaining blocking/pending signal is external GitHub
+                    # Actions infrastructure (a queued check that never started a
+                    # job, or one cancelled before execution because a hosted
+                    # runner was unavailable): stop cleanly and resumably instead
+                    # of a synthetic blocking item, a coder round, or a merge.
+                    stall = CiInfrastructureStall(checks=pr_checks.infrastructure_stalls)
+                    _publish_approved_followups(
+                        runner,
+                        config=config,
+                        pr_number=pr_number,
+                        head_sha=pr_metadata.head_sha,
+                        pr_comments=pr_comments,
+                        followups=future_followups,
+                    )
+                    post_pr_comment(
+                        runner,
+                        config=config,
+                        pr_number=pr_number,
+                        body=_format_ci_infrastructure_comment(pr_number, stall),
+                    )
+                    post_pr_comment(
+                        runner,
+                        config=config,
+                        pr_number=pr_number,
+                        body=_ci_infrastructure_stop_message(pr_number, stall, []),
+                    )
+                    log(
+                        config,
+                        f"Round {round_number}: reviewers approved PR #{pr_number}; GitHub checks "
+                        "are wholly blocked by external CI infrastructure; stopping without a "
+                        "coder follow-up round or merge",
+                    )
+                    print(
+                        f"PR #{pr_number} was approved by {format_agent_list(configured_reviewers)}, "
+                        "but external GitHub Actions infrastructure is blocking CI "
+                        f"({'; '.join(_ci_infrastructure_details(stall))}). No code change is "
+                        "required and no merge was attempted; rerun the same command once GitHub "
+                        "Actions runners recover."
+                    )
+                    return 0
                 if not must_fix_items:
                     if pr_checks.state in {"pending", "unavailable"}:
                         details = _pr_check_details(pr_checks)
@@ -6113,7 +6237,35 @@ def run_pr_loop(
                     )
                     run_optional_tests(runner, config)
                     if config.auto_merge:
-                        wait_for_ci(runner, config, pr_number)
+                        wait_outcome = wait_for_ci(runner, config, pr_number, metadata=pr_metadata)
+                        if wait_outcome.status == "infrastructure_stall":
+                            assert wait_outcome.stall is not None
+                            post_pr_comment(
+                                runner,
+                                config=config,
+                                pr_number=pr_number,
+                                body=_format_ci_infrastructure_comment(pr_number, wait_outcome.stall),
+                            )
+                            post_pr_comment(
+                                runner,
+                                config=config,
+                                pr_number=pr_number,
+                                body=_ci_infrastructure_stop_message(pr_number, wait_outcome.stall, []),
+                            )
+                            log(
+                                config,
+                                f"Round {round_number}: PR #{pr_number} CI wait stopped on external "
+                                "infrastructure blocking; no merge attempted",
+                            )
+                            print(
+                                f"PR #{pr_number} was approved by "
+                                f"{format_agent_list(configured_reviewers)}, but external GitHub "
+                                "Actions infrastructure is blocking CI "
+                                f"({'; '.join(_ci_infrastructure_details(wait_outcome.stall))}). "
+                                "No merge was attempted; rerun the same command once GitHub Actions "
+                                "runners recover."
+                            )
+                            return 0
                         merge_pr(runner, config, pr_number)
                     print(f"PR #{pr_number} approved by {format_agent_list(configured_reviewers)}.")
                     return 0
@@ -6123,10 +6275,26 @@ def run_pr_loop(
                     "human review required."
                 )
 
+            # Structural backstop (#602): even when the reviewer downgrade above
+            # correctly declines (a mixed item, a genuine defect alongside a
+            # stalled check), a coder round must never be able to wait
+            # indefinitely on external CI infrastructure. Always confirm the
+            # freshest check board before starting the round and, when it is
+            # wholly infrastructure-blocked, prepend the stall context so the
+            # coder fixes only the genuine items and returns a bounded terminal
+            # response instead of chasing the stalled check.
+            if pr_checks is None:
+                pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
+            stall_context = (
+                _coder_infrastructure_stall_notice(pr_checks.infrastructure_stalls)
+                if is_wholly_infrastructure_blocked(pr_checks)
+                else ""
+            )
+
             same_pr_items = [item for item in unresolved_items if item.status == "same-pr"]
             blocking_items = [item for item in unresolved_items if item.status == "blocking"]
             if same_pr_items and not blocking_items:
-                combined_review = _format_same_pr_unresolved_items(same_pr_items)
+                combined_review = stall_context + _format_same_pr_unresolved_items(same_pr_items)
                 coder_human_requirements_context = render_coder_human_requirements_prompt_context(
                     human_requirements
                 )
@@ -6141,7 +6309,7 @@ def run_pr_loop(
                     human_requirements_context=coder_human_requirements_context,
                 )
             else:
-                combined_review = _format_unresolved_items_for_coder(unresolved_items)
+                combined_review = stall_context + _format_unresolved_items_for_coder(unresolved_items)
                 coder_human_requirements_context = render_coder_human_requirements_prompt_context(
                     human_requirements
                 )

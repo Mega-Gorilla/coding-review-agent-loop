@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .ci_health import CiInfrastructureStall
 from .config import AgentLoopConfig
 from .github import PullRequestChecks
 from .logging import log
@@ -121,6 +122,50 @@ def _pr_check_details(pr_checks: PullRequestChecks) -> list[str]:
         )
     if pr_checks.branch_protection_note:
         details.append(pr_checks.branch_protection_note)
+    if pr_checks.infrastructure_stalls:
+        # Not code defects, and not necessarily the sole reason the state is
+        # failing/pending: annotate them so a coder round does not chase a
+        # check that is stalled on external GitHub Actions infrastructure.
+        details.append(
+            "External CI infrastructure stalls (not code defects): "
+            + "; ".join(stall.describe() for stall in pr_checks.infrastructure_stalls)
+        )
     if not details:
         details.append("No individual check names were available from the GitHub API.")
     return details
+
+
+def _ci_infrastructure_details(stall: CiInfrastructureStall) -> list[str]:
+    return [check.describe() for check in stall.checks]
+
+
+def _format_ci_infrastructure_comment(pr_number: int, stall: CiInfrastructureStall) -> str:
+    lines = [
+        f"External GitHub Actions infrastructure is blocking PR #{pr_number}.",
+        "",
+        "This is not a repository defect: no code change is required, and no merge was attempted.",
+        "",
+    ]
+    lines.extend(f"- {detail}" for detail in _ci_infrastructure_details(stall))
+    lines.extend(["", "-- coding-review-agent-loop"])
+    return "\n".join(lines)
+
+
+def _ci_infrastructure_stop_message(
+    pr_number: int,
+    stall: CiInfrastructureStall,
+    carried_items: list[str],
+) -> str:
+    lines = [
+        f"PR #{pr_number} is blocked on external GitHub Actions infrastructure, not a code defect.",
+        "",
+        "No code change is required and no merge was attempted. Rerun the same command once "
+        "GitHub Actions runners recover; the stalled check(s) should simply be rerun at that point.",
+        "",
+    ]
+    lines.extend(f"- {detail}" for detail in _ci_infrastructure_details(stall))
+    if carried_items:
+        lines.extend(["", "Reviewer items carried forward, still unresolved:"])
+        lines.extend(f"- {item}" for item in carried_items)
+    lines.extend(["", "-- coding-review-agent-loop"])
+    return "\n".join(lines)

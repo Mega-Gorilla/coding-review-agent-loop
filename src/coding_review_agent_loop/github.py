@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime
 import json
 import os
 import re
@@ -10,6 +11,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
+from .ci_health import (
+    CiInfrastructureStall,
+    PullRequestCheck,
+    PullRequestChecks,
+    StalledCheck,
+    _extract_run_id,
+    classify_ci_infrastructure_stall,
+    is_wholly_infrastructure_blocked,
+)
 from .errors import AgentLoopError
 from .logging import log
 from .protocol import parse_signed_human_requirement_body
@@ -18,6 +28,11 @@ from .workdirs import active_workdir
 
 if TYPE_CHECKING:
     from .config import AgentLoopConfig
+
+# PullRequestCheck/PullRequestChecks/StalledCheck/CiInfrastructureStall are
+# defined in ci_health.py (kept dependency-free of this module's live GitHub
+# API calls) and re-exported here for existing importers: checks.py,
+# orchestrator.py, prompts.py, and tests/agent_loop_helpers.py.
 
 
 @dataclass(frozen=True)
@@ -72,26 +87,6 @@ class PullRequestReviewContext:
     metadata: PullRequestMetadata
     comments: tuple[IssueComment, ...]
     human_requirements: tuple[HumanReviewRequirement, ...]
-
-
-@dataclass(frozen=True)
-class PullRequestCheck:
-    name: str
-    kind: Literal["check_run", "status_context"]
-    status: str
-    url: str | None = None
-
-
-@dataclass(frozen=True)
-class PullRequestChecks:
-    state: Literal["passing", "failing", "pending", "no_checks", "unavailable"]
-    required_checks: tuple[str, ...]
-    passing: tuple[PullRequestCheck, ...]
-    pending: tuple[PullRequestCheck, ...]
-    failing: tuple[PullRequestCheck, ...]
-    missing_required: tuple[str, ...]
-    branch_protection_status: Literal["configured", "not_found", "forbidden", "unavailable"]
-    branch_protection_note: str | None = None
 
 
 PR_METADATA_FIELDS = "number,title,headRefName,baseRefName,headRefOid,url,body"
@@ -526,6 +521,66 @@ def _dedupe_checks(checks: list[PullRequestCheck]) -> tuple[PullRequestCheck, ..
     return tuple(deduped.values())
 
 
+def _parse_check_runs_payload(payload: object) -> tuple[list[PullRequestCheck], list[str]]:
+    """Parse the `commits/{sha}/check-runs` response into `PullRequestCheck`s.
+
+    Shared by `get_pr_checks` (full board) and `get_check_record` (a single
+    configured check's full timestamped record for the auto-merge wait loop).
+    """
+    checks: list[PullRequestCheck] = []
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        errors.append("check-runs response was not a JSON object")
+        return checks, errors
+    for raw_check in payload.get("check_runs") or []:
+        if not isinstance(raw_check, dict):
+            continue
+        name = _optional_str(raw_check.get("name"))
+        if not name:
+            continue
+        url = _optional_str(raw_check.get("html_url") or raw_check.get("details_url"))
+        raw_id = raw_check.get("id")
+        checks.append(
+            PullRequestCheck(
+                name=name,
+                kind="check_run",
+                status=_normalize_check_run_status(raw_check),
+                url=url,
+                check_id=raw_id if isinstance(raw_id, int) else None,
+                run_id=_extract_run_id(url),
+                created_at=_optional_str(raw_check.get("created_at")),
+                started_at=_optional_str(raw_check.get("started_at")),
+                completed_at=_optional_str(raw_check.get("completed_at")),
+            )
+        )
+    return checks, errors
+
+
+def _parse_commit_statuses_payload(payload: object) -> tuple[list[PullRequestCheck], list[str]]:
+    checks: list[PullRequestCheck] = []
+    errors: list[str] = []
+    if not isinstance(payload, dict):
+        errors.append("commit-status response was not a JSON object")
+        return checks, errors
+    for raw_status in payload.get("statuses") or []:
+        if not isinstance(raw_status, dict):
+            continue
+        name = _optional_str(raw_status.get("context"))
+        if not name:
+            continue
+        checks.append(
+            PullRequestCheck(
+                name=name,
+                kind="status_context",
+                status=_optional_str(raw_status.get("state")) or "pending",
+                url=_optional_str(raw_status.get("target_url")),
+                created_at=_optional_str(raw_status.get("created_at")),
+                completed_at=_optional_str(raw_status.get("updated_at")),
+            )
+        )
+    return checks, errors
+
+
 def _fetch_branch_protection_required_checks(
     runner: Runner,
     *,
@@ -587,6 +642,7 @@ def get_pr_checks(
     *,
     config: AgentLoopConfig,
     metadata: PullRequestMetadata,
+    now: datetime.datetime | None = None,
 ) -> PullRequestChecks:
     if config.dry_run:
         return PullRequestChecks(
@@ -598,6 +654,8 @@ def get_pr_checks(
             missing_required=(),
             branch_protection_status="unavailable",
             branch_protection_note="Dry run mode does not query live GitHub PR checks.",
+            check_query_status="unavailable",
+            check_query_errors=("Dry run mode does not query live GitHub PR checks.",),
         )
 
     if not metadata.head_sha:
@@ -610,6 +668,8 @@ def get_pr_checks(
             missing_required=(),
             branch_protection_status="unavailable",
             branch_protection_note="PR head SHA is unavailable, so GitHub PR checks could not be queried.",
+            check_query_status="unavailable",
+            check_query_errors=("PR head SHA is unavailable.",),
         )
 
     branch_protection_status, required_checks, branch_protection_note = (
@@ -640,6 +700,8 @@ def get_pr_checks(
 
     check_errors: list[str] = []
     checks: list[PullRequestCheck] = []
+    check_runs_ok = False
+    statuses_ok = False
 
     if check_runs_result.returncode == 0:
         try:
@@ -647,20 +709,10 @@ def get_pr_checks(
         except json.JSONDecodeError:
             check_errors.append("check-runs response was not valid JSON")
         else:
-            for raw_check in payload.get("check_runs") or []:
-                if not isinstance(raw_check, dict):
-                    continue
-                name = _optional_str(raw_check.get("name"))
-                if not name:
-                    continue
-                checks.append(
-                    PullRequestCheck(
-                        name=name,
-                        kind="check_run",
-                        status=_normalize_check_run_status(raw_check),
-                        url=_optional_str(raw_check.get("html_url") or raw_check.get("details_url")),
-                    )
-                )
+            check_runs_ok = True
+            parsed_checks, parse_errors = _parse_check_runs_payload(payload)
+            checks.extend(parsed_checks)
+            check_errors.extend(parse_errors)
     else:
         check_errors.append("check-runs query failed")
 
@@ -670,22 +722,19 @@ def get_pr_checks(
         except json.JSONDecodeError:
             check_errors.append("commit-status response was not valid JSON")
         else:
-            for raw_status in payload.get("statuses") or []:
-                if not isinstance(raw_status, dict):
-                    continue
-                name = _optional_str(raw_status.get("context"))
-                if not name:
-                    continue
-                checks.append(
-                    PullRequestCheck(
-                        name=name,
-                        kind="status_context",
-                        status=_optional_str(raw_status.get("state")) or "pending",
-                        url=_optional_str(raw_status.get("target_url")),
-                    )
-                )
+            statuses_ok = True
+            parsed_statuses, parse_errors = _parse_commit_statuses_payload(payload)
+            checks.extend(parsed_statuses)
+            check_errors.extend(parse_errors)
     else:
         check_errors.append("commit-status query failed")
+
+    if check_runs_ok and statuses_ok:
+        check_query_status: Literal["ok", "partial", "unavailable"] = "ok"
+    elif check_runs_ok or statuses_ok:
+        check_query_status = "partial"
+    else:
+        check_query_status = "unavailable"
 
     deduped_checks = _dedupe_checks(checks)
     passing = tuple(check for check in deduped_checks if _classify_check_status(check.status) == "passing")
@@ -693,6 +742,11 @@ def get_pr_checks(
     failing = tuple(check for check in deduped_checks if _classify_check_status(check.status) == "failing")
     observed_names = {check.name for check in deduped_checks}
     missing_required = tuple(name for name in required_checks if name not in observed_names)
+    infrastructure_stalls = classify_ci_infrastructure_stall(
+        deduped_checks,
+        now=now or datetime.datetime.now(datetime.timezone.utc),
+        grace_seconds=config.ci_queued_grace_seconds,
+    ).checks
 
     state: Literal["passing", "failing", "pending", "no_checks", "unavailable"]
     if failing:
@@ -722,6 +776,9 @@ def get_pr_checks(
         missing_required=missing_required,
         branch_protection_status=branch_protection_status,
         branch_protection_note=branch_protection_note,
+        check_query_status=check_query_status,
+        check_query_errors=tuple(check_errors),
+        infrastructure_stalls=infrastructure_stalls,
     )
 
 
@@ -1105,24 +1162,55 @@ def get_pr_head_sha(runner: Runner, config: AgentLoopConfig, pr_number: int) -> 
     return sha
 
 
-def get_check_status(runner: Runner, config: AgentLoopConfig, head_sha: str) -> str:
+def get_check_record(runner: Runner, config: AgentLoopConfig, head_sha: str) -> PullRequestCheck | None:
+    """Full timestamped record for `config.ci_check_name`, or None if absent/unavailable."""
     result = runner.run(
-        [
-            config.gh_cmd,
-            "api",
-            f"repos/{config.repo}/commits/{head_sha}/check-runs",
-            "--jq",
-            (
-                f"[.check_runs[] | select(.name == {json.dumps(config.ci_check_name)})] | "
-                'if length == 0 then "pending" else .[0].conclusion // .[0].status end'
-            ),
-        ],
+        [config.gh_cmd, "api", f"repos/{config.repo}/commits/{head_sha}/check-runs"],
         cwd=active_workdir(config),
+        check=False,
     )
-    return result.stdout.strip() or "pending"
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout or "{}")
+    except json.JSONDecodeError:
+        return None
+    checks, _errors = _parse_check_runs_payload(payload)
+    for check in checks:
+        if check.name == config.ci_check_name:
+            return check
+    return None
 
 
-def wait_for_ci(runner: Runner, config: AgentLoopConfig, pr_number: int) -> None:
+def get_check_status(runner: Runner, config: AgentLoopConfig, head_sha: str) -> str:
+    record = get_check_record(runner, config, head_sha)
+    return record.status if record is not None else "pending"
+
+
+@dataclass(frozen=True)
+class CiWaitOutcome:
+    status: Literal["passed", "infrastructure_stall"]
+    stall: CiInfrastructureStall | None = None
+    pr_checks: PullRequestChecks | None = None
+
+
+def wait_for_ci(
+    runner: Runner,
+    config: AgentLoopConfig,
+    pr_number: int,
+    *,
+    metadata: PullRequestMetadata,
+) -> CiWaitOutcome:
+    """Poll the configured CI check before auto-merge.
+
+    A queued-too-long or pre-execution-cancelled check is not, by itself,
+    grounds to stop: a stall on the single configured check only ends the
+    wait once a full `get_pr_checks` snapshot confirms the whole PR check
+    board is wholly infrastructure-blocked (`is_wholly_infrastructure_blocked`).
+    Otherwise this keeps today's contract exactly: keep polling and ultimately
+    raise `AgentLoopError` on a genuine terminal failure or `ci_timeout_seconds`
+    expiry.
+    """
     log(config, f"Waiting for GitHub check '{config.ci_check_name}' before merge")
     head_sha = get_pr_head_sha(runner, config, pr_number)
     attempts = max(1, config.ci_timeout_seconds // config.ci_poll_interval_seconds)
@@ -1135,10 +1223,22 @@ def wait_for_ci(runner: Runner, config: AgentLoopConfig, pr_number: int) -> None
         "skipped",
     }
     for attempt in range(attempts):
-        status = get_check_status(runner, config, head_sha)
+        record = get_check_record(runner, config, head_sha)
+        status = record.status if record is not None else "pending"
         log(config, f"GitHub check '{config.ci_check_name}' status: {status}")
         if status == "success":
-            return
+            return CiWaitOutcome(status="passed")
+
+        stall = classify_ci_infrastructure_stall(
+            [record] if record is not None else [],
+            now=datetime.datetime.now(datetime.timezone.utc),
+            grace_seconds=config.ci_queued_grace_seconds,
+        )
+        if stall.is_stalled:
+            snapshot = get_pr_checks(runner, config=config, metadata=metadata)
+            if is_wholly_infrastructure_blocked(snapshot):
+                return CiWaitOutcome(status="infrastructure_stall", stall=stall, pr_checks=snapshot)
+
         if status in terminal_failures:
             raise AgentLoopError(f"CI check '{config.ci_check_name}' failed with status: {status}")
         if attempt < attempts - 1:

@@ -2,7 +2,7 @@ import pytest
 
 from agent_loop_helpers import *  # noqa: F403
 from coding_review_agent_loop.github import PullRequestCheck, PullRequestChecks
-from coding_review_agent_loop.prompts import format_pr_checks
+from coding_review_agent_loop.prompts import build_task_clarification_prompt, format_pr_checks
 
 _EXPECTED_UNRESOLVED_ITEMS_GUIDANCE = """Prior unresolved items are present. Disposition every listed
 item in the JSON `prior_item_dispositions` array — do not add a separate prose section
@@ -1614,6 +1614,74 @@ def test_format_pr_checks_renders_failure_url_when_available_without_empty_link(
         assert f"— {url}" in rendered
     else:
         assert "—" not in rendered
+
+def test_format_pr_checks_renders_external_infrastructure_stall_section():
+    from coding_review_agent_loop.ci_health import StalledCheck
+
+    stall = StalledCheck(
+        name="test",
+        kind="check_run",
+        reason="queued_too_long",
+        check_id=111,
+        run_id="31123230205",
+        url="https://github.com/OWNER/REPO/actions/runs/31123230205/job/1",
+        age_seconds=6240.0,
+    )
+    checks = PullRequestChecks(
+        state="pending",
+        required_checks=("test",),
+        passing=(),
+        pending=(PullRequestCheck(name="test", kind="check_run", status="queued"),),
+        failing=(),
+        missing_required=(),
+        branch_protection_status="configured",
+        infrastructure_stalls=(stall,),
+    )
+
+    rendered = format_pr_checks(checks)
+
+    assert "External CI infrastructure stalls:" in rendered
+    assert "31123230205" in rendered
+    assert "Do not record it as a blocking code item" in rendered
+    assert "remains ordinary review work" in rendered
+
+
+@pytest.mark.parametrize("compact_context", [False, True])
+def test_review_prompt_includes_external_ci_infrastructure_reviewer_guidance(
+    tmp_path, compact_context
+):
+    config = make_config(tmp_path)
+    prompt = build_review_prompt(77, 1, config, reviewer="codex", compact_context=compact_context)
+    assert "External CI infrastructure stalls" in prompt
+    assert "not a code-level finding" in prompt
+    assert "Do not record it as a" in prompt
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        lambda config: build_issue_prompt(56, config),
+        lambda config: build_issue_implementation_prompt(56, "1. Fix it.", config),
+        lambda config: build_completion_recovery_prompt(config),
+        lambda config: build_task_prompt("Fix the bug.", config),
+        lambda config: build_task_clarification_prompt("Fix the bug.", [], config),
+        lambda config: build_followup_prompt(77, 1, "Needs tests.", config),
+        lambda config: build_same_pr_followup_prompt(77, 1, "Tighten docs.", config),
+    ],
+)
+def test_coder_prompts_forbid_unbounded_ci_waits_with_exact_bound(tmp_path, builder):
+    config = make_config(tmp_path)
+    prompt = builder(config)
+
+    assert "gh run watch" in prompt
+    assert "gh pr checks --watch" in prompt
+    assert "at most 3" in prompt
+    assert "30 seconds" in prompt
+    assert "120 seconds" in prompt
+    assert "return your terminal blocking response immediately" in prompt
+    assert "resume once GitHub Actions runners recover" in prompt
+    assert "actively running" in prompt
+
 
 @pytest.mark.parametrize("compact_context", [False, True])
 def test_review_prompt_distinguishes_failing_from_pending_check_blocking_policy(
