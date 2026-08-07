@@ -175,6 +175,24 @@ def test_task_loop_requires_pr_or_clarification_marker(tmp_path):
     with pytest.raises(AgentLoopError, match="PR marker"):
         run_task_loop(runner, task_text="Do something", config=config)
 
+
+def test_task_loop_terminates_on_no_pr_blocking_result(tmp_path):
+    runner = FakeRunner(
+        claude_outputs=[
+            "Local test `python -m pytest tests/test_foo.py -q` exceeded its "
+            "900 second bound; terminated and did not open a PR.\n"
+            "<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+    )
+    config = make_config(tmp_path)
+
+    with pytest.raises(AgentLoopError, match="task implementation is blocking") as exc_info:
+        run_task_loop(runner, task_text="Do something", config=config)
+
+    assert "exceeded its" in str(exc_info.value)
+    assert not any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
+    assert runner.comments == []
+
 def test_codex_task_loop_creates_pr_then_claude_approves(tmp_path):
     runner = FakeRunner(
         codex_outputs=[

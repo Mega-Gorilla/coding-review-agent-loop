@@ -2735,6 +2735,25 @@ def _require_pr_number_or_clarification(text: str) -> int | str:
     )
 
 
+def _require_task_implementation_result(text: str) -> int | str | _TerminalNoPrImplementation:
+    """Accept a positive PR, a clarification request, or a terminal no-PR blocking result (#604)."""
+    pr_number = parse_pr_number(text)
+    if pr_number is not None:
+        return pr_number
+    if is_clarification_request(text):
+        return "clarification"
+    try:
+        state = parse_agent_state(text)
+    except AgentLoopError:
+        state = None
+    if state == "blocking":
+        return _TerminalNoPrImplementation("blocking")
+    raise AgentLoopError(
+        "Agent response did not include a PR marker, PR URL, clarification marker, "
+        "or a terminal blocking marker."
+    )
+
+
 def _require_plan_state_or_clarification(text: str) -> StructuredPlanState | str:
     if is_clarification_request(text):
         return "clarification"
@@ -5058,8 +5077,8 @@ def run_task_loop(
                 config=config,
                 prompt=prompt,
                 session_id=session_id,
-                marker_description="<!-- AGENT_PR: <number> -->, PR URL, or <!-- AGENT_CLARIFY -->",
-                validate=_require_pr_number_or_clarification,
+                marker_description="<!-- AGENT_PR: <number> -->, PR URL, blocking, or <!-- AGENT_CLARIFY -->",
+                validate=_require_task_implementation_result,
                 usage_context=usage_context,
                 salvage_context=SalvageContext(
                     repo=config.repo,
@@ -5072,6 +5091,12 @@ def run_task_loop(
             )
             coder_output = coder_response.text
             session_id = coder_response.session_id
+
+            if isinstance(coder_response.marker_value, _TerminalNoPrImplementation):
+                raise AgentLoopError(
+                    "Coder did not create a valid PR; task implementation is "
+                    f"{coder_response.marker_value.state}.\n\n{coder_output}"
+                )
 
             if isinstance(coder_response.marker_value, int):
                 pr_number = coder_response.marker_value

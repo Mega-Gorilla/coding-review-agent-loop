@@ -154,7 +154,11 @@ def test_completion_recovery_prompt_instructs_foreground_only_continuation(tmp_p
     assert "one-time, bounded continuation" in prompt
     assert "will not send another one after this turn" in prompt
     assert "Do not restart the implementation from scratch" in prompt
-    assert "do not launch anything new in the background" in prompt
+    assert "do not poll or wait on that old background job" in prompt
+    assert "no PID watching, no `ps`/`kill -0`/`wait` loop" in prompt
+    assert "no tailing its log or\ntask-output file" in prompt
+    assert "terminate it once (a single\n`kill <pid>`, not a loop)" in prompt
+    assert "nothing new in the background" in prompt
     assert "Inspect the existing checkout now" in prompt
 
 
@@ -1681,6 +1685,103 @@ def test_coder_prompts_forbid_unbounded_ci_waits_with_exact_bound(tmp_path, buil
     assert "return your terminal blocking response immediately" in prompt
     assert "resume once GitHub Actions runners recover" in prompt
     assert "actively running" in prompt
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        lambda config: build_issue_prompt(56, config),
+        lambda config: build_issue_implementation_prompt(56, "1. Fix it.", config),
+        lambda config: build_completion_recovery_prompt(config),
+        lambda config: build_task_prompt("Fix the bug.", config),
+        lambda config: build_task_clarification_prompt("Fix the bug.", [], config),
+        lambda config: build_followup_prompt(77, 1, "Needs tests.", config),
+        lambda config: build_same_pr_followup_prompt(77, 1, "Tighten docs.", config),
+    ],
+)
+def test_coder_prompts_require_focused_bounded_local_tests(tmp_path, builder):
+    config = make_config(tmp_path)
+    prompt = " ".join(builder(config).split())
+
+    assert "proportionate to the files you actually changed" in prompt
+    assert "prefer the repository's verified focused test command" in prompt
+    assert "one-line rationale for each" in prompt
+    assert "Do not run the whole `tests/` suite" in prompt
+    assert "broad server/database/integration/end-to-end suites" in prompt
+    assert "at most 900" in prompt
+    assert "Never launch pytest in the background" in prompt
+    assert "poll process IDs" in prompt
+    assert "`ps`/`kill -0`/`wait`" in prompt
+    assert "task-output files" in prompt
+    assert "terminate the run and return a valid" in prompt
+    assert "naming the exact command and the timeout" in prompt
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        lambda config: build_issue_prompt(56, config),
+        lambda config: build_issue_implementation_prompt(56, "1. Fix it.", config),
+        lambda config: build_completion_recovery_prompt(config),
+        lambda config: build_task_prompt("Fix the bug.", config),
+        lambda config: build_task_clarification_prompt("Fix the bug.", [], config),
+    ],
+)
+def test_free_form_coder_prompts_report_tests_via_tests_line(tmp_path, builder):
+    config = make_config(tmp_path)
+    prompt = " ".join(builder(config).split())
+
+    assert "include a short `Tests:` line" in prompt
+    assert "next to the exact commands in the `Tests:` line" in prompt
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        lambda config: build_followup_prompt(77, 1, "Needs tests.", config),
+        lambda config: build_same_pr_followup_prompt(77, 1, "Tighten docs.", config),
+    ],
+)
+def test_structured_coder_prompts_route_test_rationale_to_json_fields(tmp_path, builder):
+    config = make_config(tmp_path)
+    prompt = " ".join(builder(config).split())
+
+    assert "include a short `Tests:` line" not in prompt
+    assert "`tests_run` as machine-readable strings only" in prompt
+    assert "`addressed_item_notes` for the item those" in prompt
+    assert "or in `summary` when no single item-scoped note fits" in prompt
+    assert "never rationale or a `Tests:` line" in prompt
+
+
+@pytest.mark.parametrize(
+    "builder",
+    [
+        lambda config: build_issue_prompt(56, config),
+        lambda config: build_completion_recovery_prompt(config),
+        lambda config: build_task_prompt("Fix the bug.", config),
+        lambda config: build_followup_prompt(77, 1, "Needs tests.", config),
+        lambda config: build_same_pr_followup_prompt(77, 1, "Tighten docs.", config),
+    ],
+)
+def test_coder_prompts_preserve_full_suite_escape_hatch(tmp_path, builder):
+    config = make_config(tmp_path)
+    prompt = " ".join(builder(config).split())
+
+    assert "actually touches those surfaces" in prompt
+    assert "a human or the issue explicitly asked for full-suite" in prompt
+
+
+def test_task_prompts_document_no_pr_blocking_branch(tmp_path):
+    config = make_config(tmp_path)
+
+    task_prompt = " ".join(build_task_prompt("Fix the bug.", config).split())
+    clarification_prompt = " ".join(
+        build_task_clarification_prompt("Fix the bug.", [], config).split()
+    )
+
+    for prompt in (task_prompt, clarification_prompt):
+        assert "For a no-PR blocking result:" in prompt
+        assert "without an `AGENT_PR` marker" in prompt
 
 
 @pytest.mark.parametrize("compact_context", [False, True])

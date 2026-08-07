@@ -82,17 +82,76 @@ def _scratch_file_guidance() -> str:
     )
 
 
-def _coder_test_reporting_guidance() -> str:
+def _coder_test_reporting_guidance(*, structured: bool = False) -> str:
+    if structured:
+        reporting = (
+            "Before opening or updating the PR, run the relevant tests you can run "
+            "locally. Report the exact commands you ran in `tests_run` as "
+            "machine-readable strings only — no pass/fail prose or rationale "
+            "there. If you cannot run tests, say why in `summary`."
+        )
+    else:
+        reporting = (
+            "Before opening or updating the PR, run the relevant tests you can run "
+            "locally. In your final response, include a short `Tests:` line listing "
+            "the exact commands run and whether they passed. If you cannot run tests, "
+            "explain why in that `Tests:` line."
+        )
     return (
-        "Before opening or updating the PR, run the relevant tests you can run "
-        "locally. In your final response, include a short `Tests:` line listing "
-        "the exact commands run and whether they passed. If you cannot run tests, "
-        "explain why in that `Tests:` line. Run tests and any other required "
+        f"{reporting} Run tests and any other required "
         "completion work (builds, commits, pushes, PR creation) in the "
         "foreground and wait for them to finish before ending this turn. Do not "
         "launch them in the background and end the turn saying you will wait for "
         "them; a turn that ends without a real terminal marker because required "
         "work is still running in the background cannot be validated.\n"
+    )
+
+
+def _coder_local_test_scope_guidance(*, structured: bool = False) -> str:
+    if structured:
+        rationale = (
+            "When the change is narrow, give a one-line rationale for each "
+            "selected test module tying it to a changed file or reviewer item — "
+            "put that rationale in `addressed_item_notes` for the item those "
+            "tests cover, or in `summary` when no single item-scoped note fits. "
+            "`tests_run` itself holds only the exact commands, never rationale "
+            "or a `Tests:` line."
+        )
+        broad_reason_location = "the same `addressed_item_notes`/`summary` field you used for the rationale"
+    else:
+        rationale = (
+            "When the change is narrow, give a one-line rationale for each "
+            "selected test module tying it to a changed file or reviewer item, "
+            "next to the exact commands in the `Tests:` line."
+        )
+        broad_reason_location = "that same `Tests:` line"
+    return (
+        "Select tests proportionate to the files you actually changed and to "
+        "the reviewer item you are addressing; prefer the repository's verified "
+        "focused test command from the execution profile when one covers the "
+        f"change. {rationale} Do not run the whole `tests/` suite, an "
+        "`--ignore` list that is effectively the whole suite, or broad "
+        "server/database/integration/end-to-end suites unless the change "
+        "actually touches those surfaces, focused tests demonstrably do not "
+        "cover it, or a human or the issue explicitly asked for full-suite "
+        f"verification — and when a broad run is justified, state that reason in {broad_reason_location}. "
+        "Run required completion tests in the foreground with visible output "
+        "and an explicit bounded timeout (a concrete stated cap, at most 900 "
+        "seconds per required test command). Never launch pytest in the "
+        "background (`&`, `nohup`, background task/tool invocations) and never "
+        "spawn auxiliary shell loops that poll process IDs, `ps`/`kill -0`/"
+        "`wait`, or task-output files to learn whether it finished. If a "
+        "required test exceeds its bound, terminate the run and return a valid "
+        "terminal response immediately, naming the exact command and the "
+        "timeout, rather than silently waiting or retrying with a broader "
+        "selection"
+        + (
+            " (use `remaining_items`/`remaining_item_notes` for this)"
+            if structured
+            else " (use the prose blocking result for this)"
+        )
+        + ". Reserve agent-unavailable for a genuine environment/tooling "
+        "failure, not an ordinary slow test.\n"
     )
 
 
@@ -1057,7 +1116,7 @@ Use this local checkout as your workspace. Create a branch, implement the fix,
 run relevant tests, commit, push, and open a pull request against {config.base}.
 {_coder_workdir_guidance(config)}
 {_scratch_file_guidance()}
-{_coder_test_reporting_guidance()}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
+{_coder_test_reporting_guidance(structured=False)}{_coder_local_test_scope_guidance(structured=False)}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
 {_issue_pr_reference_guidance(issue_number)}
 {human_requirements_context.block}{_coder_human_requirements_guidance(
     human_requirements_context,
@@ -1652,7 +1711,7 @@ approved plan, run relevant tests, commit, push, and open a pull request against
 {config.base}.
 {_coder_workdir_guidance(config)}
 {_scratch_file_guidance()}
-{_coder_test_reporting_guidance()}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
+{_coder_test_reporting_guidance(structured=False)}{_coder_local_test_scope_guidance(structured=False)}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
 {pr_reference_guidance}
 {human_requirements_context.block}{_coder_human_requirements_guidance(
     human_requirements_context,
@@ -1690,12 +1749,14 @@ the orchestrator will not send another one after this turn.
 
 Inspect the existing checkout now (`git status`, `git diff`, `git log`) to see
 what you already did. Do not restart the implementation from scratch. Finish
-only foreground work from here: if you started tests or a build in the
-background, check on it or re-run it in the foreground now and wait for it to
-finish; do not launch anything new in the background. Then commit, push, and
-open the pull request if that is not already done, or continue exactly where
-you left off.
-{_coder_test_reporting_guidance()}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
+only foreground work from here: do not poll or wait on that old background job
+— no PID watching, no `ps`/`kill -0`/`wait` loop, and no tailing its log or
+task-output file. If you know its process ID, terminate it once (a single
+`kill <pid>`, not a loop) and then re-run the command you actually need in the
+foreground under the bounded timeout below, waiting for it to finish; launch
+nothing new in the background. Then commit, push, and open the pull request if
+that is not already done, or continue exactly where you left off.
+{_coder_test_reporting_guidance(structured=False)}{_coder_local_test_scope_guidance(structured=False)}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
 {_issue_implementation_terminal_marker_guidance(reviewer_name=reviewer_name, coder_signature=coder_signature)}"""
 
 
@@ -1720,7 +1781,7 @@ Use this local checkout as your workspace. Decide between two paths:
     {config.base}. Do not wait for {reviewer_name}; this local orchestrator
     will run {reviewer_name} after you create the PR.
 {_scratch_file_guidance()}
-{_coder_test_reporting_guidance()}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
+{_coder_test_reporting_guidance(structured=False)}{_coder_local_test_scope_guidance(structured=False)}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
 
 (b) If the task is genuinely ambiguous or missing information that would change
     the implementation, do NOT write code. Instead, ask focused clarifying
@@ -1728,16 +1789,23 @@ Use this local checkout as your workspace. Decide between two paths:
 
 {_agent_unavailable_guidance(coder_signature)}
 Prefer (a) when reasonable assumptions can be documented in the PR description;
-choose (b) only for material ambiguity. Do not place your signature before the
-AGENT_STATE or AGENT_CLARIFY marker. Your response must end with, in this exact
-order — for (a):
+choose (b) only for material ambiguity. If you cannot safely proceed and
+cannot create a PR — for example after a bounded local test run exceeded its
+timeout — explain the blocker, naming the exact command and the timeout, and
+end with `AGENT_STATE: blocking` without an `AGENT_PR` marker instead of
+inventing a placeholder like `AGENT_PR: 0`. Do not place your signature before
+the AGENT_STATE or AGENT_CLARIFY marker. Your response must end with, in this
+exact order — for a completed implementation:
 
 <!-- AGENT_PR: <number> -->
 <!-- AGENT_STATE: blocking -->
 -- {coder_signature}
 
-or for (b):
+For a no-PR blocking result:
+<!-- AGENT_STATE: blocking -->
+-- {coder_signature}
 
+For clarification:
 <!-- AGENT_CLARIFY -->
 -- {coder_signature}
 """
@@ -1768,14 +1836,22 @@ Clarification so far:
 Now proceed. Strongly prefer to implement the task and open a PR. Only ask
 again if a critical detail is still missing.
 {_scratch_file_guidance()}
-{_coder_test_reporting_guidance()}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
+{_coder_test_reporting_guidance(structured=False)}{_coder_local_test_scope_guidance(structured=False)}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
 
 {_agent_unavailable_guidance(coder_signature)}
-Do not place your signature before the AGENT_STATE or AGENT_CLARIFY marker.
-Your response must end with, in this exact order:
+If you cannot safely proceed and cannot create a PR — for example after a
+bounded local test run exceeded its timeout — explain the blocker, naming the
+exact command and the timeout, and end with `AGENT_STATE: blocking` without an
+`AGENT_PR` marker instead of inventing a placeholder like `AGENT_PR: 0`. Do not
+place your signature before the AGENT_STATE or AGENT_CLARIFY marker. Your
+response must end with, in this exact order:
 
 For implementation:
 <!-- AGENT_PR: <number> -->
+<!-- AGENT_STATE: blocking -->
+-- {coder_signature}
+
+For a no-PR blocking result:
 <!-- AGENT_STATE: blocking -->
 -- {coder_signature}
 
@@ -2347,7 +2423,7 @@ needed, implement fixes, run relevant tests, commit, and push to the same PR.
 Do not create a new PR.
 {_coder_workdir_guidance(config)}
 {_scratch_file_guidance()}
-{_coder_test_reporting_guidance()}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
+{_coder_test_reporting_guidance(structured=True)}{_coder_local_test_scope_guidance(structured=True)}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
 {_issue_context_block(issue_context)}
 {human_requirements_context.block}{_coder_human_requirements_guidance(human_requirements_context)}
 {_memory_block(memory)}
@@ -2396,7 +2472,7 @@ current PR. Keep the change narrowly scoped to the listed items. Do not take on
 larger redesigns or unrelated future work; call that out instead. The PR
 remains blocked pending another review round after this cleanup.
 {_scratch_file_guidance()}
-{_coder_test_reporting_guidance()}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
+{_coder_test_reporting_guidance(structured=True)}{_coder_local_test_scope_guidance(structured=True)}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
 {_issue_context_block(issue_context)}
 {human_requirements_context.block}{_coder_human_requirements_guidance(human_requirements_context)}
 {_memory_block(memory)}

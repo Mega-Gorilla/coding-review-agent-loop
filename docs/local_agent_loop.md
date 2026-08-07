@@ -1221,6 +1221,58 @@ Two independent, complementary mechanisms bound this instead:
 
 Reviewers see the same classification (an "External CI infrastructure stalls" section in the PR checks context) and are instructed not to record a classified stall as a blocking code item; any other failing or never-reporting check remains ordinary review work.
 
+### Focused, bounded local test selection
+
+A same-PR follow-up scoped to a wording correction in two files does not
+justify pulling in a `tests/test_server.py`-class suite (hundreds of
+unmarked FastAPI/database/SSE tests) or a `pytest tests/ --ignore=...` list
+that amounts to nearly the whole repository. A coder that does this and then
+backgrounds the run and polls it — via a shell loop watching a process ID or
+a task-output file — consumes the session for many minutes with no visible
+progress and leaves manual interruption as the practical recovery path. This
+is distinct from [External CI infrastructure
+stalls](#external-ci-infrastructure-stalls): that section bounds waiting on
+*GitHub Actions* infrastructure; this one bounds the *local* test command a
+coder chooses to run and how it runs it.
+
+Every coder prompt built by `coding_review_agent_loop.prompts` requires:
+
+- **Proportionate selection.** Tests must be chosen for the files actually
+  changed and the reviewer item being addressed, preferring the repository's
+  verified focused test command from the execution profile when one covers
+  the change. When the change is narrow, the coder must give a one-line
+  rationale for each selected test module tying it to a changed file or
+  reviewer item.
+- **A breadth prohibition with an escape hatch.** No whole-`tests/` run, no
+  `--ignore` list that is effectively the whole suite, and no broad
+  server/database/integration/end-to-end suite — unless the change actually
+  touches those surfaces, focused tests demonstrably do not cover it, or a
+  human or the issue explicitly asked for full-suite verification. Normal
+  full-suite verification for a genuinely broad change stays available; only
+  the unnecessary or mis-targeted case is prohibited.
+- **Foreground execution under a bounded timeout.** Required completion
+  tests run in the foreground with visible output and a concrete stated cap
+  (at most 900 seconds per required test command). Coders must not launch
+  pytest in the background or spawn auxiliary shell loops that poll process
+  IDs, `ps`/`kill -0`/`wait`, or task-output files to learn whether a test
+  finished.
+- **A valid terminal path on timeout.** If a required test exceeds its
+  bound, the coder terminates the run and returns a valid terminal response
+  immediately, naming the exact command and the timeout, rather than
+  silently waiting or retrying with a broader selection. `build_task_prompt`
+  and `build_task_clarification_prompt` document a no-PR `AGENT_STATE:
+  blocking` result for exactly this case, so a free-form task turn that must
+  stop after a bounded timeout has an ordinary terminal path instead of
+  being forced into an `agent_unavailable` report reserved for genuine
+  environment/tooling failure.
+
+The completion-recovery prompt (sent once, when a prior implementation turn
+ended without a valid terminal marker and its text suggested deferring to
+background work) instructs the coder not to poll or wait on that old job —
+no PID watching, no `ps`/`kill -0`/`wait` loop, no tailing its log or
+task-output file — but to terminate a known process once if needed and
+re-run the command it actually needs in the foreground under the bound.
+
 ## Agent Permission Flags
 
 By default, this standalone package does not pass permission-bypass flags to either agent. This is safer for open-source use, but some CLIs may prompt or fail in non-interactive mode unless you provide suitable flags.

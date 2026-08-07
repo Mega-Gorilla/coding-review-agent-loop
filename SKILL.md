@@ -362,6 +362,25 @@ python -m helpers.skill_runner run-task-round \
   [External CI infrastructure stalls](docs/local_agent_loop.md#external-ci-infrastructure-stalls));
   this bullet covers the skill-mode host-coder path, which drives its own
   shell commands directly.
+- **Focused, bounded local tests.** Select tests proportionate to the files
+  actually changed and the reviewer item being addressed; prefer the
+  repository's verified focused test command over a broad suite when one
+  covers the change, and give a one-line rationale tying each selected test
+  module to a changed file or reviewer item. Do not run the whole `tests/`
+  suite, an `--ignore` list that amounts to the whole suite, or broad
+  server/database/integration/end-to-end suites unless the change actually
+  touches those surfaces, focused tests demonstrably do not cover it, or a
+  human or the issue explicitly asked for full-suite verification. Run
+  required completion tests in the foreground with visible output under an
+  explicit bounded timeout; never launch pytest (or any required test) in the
+  background, and never spawn a shell loop that polls a process ID, `ps`/
+  `kill -0`/`wait`, or a task-output file to learn whether it finished. If a
+  required test exceeds its bound, terminate it and report the blocker
+  immediately, naming the exact command and the timeout, rather than waiting
+  silently or retrying with a broader selection. The `coding_review_agent_loop`
+  CLI orchestrator's coder prompts carry the same policy; this bullet covers
+  the skill-mode host-coder path, which drives its own shell commands and
+  chooses its own test scope directly.
 
 ---
 
