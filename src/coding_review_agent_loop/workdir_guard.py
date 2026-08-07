@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import re
 import shlex
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
+from typing import Literal, Sequence
 
 from .errors import AgentLoopError
 from .protocol import DiscussEvidenceClaim
@@ -13,6 +14,92 @@ from .protocol import DiscussEvidenceClaim
 
 TEST_SECTION_RE = re.compile(r"(?im)^\s*tests(?:\s+run)?\s*:\s*(?P<body>.*)$")
 WINDOWS_PATH_RE = re.compile(r"(?<![\w.-])[A-Za-z]:\\[^\s`'\"|;&)<>]+")
+URL_SCHEME_RE = re.compile(r"(?i)https?://")
+BACKTICK_SPAN_RE = re.compile(r"`([^`]*)`")
+VAR_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+INTERPRETER_BASENAME_RE = re.compile(r"^(python|pypy)\d*(\.\d+)?$")
+
+# Origin of a reported test-command string.
+Origin = Literal["structured", "response"]
+
+# ---------------------------------------------------------------------------
+# Toolchain / runner recognition (path pass, program-role tokens only).
+# ---------------------------------------------------------------------------
+
+RUNNER_BASENAMES = {
+    "python", "pypy", "pytest", "py.test", "tox", "nox", "node", "npm", "npx",
+    "yarn", "pnpm", "deno", "ruby", "bundle", "rake", "go", "cargo", "java",
+    "gradle", "mvn", "dotnet", "make", "uv", "poetry", "pipenv", "pdm",
+    "hatch", "sh", "bash", "zsh",
+}
+
+# Network clients that count as command heads for URL classification purposes.
+NETWORK_CLIENT_BASENAMES = {"curl", "wget", "http", "httpie"}
+
+WRAPPER_PROGRAMS = {
+    "env", "sudo", "nohup", "nice", "time", "timeout", "stdbuf", "command", "xargs",
+}
+
+_EXACT_TOOLCHAIN_DIRS = {
+    "/bin", "/sbin", "/usr/bin", "/usr/sbin", "/usr/local/bin", "/usr/local/sbin",
+    "/opt/homebrew/bin", "/opt/local/bin", "/snap/bin",
+}
+
+_TOOLCHAIN_PARENT_RES = [
+    re.compile(r"(^|/)(\.venv|venv|\.env|env|virtualenv)/(bin|Scripts)$"),
+    re.compile(r"(^|/)node_modules/\.bin$"),
+    re.compile(r"(^|/)\.pyenv/versions/[^/]+/bin$"),
+    re.compile(r"(^|/)\.rbenv/versions/[^/]+/bin$"),
+    re.compile(r"(^|/)\.nvm/versions/node/[^/]+/bin$"),
+    re.compile(r"(^|/)(conda|miniconda3|anaconda3)/bin$"),
+    re.compile(r"(^|/)(conda|miniconda3|anaconda3)/envs/[^/]+/bin$"),
+    re.compile(r"(^|/)nix/store/[^/]+/bin$"),
+]
+
+# Working-directory flags: strictly validated, no exemption ever applies.
+WORKDIR_FLAGS = {"cd", "pushd", "-C", "--directory", "--chdir", "--cwd", "--rootdir"}
+WORKDIR_FLAG_PREFIXES = ("--directory=", "--chdir=", "--cwd=", "--rootdir=")
+
+# interpreter_value role: flags/env-vars whose *value* names an interpreter or
+# library/toolchain path rather than a test location.
+INTERPRETER_VALUE_FLAGS = {"--python", "--interpreter", "--with-python", "--python-executable"}
+INTERPRETER_VALUE_ENV_VARS = {"PYTHONPATH", "VIRTUAL_ENV", "NODE_PATH", "JAVA_HOME", "PATH"}
+
+# ---------------------------------------------------------------------------
+# Package acquisition (URL pass exclusion).
+# ---------------------------------------------------------------------------
+
+DIRECT_PACKAGE_MANAGERS = {
+    "pip", "pip3", "uv", "poetry", "pipenv", "npm", "yarn", "pnpm", "gem",
+    "bundle", "cargo", "go", "apt", "apt-get", "brew", "git",
+}
+MODULE_PACKAGE_MANAGERS = {"pip", "uv", "poetry", "pipenv", "ensurepip", "installer", "build"}
+ACQUISITION_SUBCOMMANDS = {
+    "install", "add", "download", "wheel", "get", "fetch", "clone", "pull", "sync", "restore",
+}
+
+# ---------------------------------------------------------------------------
+# URL attachment (narrative / prose) vocabulary.
+# ---------------------------------------------------------------------------
+
+EXECUTION_VERBS = {
+    "ran", "run", "runs", "running", "executed", "executing", "invoked", "invoking",
+    "hit", "hitting", "curled", "pinged", "queried", "tested", "retested",
+    "exercised", "smoke-tested",
+}
+TARGET_PREPOSITIONS = {"against", "at", "on", "onto", "to", "via", "toward", "towards", "targeting"}
+NEGATION_TOKENS = {
+    "not", "never", "no", "none", "without", "skipped", "skipping", "avoided", "unable",
+}
+DETERMINERS = {"the", "a", "our"}
+
+# Windows-specific toolchain recognition (used only for the WINDOWS_PATH_RE branch).
+_WINDOWS_RUNNER_BASENAMES = {"python.exe", "python3.exe", "pytest.exe", "py.exe"}
+_WINDOWS_TOOLCHAIN_PARENT_RES = [
+    re.compile(r"(?i)\\python\d*(\.\d+)?$"),
+    re.compile(r"(?i)\\scripts$"),
+    re.compile(r"(?i)\\node_modules\\\.bin$"),
+]
 
 
 def _canonical(path: Path) -> Path:
@@ -40,48 +127,563 @@ def _normalize_reported_path(raw_path: str) -> Path | None:
     return None
 
 
-def _reported_paths(command: str) -> Iterable[str]:
-    yield from WINDOWS_PATH_RE.findall(command)
+# ---------------------------------------------------------------------------
+# Token-level predicates shared by the path pass and the URL pass.
+# ---------------------------------------------------------------------------
 
+
+def _strip_wrap(token: str) -> str:
+    return token.strip("`'\"")
+
+
+def _is_url_token(token: str) -> bool:
+    return bool(URL_SCHEME_RE.search(_strip_wrap(token)))
+
+
+def _is_path_like_token(token: str) -> bool:
+    if _is_url_token(token):
+        return False
+    cleaned = _strip_wrap(token)
+    if not cleaned:
+        return False
+    return "/" in cleaned or "\\" in cleaned or cleaned.startswith("~") or cleaned.startswith("$HOME/")
+
+
+def _is_path_shaped(token: str) -> bool:
+    return token.startswith("/") or token.startswith("~/") or token == "~" or token.startswith("$HOME/")
+
+
+def _word(token: str) -> str:
+    return token.strip("`'\".,;:!?()").lower()
+
+
+def _is_bare_word(token: str) -> bool:
+    if not token:
+        return False
+    if token.startswith("-"):
+        return False
+    if VAR_ASSIGNMENT_RE.match(token):
+        return False
+    if _is_path_like_token(token) or _is_url_token(token):
+        return False
+    return True
+
+
+def _is_negation_word(word: str) -> bool:
+    return word in NEGATION_TOKENS or word.endswith("n't")
+
+
+def _is_runner_basename(name: str) -> bool:
+    if name in RUNNER_BASENAMES:
+        return True
+    return bool(INTERPRETER_BASENAME_RE.match(name))
+
+
+def _is_command_shaped(token: str) -> bool:
+    if _is_path_like_token(token):
+        return True
+    name = Path(_strip_wrap(token)).name.rstrip(".,;:!?")
+    return _is_runner_basename(name) or name in NETWORK_CLIENT_BASENAMES
+
+
+def _is_toolchain_executable(token: str) -> bool:
+    cleaned = _strip_wrap(token).strip(".,")
+    if not cleaned:
+        return False
+    p = Path(cleaned)
+    name = p.name
+    if _is_runner_basename(name):
+        return True
+    parent_str = str(p.parent)
+    if parent_str in _EXACT_TOOLCHAIN_DIRS:
+        return True
+    for pattern in _TOOLCHAIN_PARENT_RES:
+        if pattern.search(parent_str):
+            return True
+    return False
+
+
+def _is_windows_toolchain_executable(token: str) -> bool:
+    cleaned = _strip_wrap(token).strip(".,")
+    if not cleaned:
+        return False
+    name = cleaned.rsplit("\\", 1)[-1].lower()
+    if name in _WINDOWS_RUNNER_BASENAMES:
+        return True
+    parent = cleaned.rsplit("\\", 1)[0] if "\\" in cleaned else ""
+    return any(pattern.search(parent) for pattern in _WINDOWS_TOOLCHAIN_PARENT_RES)
+
+
+def _program_position_indices(tokens: Sequence[str]) -> tuple[set[int], int]:
+    """Indices occupied by wrapper programs plus the final effective head index."""
+    positions: set[int] = set()
+    i = 0
+    n = len(tokens)
+    while i < n:
+        if VAR_ASSIGNMENT_RE.match(tokens[i]):
+            i += 1
+            continue
+        if Path(_strip_wrap(tokens[i])).name in WRAPPER_PROGRAMS:
+            positions.add(i)
+            i += 1
+            while i < n and tokens[i].startswith("-") and not _is_path_like_token(tokens[i]):
+                i += 1
+            continue
+        break
+    if i < n:
+        positions.add(i)
+    return positions, i
+
+
+def _effective_head_index(tokens: Sequence[str]) -> int:
+    _, head_index = _program_position_indices(tokens)
+    return head_index
+
+
+# ---------------------------------------------------------------------------
+# Clause splitting.
+# ---------------------------------------------------------------------------
+
+ClauseMode = Literal["structured", "code", "narrative"]
+_SEPARATOR_TOKENS = {"&&", "||", ";", "|", "&", "(", ")"}
+
+
+@dataclass
+class _Clause:
+    tokens: list[str]
+    mode: ClauseMode
+    command_by_contract: bool
+
+
+def _tokenize(text: str) -> list[str]:
     try:
-        tokens = shlex.split(command)
+        return shlex.split(text)
     except ValueError:
-        tokens = command.split()
+        return text.split()
 
-    for index, token in enumerate(tokens):
-        if token in {"cd", "-C", "--directory"} and index + 1 < len(tokens):
-            yield tokens[index + 1]
-        elif token.startswith("--directory="):
-            yield token.split("=", 1)[1]
-        elif token.startswith("$HOME/") or token.startswith("~/") or token.startswith("/"):
-            yield token
+
+def _split_into_clauses(text: str, mode: ClauseMode) -> list[_Clause]:
+    tokens = _tokenize(text)
+    clauses: list[_Clause] = []
+    current: list[str] = []
+    command_by_contract = True
+
+    def flush(next_by_contract: bool) -> None:
+        nonlocal current, command_by_contract
+        if current:
+            clauses.append(
+                _Clause(
+                    tokens=current,
+                    mode=mode,
+                    command_by_contract=command_by_contract if mode == "structured" else False,
+                )
+            )
+        current = []
+        command_by_contract = next_by_contract
+
+    for token in tokens:
+        if token in _SEPARATOR_TOKENS:
+            flush(True)
+            continue
+        current.append(token)
+        if not token:
+            continue
+        last_char = token[-1]
+        if last_char in ".!?;" and not _is_path_like_token(token):
+            flush(False)
+        elif mode == "narrative" and last_char == "," and not _is_path_like_token(token):
+            flush(False)
+    flush(False)
+    return clauses
+
+
+def _segments_for_entry(command: str, origin: Origin) -> list[tuple[str, ClauseMode]]:
+    """Return (text, mode) segments; mode is 'structured', 'code', or 'narrative'."""
+    if origin == "structured":
+        return [(command, "structured")]
+    segments: list[tuple[str, ClauseMode]] = []
+    last_end = 0
+    for match in BACKTICK_SPAN_RE.finditer(command):
+        if match.start() > last_end:
+            segments.append((command[last_end : match.start()], "narrative"))
+        segments.append((match.group(1), "code"))
+        last_end = match.end()
+    if last_end < len(command):
+        segments.append((command[last_end:], "narrative"))
+    return segments
+
+
+def _clauses_for_entry(command: str, origin: Origin) -> list[_Clause]:
+    clauses: list[_Clause] = []
+    for text, mode in _segments_for_entry(command, origin):
+        clauses.extend(_split_into_clauses(text, mode))
+    return clauses
+
+
+# ---------------------------------------------------------------------------
+# Path pass: assign a role to every path-shaped token in a clause.
+# ---------------------------------------------------------------------------
+
+
+def _path_roles(clause: _Clause) -> list[tuple[str, str]]:
+    tokens = clause.tokens
+    n = len(tokens)
+    program_positions, _ = _program_position_indices(tokens)
+
+    first_path_idx = next((i for i, t in enumerate(tokens) if _is_path_shaped(t)), None)
+    promoted_idx: int | None = None
+    if clause.mode == "narrative" and first_path_idx is not None:
+        if all(_is_bare_word(t) for t in tokens[:first_path_idx]) and _is_toolchain_executable(
+            tokens[first_path_idx]
+        ):
+            promoted_idx = first_path_idx
+
+    results: list[tuple[str, str]] = []
+    idx = 0
+    while idx < n:
+        token = tokens[idx]
+
+        matched_prefix = False
+        for prefix in WORKDIR_FLAG_PREFIXES:
+            if token.startswith(prefix):
+                results.append((token[len(prefix) :], "working_directory"))
+                matched_prefix = True
+                break
+        if matched_prefix:
+            idx += 1
+            continue
+        for flag in INTERPRETER_VALUE_FLAGS:
+            if token.startswith(flag + "="):
+                results.append((token[len(flag) + 1 :], "interpreter_value"))
+                matched_prefix = True
+                break
+        if matched_prefix:
+            idx += 1
+            continue
+
+        env_match = VAR_ASSIGNMENT_RE.match(token)
+        if env_match:
+            eq_idx = token.index("=")
+            var_name = token[:eq_idx]
+            value = token[eq_idx + 1 :]
+            if var_name in INTERPRETER_VALUE_ENV_VARS:
+                parts = value.split(":") if var_name == "PATH" else [value]
+                for part in parts:
+                    if part:
+                        results.append((part, "interpreter_value"))
+            idx += 1
+            continue
+
+        if token in WORKDIR_FLAGS and idx + 1 < n:
+            results.append((tokens[idx + 1], "working_directory"))
+            idx += 2
+            continue
+
+        if token in INTERPRETER_VALUE_FLAGS and idx + 1 < n:
+            results.append((tokens[idx + 1], "interpreter_value"))
+            idx += 2
+            continue
+
+        if _is_path_shaped(token):
+            if idx in program_positions or idx == promoted_idx:
+                results.append((token, "program"))
+            else:
+                results.append((token, "argument"))
+        idx += 1
+
+    return results
+
+
+def _check_path_role(raw_path: str, role: str, *, command: str, assigned: Path) -> None:
+    path = _normalize_reported_path(raw_path)
+    if path is None:
+        return
+    if path == assigned or _is_inside(path, assigned):
+        return
+    if role == "program" and _is_toolchain_executable(raw_path):
+        return
+    if role == "interpreter_value":
+        return
+    raise AgentLoopError(
+        "Coder reported tests from outside the assigned checkout: "
+        f"{raw_path!r} in command {command!r}. Assigned checkout: {assigned}"
+    )
+
+
+def _windows_path_is_exempt(command: str, raw_windows: str, origin: Origin) -> bool:
+    # Windows paths use backslashes, which `shlex` treats as POSIX escape
+    # characters and would otherwise mangle; use plain whitespace splitting
+    # here instead of the shared shlex-based clause tokenizer.
+    if not _is_windows_toolchain_executable(raw_windows):
+        return False
+    for segment_text, _mode in _segments_for_entry(command, origin):
+        tokens = segment_text.split()
+        idx = next((i for i, t in enumerate(tokens) if t.strip("`'\".,") == raw_windows), None)
+        if idx is None:
+            continue
+        i = 0
+        n = len(tokens)
+        while i < n:
+            tok = tokens[i]
+            if VAR_ASSIGNMENT_RE.match(tok):
+                i += 1
+                continue
+            if tok in WRAPPER_PROGRAMS:
+                i += 1
+                while i < n and tokens[i].startswith("-"):
+                    i += 1
+                continue
+            break
+        if idx != i:
+            return False
+        if idx > 0 and tokens[idx - 1] in WORKDIR_FLAGS:
+            return False
+        return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# URL pass: package-acquisition exemption.
+# ---------------------------------------------------------------------------
+
+
+def _acquisition_exempt(clause: _Clause) -> bool:
+    tokens = clause.tokens
+    n = len(tokens)
+    idx = _effective_head_index(tokens)
+    if idx >= n:
+        return False
+    head = tokens[idx]
+    head_name = Path(_strip_wrap(head)).name
+
+    def next_is_acquisition_subcommand(start: int) -> bool:
+        j = start
+        while j < n and tokens[j].startswith("-"):
+            j += 1
+        return j < n and tokens[j] in ACQUISITION_SUBCOMMANDS
+
+    if head_name in DIRECT_PACKAGE_MANAGERS:
+        return next_is_acquisition_subcommand(idx + 1)
+
+    if INTERPRETER_BASENAME_RE.match(head_name):
+        j = idx + 1
+        module: str | None = None
+        while j < n:
+            tok = tokens[j]
+            if tok == "-m" and j + 1 < n:
+                module = tokens[j + 1]
+                j += 2
+                break
+            if tok.startswith("-m") and tok != "-m":
+                module = tok[2:]
+                j += 1
+                break
+            if tok.startswith("-"):
+                j += 1
+                continue
+            break
+        if module is not None and module in MODULE_PACKAGE_MANAGERS:
+            return next_is_acquisition_subcommand(j)
+    return False
+
+
+# ---------------------------------------------------------------------------
+# URL pass: clause classification.
+# ---------------------------------------------------------------------------
+
+UrlMode = Literal["STRICT_COMMAND", "NARRATIVE_COMMAND", "PROSE"]
+
+
+def _is_command_clause(clause: _Clause) -> bool:
+    if clause.mode == "structured" and clause.command_by_contract:
+        return True
+    tokens = clause.tokens
+    idx = _effective_head_index(tokens)
+    if idx >= len(tokens):
+        return False
+    return _is_command_shaped(tokens[idx])
+
+
+def _url_mode(clause: _Clause) -> UrlMode:
+    if not _is_command_clause(clause):
+        return "PROSE"
+    if clause.mode == "structured" and clause.command_by_contract:
+        return "STRICT_COMMAND"
+    if clause.mode == "code":
+        return "STRICT_COMMAND"
+    return "NARRATIVE_COMMAND"
+
+
+# ---------------------------------------------------------------------------
+# URL pass: narrative/prose attachment (rules 1-4) with verb negation.
+# ---------------------------------------------------------------------------
+
+
+def _walk_span(tokens: Sequence[str], start: int, n: int) -> list[str]:
+    targets: list[str] = []
+    j = start
+    still_leading = True
+    while j < n:
+        tok = tokens[j]
+        if _is_url_token(tok):
+            targets.append(tok)
+            j += 1
+            still_leading = False
+            continue
+        if tok.startswith("-"):
+            still_leading = False
+            j += 1
+            if j < n and not tokens[j].startswith("-") and not _is_url_token(tokens[j]):
+                j += 1
+            continue
+        if _is_path_like_token(tok) or "=" in tok:
+            still_leading = False
+            j += 1
+            continue
+        if still_leading:
+            j += 1
+            continue
+        break
+    return targets
+
+
+def _is_negated_occurrence(tokens: Sequence[str], idx: int) -> bool:
+    start = max(0, idx - 3)
+    for k in range(start, idx):
+        if _is_negation_word(_word(tokens[k])):
+            return True
+    return False
+
+
+def _head_opened_span_targets(clause: _Clause) -> list[str]:
+    tokens = clause.tokens
+    n = len(tokens)
+    head_idx = _effective_head_index(tokens)
+    if head_idx >= n:
+        return []
+    return _walk_span(tokens, head_idx, n)
+
+
+def _execution_phrase_end(tokens: Sequence[str], start: int, n: int) -> int:
+    """End (exclusive) of the phrase attached to an execution verb.
+
+    The phrase stops at a negation word or at the next execution verb, so a
+    later negated or separately-reported clause never lends its URL to this
+    verb (and vice versa: the next verb gets its own phrase, subject to its
+    own negation check).
+    """
+    j = start
+    while j < n:
+        word = _word(tokens[j])
+        if _is_negation_word(word) or word in EXECUTION_VERBS:
+            break
+        j += 1
+    return j
+
+
+def _prepositional_url_targets(tokens: Sequence[str], start: int, end: int) -> list[str]:
+    """URLs attached to any target preposition within ``tokens[start:end]``.
+
+    Scanning every preposition in the phrase -- not just the first one --
+    matters because an earlier, non-URL prepositional object would otherwise
+    hide the real target ("ran the suite against the production environment
+    at https://live.example").
+    """
+    found: list[str] = []
+    for k in range(start, end):
+        if _word(tokens[k]) not in TARGET_PREPOSITIONS:
+            continue
+        if _is_negated_occurrence(tokens, k):
+            continue
+        m = k + 1
+        if m < end and _word(tokens[m]) in DETERMINERS:
+            m += 1
+        if m < end and _is_url_token(tokens[m]):
+            found.append(tokens[m])
+    return found
+
+
+def _verb_based_targets(clause: _Clause) -> list[str]:
+    tokens = clause.tokens
+    n = len(tokens)
+    targets: list[str] = []
+    for idx, raw in enumerate(tokens):
+        if _word(raw) not in EXECUTION_VERBS:
+            continue
+        if _is_negated_occurrence(tokens, idx):
+            continue
+
+        j = idx + 1
+        if j < n and _word(tokens[j]) in DETERMINERS:
+            j += 1
+        if j < n and _is_url_token(tokens[j]):
+            targets.append(tokens[j])
+            continue
+
+        phrase_end = _execution_phrase_end(tokens, idx + 1, n)
+        attached = _prepositional_url_targets(tokens, idx + 1, phrase_end)
+        if attached:
+            targets.extend(attached)
+            continue
+
+        if idx + 1 < n and _is_command_shaped(tokens[idx + 1]):
+            targets.extend(_walk_span(tokens, idx + 1, n))
+    return targets
+
+
+def _url_targets_in_clause(clause: _Clause) -> list[str]:
+    mode = _url_mode(clause)
+    if mode == "STRICT_COMMAND":
+        if _acquisition_exempt(clause):
+            return []
+        return [t for t in clause.tokens if _is_url_token(t)]
+    targets: list[str] = []
+    if mode == "NARRATIVE_COMMAND":
+        targets.extend(_head_opened_span_targets(clause))
+    targets.extend(_verb_based_targets(clause))
+    return targets
+
+
+# ---------------------------------------------------------------------------
+# Top-level validation entry points.
+# ---------------------------------------------------------------------------
+
+
+def _validate_single_command(command: str, *, assigned: Path, origin: Origin) -> None:
+    for raw_windows in WINDOWS_PATH_RE.findall(command):
+        if _windows_path_is_exempt(command, raw_windows, origin):
+            continue
+        raise AgentLoopError(
+            "Coder reported tests from a Windows-style path that cannot be "
+            "validated against the assigned Unix checkout: "
+            f"{raw_windows!r} in command {command!r}. Assigned checkout: {assigned}"
+        )
+
+    clauses = _clauses_for_entry(command, origin)
+
+    for clause in clauses:
+        for raw_path, role in _path_roles(clause):
+            _check_path_role(raw_path, role, command=command, assigned=assigned)
+
+    for clause in clauses:
+        for url in _url_targets_in_clause(clause):
+            raise AgentLoopError(
+                "Coder reported tests run against a live remote target: "
+                f"{url!r} in command {command!r}. Assigned checkout: {assigned}"
+            )
 
 
 def validate_test_commands_within_workdir(
     tests_run: Sequence[str] | None,
     *,
     assigned_workdir: Path,
+    origin: Origin = "structured",
 ) -> None:
     if not tests_run:
         return
     assigned = _canonical(assigned_workdir)
     for command in tests_run:
-        for raw_path in _reported_paths(command):
-            path = _normalize_reported_path(raw_path)
-            if path is None:
-                continue
-            if WINDOWS_PATH_RE.fullmatch(raw_path.strip().strip("`'\".,")):
-                raise AgentLoopError(
-                    "Coder reported tests from a Windows-style path that cannot be "
-                    "validated against the assigned Unix checkout: "
-                    f"{raw_path!r} in command {command!r}. Assigned checkout: {assigned}"
-                )
-            if path == assigned or _is_inside(path, assigned):
-                continue
-            raise AgentLoopError(
-                "Coder reported tests from outside the assigned checkout: "
-                f"{raw_path!r} in command {command!r}. Assigned checkout: {assigned}"
-            )
+        _validate_single_command(command, assigned=assigned, origin=origin)
 
 
 def extract_reported_tests_from_response(text: str) -> tuple[str, ...]:
@@ -117,6 +719,7 @@ def validate_response_tests_within_workdir(text: str, *, assigned_workdir: Path)
     validate_test_commands_within_workdir(
         extract_reported_tests_from_response(text),
         assigned_workdir=assigned_workdir,
+        origin="response",
     )
 
 

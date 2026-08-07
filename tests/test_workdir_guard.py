@@ -117,6 +117,261 @@ def test_workdir_guard_extracts_tests_section_only(tmp_path):
     validate_response_tests_within_workdir(text, assigned_workdir=assigned)
 
 
+# ---------------------------------------------------------------------------
+# Issue #584: role-aware test-location validation (interpreter/toolchain
+# paths in program position, package acquisition, and live-remote-target
+# detection in both structured `tests_run` entries and `Tests:` prose).
+# ---------------------------------------------------------------------------
+
+
+def _assigned(tmp_path):
+    assigned = tmp_path / "claude" / "repo"
+    (assigned / "tests").mkdir(parents=True)
+    (assigned / ".venv" / "bin").mkdir(parents=True)
+    return assigned
+
+
+ACCEPTED_STRUCTURED_PATH_COMMANDS = [
+    "/usr/bin/python3 -m pytest tests/test_foo.py",
+    "/usr/bin/python3 -m pytest tests/test_foo.py -q",
+    "/other/checkout/.venv/bin/pytest tests/test_foo.py",
+    "/usr/bin/env python3 -m pytest tests/test_foo.py",
+    "sudo /usr/bin/python3 -m pytest tests/test_foo.py",
+    "~/.pyenv/versions/3.12.1/bin/python -m pytest tests/test_foo.py",
+    "/nix/store/abc123-python3-3.12.1/bin/python3 -m pytest tests/test_foo.py",
+    "PYTHONPATH=/usr/lib/python3.12 pytest tests/test_foo.py",
+    "tox --python=/usr/bin/python3.12",
+]
+
+
+@pytest.mark.parametrize("command", ACCEPTED_STRUCTURED_PATH_COMMANDS)
+def test_accepts_interpreter_and_toolchain_paths(tmp_path, command):
+    assigned = _assigned(tmp_path)
+    validate_test_commands_within_workdir((command,), assigned_workdir=assigned)
+
+
+def test_accepts_assigned_venv_bin_pytest(tmp_path):
+    assigned = _assigned(tmp_path)
+    command = f"{assigned}/.venv/bin/pytest tests/test_foo.py"
+    validate_test_commands_within_workdir((command,), assigned_workdir=assigned)
+
+
+def test_accepts_cd_then_absolute_interpreter(tmp_path):
+    assigned = _assigned(tmp_path)
+    command = f"cd {assigned} && /usr/bin/python3 -m pytest tests/test_foo.py"
+    validate_test_commands_within_workdir((command,), assigned_workdir=assigned)
+
+
+def test_accepts_windows_interpreter_absolute_path(tmp_path):
+    assigned = _assigned(tmp_path)
+    command = r"C:\Python311\python.exe -m pytest tests\test_foo.py"
+    validate_test_commands_within_workdir((command,), assigned_workdir=assigned)
+
+
+def test_accepts_ran_absolute_interpreter_through_response_path(tmp_path):
+    assigned = _assigned(tmp_path)
+    text = "Tests: ran /usr/bin/python3 -m pytest tests/test_foo.py - 12 passed."
+    validate_response_tests_within_workdir(text, assigned_workdir=assigned)
+
+
+def test_accepts_backticked_interpreter_reproducer_through_response_path(tmp_path):
+    assigned = _assigned(tmp_path)
+    text = (
+        "Tests: `/usr/bin/python3 -m pytest tests/test_durable_jobs.py -q` "
+        "- 12 passed, run from the assigned checkout."
+    )
+    validate_response_tests_within_workdir(text, assigned_workdir=assigned)
+
+
+REJECTED_STRUCTURED_PATH_COMMANDS = [
+    "cd /outside && python -m pytest",
+    "/usr/bin/python3 -m pytest /outside/checkout/tests/test_foo.py",
+    "pytest /outside/bin/tests/test_foo.py",
+    "pytest /other/checkout/.venv/tests/test_foo.py",
+    "pytest /nix/store/abc/tests/test_foo.py",
+    "pytest tests/test_foo.py | tee /outside/bin/results.log",
+    "pytest tests/test_foo.py > /outside/bin/results.log",
+    "/usr/local/src/other-checkout/run_tests.sh",
+    "/usr/share/other-checkout/run_tests.sh",
+    "/outside/.venv/tests/run_e2e.sh",
+    "/nix/store/abc/other-checkout/run_tests.sh",
+    "/outside/bin/run_tests.sh",
+    "/outside/checkout/run_tests.sh",
+    "pytest --rootdir=/outside/checkout tests/test_foo.py",
+    "python -m pip install --target /outside/site-packages requests",
+]
+
+
+@pytest.mark.parametrize("command", REJECTED_STRUCTURED_PATH_COMMANDS)
+def test_rejects_genuine_out_of_checkout_paths(tmp_path, command):
+    assigned = _assigned(tmp_path)
+    with pytest.raises(AgentLoopError, match="outside the assigned checkout"):
+        validate_test_commands_within_workdir((command,), assigned_workdir=assigned)
+
+
+def test_rejects_chained_cd_back_to_outside(tmp_path):
+    assigned = _assigned(tmp_path)
+    command = f"cd {assigned} && pytest tests/test_foo.py && cd /outside && pytest"
+    with pytest.raises(AgentLoopError, match="outside the assigned checkout"):
+        validate_test_commands_within_workdir((command,), assigned_workdir=assigned)
+
+
+def test_rejects_did_not_run_outside_script_through_response_path(tmp_path):
+    assigned = _assigned(tmp_path)
+    text = "Tests: Did not run /outside/checkout/run_tests.sh"
+    with pytest.raises(AgentLoopError, match="outside the assigned checkout"):
+        validate_response_tests_within_workdir(text, assigned_workdir=assigned)
+
+
+REJECTED_STRICT_COMMAND_URLS = [
+    "pytest -k not --base-url https://live.example tests/test_e2e.py",
+    "curl --data no https://live.example",
+    "python tests/e2e.py staging https://live.example",
+    "curl -sf https://dev.aispar.app/health",
+    "pytest --base-url https://dev.aispar.app tests/test_e2e.py",
+    "python tests/e2e.py https://live.example",
+    "pytest -k smoke https://live.example",
+    "python -m pytest https://live.example",
+    "python -m pip https://live.example",
+    "pytest --maxfail 1 https://live.example",
+]
+
+
+@pytest.mark.parametrize("command", REJECTED_STRICT_COMMAND_URLS)
+def test_rejects_strict_command_live_targets(tmp_path, command):
+    assigned = _assigned(tmp_path)
+    with pytest.raises(AgentLoopError, match="live remote target"):
+        validate_test_commands_within_workdir((command,), assigned_workdir=assigned)
+
+
+def test_rejects_strict_command_code_span_live_target(tmp_path):
+    assigned = _assigned(tmp_path)
+    text = "Tests: `npx playwright test --base-url https://dev.aispar.app` - 4 passed."
+    with pytest.raises(AgentLoopError, match="live remote target"):
+        validate_response_tests_within_workdir(text, assigned_workdir=assigned)
+
+
+REJECTED_NARRATIVE_URLS = [
+    "Tests: hit https://live.example/health",
+    "Tests: curled https://live.example/health",
+    "Tests: ran the e2e suite against https://live.example only in staging.",
+    "Tests: ran the smoke suite at https://live.example.",
+    "Tests: ran python tests/e2e.py https://live.example",
+    "Tests: also ran pytest tests/e2e.py https://live.example",
+    "Tests: `pytest tests/unit` passed; also ran curl https://live.example/health",
+    "Tests: ran curl https://live.example/health to verify.",
+    "Tests: did not run unit tests but ran curl https://live.example",
+    # The attached URL sits behind an earlier, non-URL prepositional object;
+    # only scanning the first preposition would read this as benign prose.
+    "Tests: ran the suite against the production environment at https://live.example",
+    "Tests: ran the smoke suite on staging targeting https://live.example",
+    "Tests: retested the checkout suite via the shared runner against https://live.example",
+]
+
+
+@pytest.mark.parametrize("text", REJECTED_NARRATIVE_URLS)
+def test_rejects_narrative_live_targets(tmp_path, text):
+    assigned = _assigned(tmp_path)
+    with pytest.raises(AgentLoopError, match="live remote target"):
+        validate_response_tests_within_workdir(text, assigned_workdir=assigned)
+
+
+ACCEPTED_ACQUISITION_COMMANDS = [
+    "pip install git+https://github.com/org/pkg && pytest tests/test_foo.py",
+    "python -m pip install https://packages.example/pkg.whl",
+    "/usr/bin/python3 -m pip install https://packages.example/pkg.whl",
+    "python -m pip install https://packages.example/pkg.whl && python -m pytest tests/test_foo.py",
+]
+
+
+@pytest.mark.parametrize("command", ACCEPTED_ACQUISITION_COMMANDS)
+def test_accepts_package_acquisition_urls(tmp_path, command):
+    assigned = _assigned(tmp_path)
+    validate_test_commands_within_workdir((command,), assigned_workdir=assigned)
+
+
+def test_accepts_package_acquisition_url_through_response_path(tmp_path):
+    assigned = _assigned(tmp_path)
+    text = (
+        "Tests: `python -m pip install https://packages.example/pkg.whl` "
+        "then `pytest tests/test_foo.py` - 12 passed."
+    )
+    validate_response_tests_within_workdir(text, assigned_workdir=assigned)
+
+
+def test_acquisition_exclusion_is_per_clause_not_per_entry(tmp_path):
+    assigned = _assigned(tmp_path)
+    command = "python -m pip install https://packages.example/pkg.whl && pytest https://live.example"
+    with pytest.raises(AgentLoopError, match="live remote target"):
+        validate_test_commands_within_workdir((command,), assigned_workdir=assigned)
+
+
+def test_module_acquisition_requires_package_manager_module(tmp_path):
+    assigned = _assigned(tmp_path)
+    with pytest.raises(AgentLoopError, match="live remote target"):
+        validate_test_commands_within_workdir(
+            ("python -m pytest https://live.example",), assigned_workdir=assigned
+        )
+
+
+def test_module_acquisition_requires_subcommand(tmp_path):
+    assigned = _assigned(tmp_path)
+    with pytest.raises(AgentLoopError, match="live remote target"):
+        validate_test_commands_within_workdir(
+            ("python -m pip https://live.example",), assigned_workdir=assigned
+        )
+
+
+ACCEPTED_NARRATIVE_TEXTS = [
+    "Tests: Did not run curl https://live.example because it is live.",
+    "Tests: Did not run the E2E suite; it is configured with --base-url https://live.example.",
+    "Tests: pytest tests/test_foo.py -q - did not run the https://dev.aispar.app e2e suite.",
+    "Tests: pytest tests/test_foo.py -q passed. Deployment notes live at https://dev.aispar.app/docs.",
+    "Tests: ran pytest tests/test_foo.py -q, release notes at https://dev.aispar.app/notes.",
+    # Negation still wins over the full-phrase preposition scan, both when the
+    # verb itself is negated and when the negation precedes the preposition.
+    "Tests: Did not run the suite against the production environment at https://live.example.",
+    "Tests: ran the unit suite against the local stub and never against https://live.example.",
+]
+
+
+@pytest.mark.parametrize("text", ACCEPTED_NARRATIVE_TEXTS)
+def test_accepts_narrative_controls(tmp_path, text):
+    assigned = _assigned(tmp_path)
+    validate_response_tests_within_workdir(text, assigned_workdir=assigned)
+
+
+def test_accepts_bare_backticked_url_in_negated_sentence(tmp_path):
+    assigned = _assigned(tmp_path)
+    text = (
+        "Tests: pytest tests/test_foo.py -q - 40 passed. Did not run the Playwright "
+        "E2E suite; it is only reachable at `https://dev.aispar.app` in this sandbox."
+    )
+    validate_response_tests_within_workdir(text, assigned_workdir=assigned)
+
+
+def test_same_text_is_strict_under_structured_origin(tmp_path):
+    assigned = _assigned(tmp_path)
+    command = "pytest tests/test_foo.py https://live.example"
+    with pytest.raises(AgentLoopError, match="live remote target"):
+        validate_test_commands_within_workdir((command,), assigned_workdir=assigned)
+
+
+def test_same_text_is_narrative_and_accepted_under_response_origin_when_negated(tmp_path):
+    assigned = _assigned(tmp_path)
+    text = "Tests: Did not run pytest tests/test_foo.py https://live.example because it is live."
+    validate_response_tests_within_workdir(text, assigned_workdir=assigned)
+
+
+def test_default_origin_is_structured(tmp_path):
+    assigned = _assigned(tmp_path)
+    with pytest.raises(AgentLoopError, match="live remote target"):
+        validate_test_commands_within_workdir(
+            ("pytest tests/test_foo.py https://live.example",),
+            assigned_workdir=assigned,
+        )
+
+
 def _checkout_claim(source, *, verification_basis="checkout-inspected", status="verified", fact="fact"):
     return DiscussEvidenceClaim(fact=fact, status=status, source=source, verification_basis=verification_basis)
 
