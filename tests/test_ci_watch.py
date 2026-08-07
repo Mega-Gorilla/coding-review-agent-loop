@@ -3,6 +3,7 @@
 from unittest.mock import patch
 
 from coding_review_agent_loop.ci_health import PullRequestCheck, PullRequestChecks
+from coding_review_agent_loop.errors import AgentLoopError
 from coding_review_agent_loop.github import PullRequestMetadata, PullRequestMergeability, watch_pr_checks
 from coding_review_agent_loop.runner import CommandResult, Runner
 
@@ -67,3 +68,30 @@ def test_watch_timeout_retries_transient_snapshots_and_dry_run_does_not_poll(tmp
     assert len(runner.commands) == 1
     dry = make_config(tmp_path, watch_pending_ci=True, dry_run=True)
     assert watch_pr_checks(_Runner(), dry, 7, metadata=_metadata()).status == "dry_run"
+
+
+def test_watch_accepts_forbidden_branch_protection_and_retries_flaky_head_probe(tmp_path):
+    runner = _Runner()
+    with patch(
+        "coding_review_agent_loop.github.get_pr_head_sha",
+        side_effect=[AgentLoopError("temporary gh failure"), "sha"],
+    ), patch(
+        "coding_review_agent_loop.github.get_pr_mergeability",
+        return_value=_mergeability(),
+    ), patch(
+        "coding_review_agent_loop.github.get_pr_checks",
+        side_effect=[_checks("pending"), _checks("passing", protection="forbidden")],
+    ):
+        outcome = watch_pr_checks(
+            runner,
+            make_config(
+                tmp_path,
+                watch_pending_ci=True,
+                ci_timeout_seconds=60,
+                ci_poll_interval_seconds=30,
+            ),
+            7,
+            metadata=_metadata(),
+        )
+    assert outcome.status == "passed"
+    assert [command[0] for command in runner.commands] == ["sleep"]

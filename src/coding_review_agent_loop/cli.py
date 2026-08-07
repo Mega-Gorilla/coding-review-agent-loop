@@ -695,11 +695,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     runner = Runner(dry_run=args.dry_run)
     try:
-        config = config_from_args(args, runner)
         # Preserve tokens (rather than a rendered command) so timeout guidance can
         # be safely shell-quoted locally. Programmatic callers have no sys.argv.
         invocation = tuple([sys.argv[0], *sys.argv[1:]]) if argv is None else tuple(["agent-loop", *argv])
-        config = AgentLoopConfig(**{**config.__dict__, "invocation_argv": invocation})
+        config = config_from_args(args, runner, invocation_argv=invocation)
         implementation_override_requested = (
             args.implementation_coder is not None
             or args.implementation_coder_model

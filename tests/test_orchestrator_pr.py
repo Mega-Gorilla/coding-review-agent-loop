@@ -14,6 +14,7 @@ from coding_review_agent_loop.comment_rendering import (
 from coding_review_agent_loop.errors import QuotaResetExceededError
 from coding_review_agent_loop.followups import MAX_APPROVED_FOLLOWUP_ISSUES, reconcile_approved_followups
 from coding_review_agent_loop.github import (
+    CiWatchOutcome,
     HumanReviewRequirement,
     IssueComment,
     IssueContext,
@@ -877,6 +878,23 @@ def test_pr_loop_routes_failing_github_checks_through_coder_followup(tmp_path, m
     assert "Failing checks: tests/test_security.py (failure)" in followup_prompt
     assert "https://github.com/OWNER/REPO/actions/runs/555" in followup_prompt
     assert "Do not claim global test success unless GitHub PR checks are green." in followup_prompt
+
+
+def test_watch_mode_success_skips_legacy_wait_for_ci(tmp_path, monkeypatch):
+    runner = FakeRunner(codex_outputs=[structured_pr_review(state="approved", summary="Approved.")])
+    config = make_config(tmp_path, watch_pending_ci=True, auto_merge=False)
+    monkeypatch.setattr(
+        orchestrator,
+        "watch_pr_checks",
+        lambda *args, **kwargs: CiWatchOutcome(status="passed", attempts_used=1),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "wait_for_ci",
+        lambda *args, **kwargs: pytest.fail("legacy CI waiter must not run in watch mode"),
+    )
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+    assert any("watching GitHub checks" in comment for comment in runner.comments)
 
 
 def test_pr_loop_refreshes_checks_between_reviewers_and_before_coder(tmp_path, monkeypatch):

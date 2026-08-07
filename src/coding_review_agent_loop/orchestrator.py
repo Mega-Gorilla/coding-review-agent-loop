@@ -8,6 +8,7 @@ import json
 import re
 import shlex
 import sys
+import time
 import zoneinfo
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -46,6 +47,7 @@ from .errors import (
     UnknownPriorItemDispositionError,
 )
 from .github import (
+    CiWatchOutcome,
     IssueContext,
     PullRequestChecks,
     PullRequestMergeability,
@@ -5289,6 +5291,9 @@ def run_pr_loop(
             start_round_number = resumed_round.round_number
             log(config, f"PR #{pr_number}: resuming round {start_round_number}")
         watch_failure_extension_used = False
+        watch_head_extension_used = False
+        watch_deadline: float | None = None
+        watch_attempts_remaining: int | None = None
         # One extra slot is only activated by a watcher-discovered failure on
         # the configured final round; ordinary review failures retain the cap.
         allowed_rounds = config.max_rounds
@@ -6258,8 +6263,37 @@ def run_pr_loop(
                     )
                     return 0
                 if not must_fix_items and config.watch_pending_ci:
-                    log(config, f"Round {round_number}: watching GitHub checks for PR #{pr_number} in the foreground")
-                    watch_outcome = watch_pr_checks(runner, config, pr_number, metadata=pr_metadata)
+                    if watch_deadline is None:
+                        watch_deadline = time.monotonic() + config.ci_timeout_seconds
+                        watch_attempts_remaining = max(
+                            1,
+                            config.ci_timeout_seconds // config.ci_poll_interval_seconds,
+                        )
+                    watching_message = (
+                        f"Reviewers approved PR #{pr_number}; watching GitHub checks "
+                        "in the foreground. "
+                        "No coder or reviewer agents will run while checks remain pending."
+                    )
+                    log(config, f"Round {round_number}: {watching_message}")
+                    post_pr_comment(
+                        runner,
+                        config=config,
+                        pr_number=pr_number,
+                        body=watching_message + "\n\n-- coding-review-agent-loop",
+                    )
+                    assert watch_attempts_remaining is not None
+                    if watch_attempts_remaining <= 0:
+                        watch_outcome = CiWatchOutcome(status="timeout")
+                    else:
+                        watch_outcome = watch_pr_checks(
+                            runner,
+                            config,
+                            pr_number,
+                            metadata=pr_metadata,
+                            deadline=watch_deadline,
+                            attempts=watch_attempts_remaining,
+                        )
+                    watch_attempts_remaining -= watch_outcome.attempts_used
                     if watch_outcome.status == "dry_run":
                         print(f"PR #{pr_number} approval found; dry-run preview did not perform live CI watching.")
                         return 0
@@ -6272,27 +6306,74 @@ def run_pr_loop(
                         else:
                             print(f"PR #{pr_number} is merge-ready after CI watch completed.")
                         return 0
-                    if watch_outcome.status in {"timeout", "infrastructure_stall"}:
-                        _publish_approved_followups(runner, config=config, pr_number=pr_number, head_sha=pr_metadata.head_sha, pr_comments=pr_comments, followups=future_followups)
+                    if watch_outcome.status == "infrastructure_stall":
+                        _publish_approved_followups(
+                            runner,
+                            config=config,
+                            pr_number=pr_number,
+                            head_sha=pr_metadata.head_sha,
+                            pr_comments=pr_comments,
+                            followups=future_followups,
+                        )
+                        assert watch_outcome.stall is not None
+                        post_pr_comment(
+                            runner,
+                            config=config,
+                            pr_number=pr_number,
+                            body=_format_ci_infrastructure_comment(
+                                pr_number, watch_outcome.stall
+                            ),
+                        )
+                        post_pr_comment(
+                            runner,
+                            config=config,
+                            pr_number=pr_number,
+                            body=_ci_infrastructure_stop_message(
+                                pr_number, watch_outcome.stall, []
+                            ),
+                        )
+                        print(f"PR #{pr_number} CI watch stopped: external CI infrastructure is stalled.")
+                        return 0
+                    if watch_outcome.status == "timeout":
+                        _publish_approved_followups(
+                            runner,
+                            config=config,
+                            pr_number=pr_number,
+                            head_sha=pr_metadata.head_sha,
+                            pr_comments=pr_comments,
+                            followups=future_followups,
+                        )
                         details = (
                             _pr_check_details(watch_outcome.pr_checks)
                             if watch_outcome.pr_checks
                             else ["No reliable check snapshot was available."]
                         )
-                        post_pr_comment(runner, config=config, pr_number=pr_number, body=_pending_ci_stop_message(pr_number, "pending", details))
+                        post_pr_comment(
+                            runner,
+                            config=config,
+                            pr_number=pr_number,
+                            body=_pending_ci_stop_message(pr_number, "pending", details),
+                        )
                         rerun = shlex.join(config.invocation_argv) if config.invocation_argv else f"agent-loop pr {pr_number} --watch-pending-ci"
                         note = "" if config.invocation_argv else " (deterministic fallback; original invocation unavailable)"
                         print(
-                            f"PR #{pr_number} CI watch timed out or stalled: {'; '.join(details)}. "
+                            f"PR #{pr_number} CI watch timed out: {'; '.join(details)}. "
                             f"Rerun: {rerun}{note}"
                         )
                         return 0
                     if watch_outcome.status == "head_changed":
                         log(config, f"PR #{pr_number} head changed while watching; re-review is required")
-                        # Fresh state is fetched by the next normal round. Do not
-                        # publish approved follow-ups for the obsolete head.
-                        unresolved_items.append(_next_unresolved_item(item_number=next_unresolved_item_number, reviewer="GitHub PR checks", source_round=round_number, text="PR head changed while CI was being watched; re-review the new head.", status="blocking"))
-                        next_unresolved_item_number += 1
+                        # Consume a fresh review round without dispatching the
+                        # coder: prior-head approvals and resume state are stale.
+                        if round_number == allowed_rounds and not watch_head_extension_used:
+                            allowed_rounds += 1
+                            watch_head_extension_used = True
+                        resumed_round = None
+                        current_resume = None
+                        prefetched_pr_context = get_pr_review_context(
+                            runner, config=config, pr_number=pr_number
+                        )
+                        continue
                     elif watch_outcome.status == "merge_conflict":
                         unresolved_items = _reconcile_merge_conflict_item(unresolved_items, mergeability=watch_outcome.mergeability, source_round=round_number, current_head_sha=pr_metadata.head_sha)
                     elif watch_outcome.status == "failed":
@@ -6302,7 +6383,23 @@ def run_pr_loop(
                             else ["GitHub checks failed."]
                         )
                         log(config, f"Round {round_number}: CI watch failed; resuming coder")
-                        unresolved_items.append(_next_unresolved_item(item_number=next_unresolved_item_number, reviewer="GitHub PR checks", source_round=round_number, text=_pr_check_blocking_review(pr_number, "failing", details), status="blocking"))
+                        post_pr_comment(
+                            runner,
+                            config=config,
+                            pr_number=pr_number,
+                            body=_format_pr_checks_comment(pr_number, "failing", details),
+                        )
+                        unresolved_items.append(
+                            _next_unresolved_item(
+                                item_number=next_unresolved_item_number,
+                                reviewer="GitHub PR checks",
+                                source_round=round_number,
+                                text=_pr_check_blocking_review(
+                                    pr_number, "failing", details
+                                ),
+                                status="blocking",
+                            )
+                        )
                         next_unresolved_item_number += 1
                         if round_number == config.max_rounds and not watch_failure_extension_used:
                             allowed_rounds += 1
@@ -6444,7 +6541,7 @@ def run_pr_loop(
                     if not must_fix_items:
                         print(f"PR #{pr_number} approved by {format_agent_list(configured_reviewers)}.")
                         return 0
-            if round_number == config.max_rounds:
+            if round_number == allowed_rounds:
                 raise AgentLoopError(
                     f"One or more reviewers still reported blocking issues after round {round_number}; "
                     "human review required."
