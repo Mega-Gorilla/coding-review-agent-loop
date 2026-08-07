@@ -143,6 +143,7 @@ from coding_review_agent_loop.prompts import (
     build_issue_implementation_prompt,
     build_issue_plan_prompt,
     build_issue_prompt,
+    build_merge_conflict_prompt,
     build_task_prompt,
     build_same_pr_followup_prompt,
     build_plan_review_prompt,
@@ -240,6 +241,7 @@ class FakeRunner(Runner):
         advance_pr_head_on_coder_followup=True,
         search_issues_payload=None,
         open_prs_payload=None,
+        mergeability_payloads=None,
     ):
         super().__init__(dry_run=False)
         self.claude_outputs = list(claude_outputs or [])
@@ -331,6 +333,18 @@ class FakeRunner(Runner):
         # number/body keys; defaults to no open PRs found.
         self.open_prs_payload = open_prs_payload if open_prs_payload is not None else []
         self.open_prs_calls = 0
+        # Scripted responses for `get_pr_mergeability`'s dedicated `gh pr view
+        # --json mergeable,mergeStateStatus,headRefOid,baseRefName` probe
+        # (#606), consumed one call at a time. Each entry is a dict with any of
+        # mergeable/mergeStateStatus/headRefOid/baseRefName; missing keys are
+        # None. When exhausted (or unset), falls back to those same keys read
+        # from `pr_payload`, which is None/None by default -- unknown, no-op
+        # for tests that never set mergeability -- so existing suites are
+        # unaffected.
+        self.mergeability_payloads = (
+            list(mergeability_payloads) if mergeability_payloads is not None else None
+        )
+        self.mergeability_calls = 0
         self._agent_pr_counter = 0
         self._agent_command_seen = False
         # Parallel discuss debaters (#475) call run_with_log from worker
@@ -734,6 +748,23 @@ class FakeRunner(Runner):
         if cmd[:3] == ["gh", "pr", "list"]:
             self.open_prs_calls += 1
             return CommandResult(cmd, cwd_path, json_dumps(self.open_prs_payload), "", 0)
+
+        if (
+            cmd[:3] == ["gh", "pr", "view"]
+            and "--json" in cmd
+            and cmd[cmd.index("--json") + 1] == "mergeable,mergeStateStatus,headRefOid,baseRefName"
+        ):
+            self.mergeability_calls += 1
+            if self.mergeability_payloads:
+                payload = self.mergeability_payloads.pop(0)
+            else:
+                payload = {
+                    "mergeable": self.pr_payload.get("mergeable"),
+                    "mergeStateStatus": self.pr_payload.get("mergeStateStatus"),
+                    "headRefOid": self.pr_payload.get("headRefOid"),
+                    "baseRefName": self.pr_payload.get("baseRefName"),
+                }
+            return CommandResult(cmd, cwd_path, json_dumps(payload), "", 0)
 
         if cmd[:3] == ["gh", "pr", "view"]:
             if "--jq" in cmd and ".headRefOid" in cmd:

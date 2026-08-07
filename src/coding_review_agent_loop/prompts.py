@@ -2495,6 +2495,61 @@ the AGENT_STATE footer. Your response must end with, in this exact order:
 """
 
 
+def build_merge_conflict_prompt(
+    pr_number: int,
+    round_number: int,
+    review: str,
+    config: AgentLoopConfig,
+    memory: AgentMemoryContext | None = None,
+    issue_context: IssueContext | None = None,
+    human_requirements: Sequence[HumanReviewRequirement] | None = None,
+    *,
+    base_branch: str,
+    head_sha: str | None,
+    merge_state_detail: str,
+    human_requirements_context: CoderHumanRequirementsPromptContext | None = None,
+) -> str:
+    reviewer_name = format_agent_list(reviewers(config))
+    coder_signature = agent_signature(config.coder, config)
+    if human_requirements_context is None:
+        human_requirements_context = render_coder_human_requirements_prompt_context(human_requirements)
+    head_description = f"`{head_sha}`" if head_sha else "the current PR head"
+    return f"""GitHub reports that pull request #{pr_number} in {config.repo} has a merge conflict \
+with its base branch `{base_branch}` ({merge_state_detail}) at {head_description}.
+
+Resolve this conflict in this local checkout before any further review or merge \
+can happen. Pull/sync the PR branch, merge `origin/{base_branch}` into it, resolve \
+every conflict, run relevant tests, commit, and push to the same PR branch. Do not \
+open a new PR and do not force-push over commits that are not part of this \
+conflict resolution or the listed follow-up items below. Do not check CI status \
+or wait for CI runs in this round -- CI and reviews are re-evaluated automatically \
+against the new head after your push.
+{_coder_workdir_guidance(config)}
+{_scratch_file_guidance()}
+{_coder_test_reporting_guidance(structured=True)}{_coder_local_test_scope_guidance(structured=True)}{_coder_documentation_guidance()}
+{_issue_context_block(issue_context)}
+{human_requirements_context.block}{_coder_human_requirements_guidance(human_requirements_context)}
+{_memory_block(memory)}
+
+Other unresolved reviewer items carried into this round (address them in the same \
+push if practical, alongside the conflict resolution):
+
+{review}
+
+{_structured_coder_followup_guidance(
+    reviewer_name=reviewer_name,
+    human_requirements_context=human_requirements_context,
+    coder_signature=coder_signature,
+)}This is round {round_number}. Use blocking to hand the resolved PR back for review.
+If you cannot safely resolve the conflict, explain why and still use the blocking
+marker so a human can intervene. Do not place your signature before the
+AGENT_STATE footer. Your response must end with, in this exact order:
+
+<!-- AGENT_STATE: blocking -->
+-- {coder_signature}
+"""
+
+
 def _render_discuss_agenda_prompt_block(agenda: ParsedDiscussAgenda) -> list[str]:
     lines: list[str] = []
     if agenda.consensus:

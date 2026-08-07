@@ -1221,6 +1221,46 @@ Two independent, complementary mechanisms bound this instead:
 
 Reviewers see the same classification (an "External CI infrastructure stalls" section in the PR checks context) and are instructed not to record a classified stall as a blocking code item; any other failing or never-reporting check remains ordinary review work.
 
+### Merge conflicts
+
+GitHub's own mergeability computation, not just the current-head CI check, is
+evaluated before spending reviewer time or an auto-merge CI wait: a PR whose
+branch has drifted out of sync with its base can otherwise pass every
+reviewer round only to fail to merge, or run CI against a head that stops
+being relevant the moment the base advances.
+
+- **When it's checked.** The loop probes `gh pr view --json
+  mergeable,mergeStateStatus,headRefOid,baseRefName` at the start of every
+  review round (before any reviewer is invoked) and again right before
+  fetching GitHub PR checks / attempting `--auto-merge` (the "merge gate").
+  `--auto-merge`'s CI wait also re-checks mergeability on every poll, so a
+  conflict that appears mid-wait stops the wait immediately instead of
+  polling a check on a head that can no longer merge.
+- **Classification.** A `mergeStateStatus` of `DIRTY` or a `mergeable` of
+  `CONFLICTING` is a confirmed conflict, checked first so it wins even if the
+  other field is null. A `mergeable` of `MERGEABLE` is mergeable. Everything
+  else — including GitHub's own `UNKNOWN` (still computing), a non-zero `gh`
+  exit, or unparsable output — is `unknown` and is treated exactly like
+  `mergeable`: it never triggers a coder round on its own. An explicit
+  `UNKNOWN` is retried up to `--mergeability-poll-attempts` times (default 3),
+  `--mergeability-poll-interval-seconds` apart (default 5), before settling as
+  `unknown`.
+- **What happens on a confirmed conflict.** Reviewers are skipped for that
+  round, no GitHub PR checks are fetched, and no CI wait or `gh pr merge` is
+  attempted. The coder is dispatched with a dedicated prompt naming the
+  observed base branch and head SHA, instructed to sync the branch, merge
+  `origin/<base>`, resolve every conflict, run relevant tests, commit, and
+  push to the same PR — never opening a new PR, never waiting on CI, and
+  never force-pushing over unrelated work. Any other genuinely unresolved
+  reviewer items are carried into the same round.
+- **After a resolution push.** The next round re-probes mergeability from
+  scratch; once GitHub reports `mergeable` (or `unknown`), the synthetic
+  conflict item clears itself and normal reviewer/CI flow resumes against the
+  new head — prior approvals and checks from the old head are never reused
+  for merging. If the head is still unchanged the next time a conflict round
+  would be dispatched (the coder made no progress), the loop stops cleanly
+  with an explanatory comment instead of looping.
+
 ### Focused, bounded local test selection
 
 A same-PR follow-up scoped to a wording correction in two files does not

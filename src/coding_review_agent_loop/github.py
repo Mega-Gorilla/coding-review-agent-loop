@@ -89,6 +89,15 @@ class PullRequestReviewContext:
     human_requirements: tuple[HumanReviewRequirement, ...]
 
 
+@dataclass(frozen=True)
+class PullRequestMergeability:
+    state: Literal["mergeable", "conflicted", "unknown"]
+    mergeable_raw: str | None
+    merge_state_raw: str | None
+    head_sha: str | None
+    base_branch: str | None
+
+
 PR_METADATA_FIELDS = "number,title,headRefName,baseRefName,headRefOid,url,body"
 PR_REVIEW_CONTEXT_FIELDS = f"{PR_METADATA_FIELDS},comments,reviews"
 ISSUE_REFERENCE_RE_TEMPLATE = r"(?:#%d\b|/issues/%d\b)"
@@ -467,6 +476,116 @@ def get_pr_review_context(
         metadata=_parse_pr_metadata(data, config=config, pr_number=pr_number),
         comments=comments,
         human_requirements=_parse_pr_human_requirements(data),
+    )
+
+
+def _classify_mergeability(
+    *, mergeable_raw: str | None, merge_state_raw: str | None
+) -> Literal["mergeable", "conflicted", "unknown"]:
+    # Explicit conflict evidence wins first, even when the other field is
+    # null/missing: a DIRTY merge state or a CONFLICTING mergeable value both
+    # mean GitHub cannot merge the branch as-is.
+    if merge_state_raw == "DIRTY" or mergeable_raw == "CONFLICTING":
+        return "conflicted"
+    if mergeable_raw == "MERGEABLE":
+        return "mergeable"
+    return "unknown"
+
+
+def get_pr_mergeability(
+    runner: Runner,
+    *,
+    config: AgentLoopConfig,
+    pr_number: int,
+    cwd: Path | None = None,
+) -> PullRequestMergeability:
+    """Probe GitHub's computed mergeability for `pr_number`.
+
+    A confirmed `mergeable`/`conflicted` state is authoritative. Anything
+    else -- a non-zero `gh` exit, unparsable JSON, a null/missing `mergeable`
+    with no conflict evidence, or an explicit `"UNKNOWN"` (GitHub is still
+    computing it) -- settles as `unknown` so an old `gh`, a token without
+    `mergeStateStatus` access, or a transient computation window is never
+    mistaken for a real conflict. Only the explicit `"UNKNOWN"` case is worth
+    a bounded re-poll, since it is the one case GitHub says will resolve on
+    its own shortly.
+    """
+    if config.dry_run:
+        return PullRequestMergeability(
+            state="unknown",
+            mergeable_raw=None,
+            merge_state_raw=None,
+            head_sha=None,
+            base_branch=None,
+        )
+
+    resolved_cwd = cwd or active_workdir(config)
+    attempts = max(1, config.mergeability_poll_attempts)
+    for attempt in range(attempts):
+        result = runner.run(
+            [
+                config.gh_cmd,
+                "pr",
+                "view",
+                str(pr_number),
+                "--repo",
+                config.repo,
+                "--json",
+                "mergeable,mergeStateStatus,headRefOid,baseRefName",
+            ],
+            cwd=resolved_cwd,
+            check=False,
+        )
+        if result.returncode != 0:
+            log(config, f"PR #{pr_number}: mergeability probe failed (gh exit {result.returncode}); treating as unknown")
+            return PullRequestMergeability(
+                state="unknown",
+                mergeable_raw=None,
+                merge_state_raw=None,
+                head_sha=None,
+                base_branch=None,
+            )
+        try:
+            data = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            log(config, f"PR #{pr_number}: mergeability probe returned invalid JSON; treating as unknown")
+            return PullRequestMergeability(
+                state="unknown",
+                mergeable_raw=None,
+                merge_state_raw=None,
+                head_sha=None,
+                base_branch=None,
+            )
+        mergeable_raw = _optional_str(data.get("mergeable"))
+        merge_state_raw = _optional_str(data.get("mergeStateStatus"))
+        head_sha = _optional_str(data.get("headRefOid"))
+        base_branch = _optional_str(data.get("baseRefName"))
+        state = _classify_mergeability(mergeable_raw=mergeable_raw, merge_state_raw=merge_state_raw)
+        if state != "unknown" or mergeable_raw != "UNKNOWN":
+            return PullRequestMergeability(
+                state=state,
+                mergeable_raw=mergeable_raw,
+                merge_state_raw=merge_state_raw,
+                head_sha=head_sha,
+                base_branch=base_branch,
+            )
+        if attempt < attempts - 1:
+            log(
+                config,
+                f"PR #{pr_number}: GitHub is still computing mergeability (UNKNOWN); "
+                f"retrying in {config.mergeability_poll_interval_seconds}s "
+                f"({attempt + 1}/{attempts})",
+            )
+            runner.run(
+                ["sleep", str(config.mergeability_poll_interval_seconds)],
+                cwd=resolved_cwd,
+            )
+    return PullRequestMergeability(
+        state="unknown",
+        mergeable_raw="UNKNOWN",
+        merge_state_raw=merge_state_raw,
+        head_sha=head_sha,
+        base_branch=base_branch,
     )
 
 
@@ -1189,9 +1308,10 @@ def get_check_status(runner: Runner, config: AgentLoopConfig, head_sha: str) -> 
 
 @dataclass(frozen=True)
 class CiWaitOutcome:
-    status: Literal["passed", "infrastructure_stall"]
+    status: Literal["passed", "infrastructure_stall", "merge_conflict"]
     stall: CiInfrastructureStall | None = None
     pr_checks: PullRequestChecks | None = None
+    mergeability: PullRequestMergeability | None = None
 
 
 def wait_for_ci(
@@ -1210,6 +1330,11 @@ def wait_for_ci(
     Otherwise this keeps today's contract exactly: keep polling and ultimately
     raise `AgentLoopError` on a genuine terminal failure or `ci_timeout_seconds`
     expiry.
+
+    Each poll also re-checks GitHub mergeability first (#606): once the base
+    advances or a rebase-required situation appears, the PR's current-head CI
+    is no longer a reliable merge signal, so a confirmed conflict ends the
+    wait immediately without attempting a merge.
     """
     log(config, f"Waiting for GitHub check '{config.ci_check_name}' before merge")
     head_sha = get_pr_head_sha(runner, config, pr_number)
@@ -1223,6 +1348,11 @@ def wait_for_ci(
         "skipped",
     }
     for attempt in range(attempts):
+        mergeability = get_pr_mergeability(runner, config=config, pr_number=pr_number)
+        if mergeability.state == "conflicted":
+            log(config, f"PR #{pr_number}: GitHub reports a merge conflict; stopping CI wait")
+            return CiWaitOutcome(status="merge_conflict", mergeability=mergeability)
+
         record = get_check_record(runner, config, head_sha)
         status = record.status if record is not None else "pending"
         log(config, f"GitHub check '{config.ci_check_name}' status: {status}")

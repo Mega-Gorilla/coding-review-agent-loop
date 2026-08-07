@@ -345,6 +345,16 @@ python -m helpers.skill_runner run-task-round \
   `pending` > `blocking` > `incomplete` > `approved`.
 - **Merge is always a human decision.** The skill never runs CI-wait or
   auto-merge; every mode stops at "ready to merge."
+- **Merge conflicts route to the coder, not CI-wait.** The `coding_review_agent_loop`
+  CLI orchestrator checks GitHub's own mergeability (`mergeStateStatus`/`mergeable`)
+  before each review round and again before CI checks/auto-merge; a confirmed
+  `dirty`/`CONFLICTING` state skips reviewers and any CI wait or merge attempt
+  and routes the PR to the assigned coder to sync, resolve, and push instead
+  (see [Merge conflicts](docs/local_agent_loop.md#merge-conflicts)). In
+  skill-mode, if you find `gh pr view` reporting `mergeable: false` /
+  `mergeStateStatus: DIRTY`, treat that the same way: resolve the conflict as
+  the host coder before continuing review, rather than waiting on CI for the
+  current head.
 - **No unbounded CI waits.** Never run `gh run watch`, `gh pr checks --watch`,
   or any other unbounded wait on a GitHub Actions check or workflow run —
   including when fixing a reviewer-reported check failure as the host coder.

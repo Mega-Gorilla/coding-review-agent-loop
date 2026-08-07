@@ -47,8 +47,10 @@ from .errors import (
 from .github import (
     IssueContext,
     PullRequestChecks,
+    PullRequestMergeability,
     PullRequestReviewContext,
     get_issue_context,
+    get_pr_mergeability,
     parse_linked_issue_numbers,
     get_pr_checks,
     get_pr_review_context,
@@ -110,6 +112,7 @@ from .prompts import (
     build_plan_decomposition_prompt,
     build_plan_review_prompt,
     build_plan_revision_prompt,
+    build_merge_conflict_prompt,
     build_review_prompt,
     build_same_pr_followup_prompt,
     build_task_clarification_prompt,
@@ -292,16 +295,19 @@ from .unresolved_items import (
     ALL_RESOLVED_PROSE_RE,
     CODER_DISPUTE_NOTE_PREFIX,
     HUMAN_REQUIREMENTS_ACK_ITEM_ID,
+    MERGE_CONFLICT_ITEM_ID,
     _apply_dispute_evidence,
     _apply_unresolved_item_dispositions,
     _collect_prior_compact_summaries,
     _clear_human_requirements_ack_item,
+    _clear_merge_conflict_item,
     _format_same_pr_unresolved_items,
     _format_unresolved_items_for_coder,
     _is_disputed_item,
     _maybe_fill_resolved_dispositions_from_prose,
     _next_unresolved_item,
     _normalize_disposition_section_prose,
+    _reconcile_merge_conflict_item,
     _record_prior_item_disposition,
     _reconcile_human_requirements_ack_item,
     _upsert_human_requirements_ack_item,
@@ -5262,6 +5268,12 @@ def run_pr_loop(
             # pass one reviewer session, so attach it to the first configured reviewer.
             reviewer_session_ids[configured_reviewers[0]] = reviewer_session_id
         prefetched_pr_context: PullRequestReviewContext | None = None
+        # Bounded-progress guard for merge-conflict rounds (#606): if the coder
+        # is dispatched to resolve a conflict and the PR head is still exactly
+        # the same head the next time a conflict dispatch is about to happen,
+        # the coder round made no progress -- stop cleanly instead of looping.
+        conflict_dispatch_head_sha: str | None = None
+        latest_mergeability: PullRequestMergeability | None = None
         resumed_round = _resume_pr_round(
             initial_pr_context.comments,
             head_sha=initial_pr_context.metadata.head_sha,
@@ -5297,6 +5309,36 @@ def run_pr_loop(
                 human_requirements=human_requirements,
                 source_round=round_number,
             )
+            # GitHub mergeability gate (#606): fetch and evaluate before starting
+            # a review round so a confirmed conflict routes straight to the coder
+            # instead of spending reviewer time (or later a full CI wait) on a
+            # branch that cannot merge. `unknown` is left alone here so a
+            # transient GitHub mergeability computation window never triggers an
+            # unnecessary coder round.
+            round_start_mergeability = get_pr_mergeability(runner, config=config, pr_number=pr_number)
+            latest_mergeability = round_start_mergeability
+            unresolved_items = _reconcile_merge_conflict_item(
+                unresolved_items,
+                mergeability=round_start_mergeability,
+                source_round=round_number,
+                current_head_sha=pr_metadata.head_sha,
+            )
+            # A confirmed conflict from this probe is pending; so is a
+            # preserved blocker from an earlier confirmed conflict that this
+            # probe merely returned `unknown` for on the same head (a probe
+            # hiccup, not evidence the conflict resolved) -- checking the
+            # ledger, not the raw probe state, is what keeps the coder from
+            # being bypassed by a transient GitHub mergeability failure.
+            conflict_pending = any(
+                item.item_id == MERGE_CONFLICT_ITEM_ID for item in unresolved_items
+            )
+            if conflict_pending:
+                log(
+                    config,
+                    f"Round {round_number}: PR #{pr_number} has a merge conflict with "
+                    f"{round_start_mergeability.base_branch or config.base or 'the base branch'}; "
+                    f"skipping reviewers and routing to {agent_display_name(config.coder)}",
+                )
             prior_unresolved_items = tuple(unresolved_items)
             prior_dispositions: dict[str, list[ReviewItemDisposition]] = {
                 item.item_id: [] for item in prior_unresolved_items
@@ -5348,6 +5390,7 @@ def run_pr_loop(
                     "without current-head coder metadata; routing recovered prior items "
                     f"through {coder_name} before review",
                 )
+            skip_reviewers_this_round = skip_reviewers_for_recovery or conflict_pending
 
             pr_fatal_errors: list[tuple[str, AgentLoopError]] = []
             pr_prep_failures: dict[AgentName, AgentLoopError] = {}
@@ -5380,7 +5423,7 @@ def run_pr_loop(
                     return "carried"
                 return "turn"
 
-            if config.review_parallel and not skip_reviewers_for_recovery:
+            if config.review_parallel and not skip_reviewers_this_round:
                 pending_pr_reviewers = [
                     reviewer for reviewer in configured_reviewers
                     if _pr_reviewer_prelaunch_kind(reviewer) == "turn"
@@ -5503,7 +5546,7 @@ def run_pr_loop(
                             "PR sync; nothing to launch in parallel this round",
                         )
 
-            for reviewer in (() if skip_reviewers_for_recovery else configured_reviewers):
+            for reviewer in (() if skip_reviewers_this_round else configured_reviewers):
                 reviewer_name = agent_display_name(reviewer)
                 if reviewer in unavailable_reviewer_failures:
                     log(
@@ -6136,8 +6179,34 @@ def run_pr_loop(
                     )
                     next_unresolved_item_number += 1
                     must_fix_items = [item for item in unresolved_items if item.status in {"blocking", "same-pr"}]
-                pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
-                if not must_fix_items and is_wholly_infrastructure_blocked(pr_checks):
+
+                # Re-evaluate mergeability before CI checks / merge (#606): reviews
+                # can take a while, so the branch may have gone conflicted since
+                # the round-start probe. A confirmed conflict here skips the checks
+                # fetch entirely and blocks the merge branch below via must_fix_items.
+                merge_gate_mergeability = get_pr_mergeability(runner, config=config, pr_number=pr_number)
+                latest_mergeability = merge_gate_mergeability
+                unresolved_items = _reconcile_merge_conflict_item(
+                    unresolved_items,
+                    mergeability=merge_gate_mergeability,
+                    source_round=round_number,
+                    current_head_sha=pr_metadata.head_sha,
+                )
+                must_fix_items = [item for item in unresolved_items if item.status in {"blocking", "same-pr"}]
+                merge_gate_conflict_pending = any(
+                    item.item_id == MERGE_CONFLICT_ITEM_ID for item in unresolved_items
+                )
+                if merge_gate_conflict_pending:
+                    log(
+                        config,
+                        f"Round {round_number}: PR #{pr_number} became conflicted with "
+                        f"{merge_gate_mergeability.base_branch or config.base or 'the base branch'} "
+                        "before merge; skipping CI checks and merge this round",
+                    )
+                    pr_checks = None
+                else:
+                    pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
+                if pr_checks is not None and not must_fix_items and is_wholly_infrastructure_blocked(pr_checks):
                     # Every remaining blocking/pending signal is external GitHub
                     # Actions infrastructure (a queued check that never started a
                     # job, or one cancelled before execution because a hosted
@@ -6291,14 +6360,77 @@ def run_pr_loop(
                                 "runners recover."
                             )
                             return 0
-                        merge_pr(runner, config, pr_number)
-                    print(f"PR #{pr_number} approved by {format_agent_list(configured_reviewers)}.")
-                    return 0
+                        if wait_outcome.status == "merge_conflict":
+                            assert wait_outcome.mergeability is not None
+                            latest_mergeability = wait_outcome.mergeability
+                            unresolved_items = _reconcile_merge_conflict_item(
+                                unresolved_items,
+                                mergeability=wait_outcome.mergeability,
+                                source_round=round_number,
+                                current_head_sha=pr_metadata.head_sha,
+                            )
+                            must_fix_items = [
+                                item for item in unresolved_items if item.status in {"blocking", "same-pr"}
+                            ]
+                            log(
+                                config,
+                                f"Round {round_number}: PR #{pr_number} became conflicted with "
+                                f"{wait_outcome.mergeability.base_branch or config.base or 'the base branch'} "
+                                "during the CI wait; no merge attempted",
+                            )
+                        else:
+                            merge_pr(runner, config, pr_number)
+                    if not must_fix_items:
+                        print(f"PR #{pr_number} approved by {format_agent_list(configured_reviewers)}.")
+                        return 0
             if round_number == config.max_rounds:
                 raise AgentLoopError(
                     f"One or more reviewers still reported blocking issues after round {round_number}; "
                     "human review required."
                 )
+
+            has_merge_conflict_item = any(
+                item.item_id == MERGE_CONFLICT_ITEM_ID for item in unresolved_items
+            )
+
+            if has_merge_conflict_item:
+                if (
+                    conflict_dispatch_head_sha is not None
+                    and conflict_dispatch_head_sha == (pr_metadata.head_sha or "")
+                ):
+                    # The previous conflict-resolution round was dispatched from
+                    # this exact head and the head still has not moved: another
+                    # coder round would just repeat the same conflict. Stop
+                    # cleanly and resumably instead of looping (#606).
+                    conflict_base = (
+                        (latest_mergeability.base_branch if latest_mergeability else None)
+                        or pr_metadata.base_branch
+                        or config.base
+                        or "its base branch"
+                    )
+                    post_pr_comment(
+                        runner,
+                        config=config,
+                        pr_number=pr_number,
+                        body=(
+                            f"PR #{pr_number} is still conflicted with `{conflict_base}` and the head "
+                            f"did not change after the last conflict-resolution round. Push a resolved "
+                            "head to continue, then rerun the same command.\n\n"
+                            f"<!-- AGENT_STATE: blocking -->\n-- Orchestrator"
+                        ),
+                    )
+                    log(
+                        config,
+                        f"Round {round_number}: PR #{pr_number} is still conflicted with "
+                        f"`{conflict_base}` and the head did not advance; stopping cleanly",
+                    )
+                    print(
+                        f"PR #{pr_number} is still conflicted with `{conflict_base}` and the head "
+                        "did not change after the last conflict-resolution round. Push a resolved "
+                        "head to continue, then rerun the same command."
+                    )
+                    return 0
+                conflict_dispatch_head_sha = pr_metadata.head_sha or ""
 
             # Structural backstop (#602): even when the reviewer downgrade above
             # correctly declines (a mixed item, a genuine defect alongside a
@@ -6307,18 +6439,57 @@ def run_pr_loop(
             # freshest check board before starting the round and, when it is
             # wholly infrastructure-blocked, prepend the stall context so the
             # coder fixes only the genuine items and returns a bounded terminal
-            # response instead of chasing the stalled check.
-            if pr_checks is None:
+            # response instead of chasing the stalled check. Skipped entirely
+            # while conflicted (#606): a conflicted branch must not generate any
+            # check-run, commit-status, or branch-protection API calls.
+            if pr_checks is None and not has_merge_conflict_item:
                 pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
             stall_context = (
                 _coder_infrastructure_stall_notice(pr_checks.infrastructure_stalls)
-                if is_wholly_infrastructure_blocked(pr_checks)
+                if pr_checks is not None and is_wholly_infrastructure_blocked(pr_checks)
                 else ""
             )
 
             same_pr_items = [item for item in unresolved_items if item.status == "same-pr"]
             blocking_items = [item for item in unresolved_items if item.status == "blocking"]
-            if same_pr_items and not blocking_items:
+            if has_merge_conflict_item:
+                other_items = [
+                    item for item in unresolved_items if item.item_id != MERGE_CONFLICT_ITEM_ID
+                ]
+                combined_review = _format_unresolved_items_for_coder(other_items)
+                coder_human_requirements_context = render_coder_human_requirements_prompt_context(
+                    human_requirements
+                )
+                resolved_base_branch = (
+                    (latest_mergeability.base_branch if latest_mergeability else None)
+                    or pr_metadata.base_branch
+                    or config.base
+                    or "the base branch"
+                )
+                resolved_head_sha = (
+                    (latest_mergeability.head_sha if latest_mergeability else None) or pr_metadata.head_sha
+                )
+                merge_state_detail = (
+                    f"mergeable={latest_mergeability.mergeable_raw or 'unknown'}, "
+                    f"mergeStateStatus={latest_mergeability.merge_state_raw or 'unknown'}"
+                    if latest_mergeability is not None
+                    else "mergeable=unknown, mergeStateStatus=unknown"
+                )
+                followup_prompt = build_merge_conflict_prompt(
+                    pr_number,
+                    round_number,
+                    combined_review,
+                    config,
+                    memory,
+                    issue_context=issue_context,
+                    human_requirements=human_requirements,
+                    base_branch=resolved_base_branch,
+                    head_sha=resolved_head_sha,
+                    merge_state_detail=merge_state_detail,
+                    human_requirements_context=coder_human_requirements_context,
+                )
+                log(config, f"Round {round_number}: {coder_name} resolving merge conflict")
+            elif same_pr_items and not blocking_items:
                 combined_review = stall_context + _format_same_pr_unresolved_items(same_pr_items)
                 coder_human_requirements_context = render_coder_human_requirements_prompt_context(
                     human_requirements
@@ -6333,6 +6504,7 @@ def run_pr_loop(
                     human_requirements=human_requirements,
                     human_requirements_context=coder_human_requirements_context,
                 )
+                log(config, f"Round {round_number}: {coder_name} addressing reviewer feedback")
             else:
                 combined_review = stall_context + _format_unresolved_items_for_coder(unresolved_items)
                 coder_human_requirements_context = render_coder_human_requirements_prompt_context(
@@ -6348,11 +6520,11 @@ def run_pr_loop(
                     human_requirements=human_requirements,
                     human_requirements_context=coder_human_requirements_context,
                 )
-            log(config, f"Round {round_number}: {coder_name} addressing reviewer feedback")
+                log(config, f"Round {round_number}: {coder_name} addressing reviewer feedback")
             repair_unresolved_item_ids = tuple(
                 item.item_id
                 for item in unresolved_items
-                if item.item_id != HUMAN_REQUIREMENTS_ACK_ITEM_ID
+                if item.item_id not in {HUMAN_REQUIREMENTS_ACK_ITEM_ID, MERGE_CONFLICT_ITEM_ID}
             )
             coder_response = _run_validated_agent(
                 runner,

@@ -34,7 +34,7 @@ from .protocol import (
     UnresolvedReviewItem,
     review_freeform_summary_text,
 )
-from .unresolved_items import HUMAN_REQUIREMENTS_ACK_ITEM_ID
+from .unresolved_items import HUMAN_REQUIREMENTS_ACK_ITEM_ID, MERGE_CONFLICT_ITEM_ID
 
 if TYPE_CHECKING:
     from .agents.base import AgentName
@@ -125,6 +125,8 @@ def _format_unresolved_item_label(
     status = _item_label_status(item)
     if item.item_id == HUMAN_REQUIREMENTS_ACK_ITEM_ID:
         return f"Human-requirements acknowledgement item, round {item.source_round}: {summary}"
+    if item.item_id == MERGE_CONFLICT_ITEM_ID:
+        return f"Merge conflict item, round {item.source_round}: {summary}"
     phrases = {
         "blocking": "Blocking issue",
         "same-pr": "Same-PR follow-up",

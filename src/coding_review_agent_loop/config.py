@@ -160,6 +160,11 @@ class AgentLoopConfig:
     # treated as an external-CI-infrastructure stall rather than a normal
     # wait (#602), e.g. a GitHub-hosted-runner capacity outage.
     ci_queued_grace_seconds: int = 1200
+    # Bounded re-poll for a GitHub mergeability computation still in progress
+    # (`mergeable: "UNKNOWN"`), and the interval between attempts. Distinct
+    # from a confirmed conflict, which is never re-polled here (#606).
+    mergeability_poll_attempts: int = 3
+    mergeability_poll_interval_seconds: int = 5
 
     def __post_init__(self) -> None:
         if isinstance(self.reviewer, str):
@@ -832,6 +837,10 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
         raise AgentLoopError("--ci-poll-interval-seconds must be greater than zero.")
     if getattr(args, "ci_queued_grace_seconds", 1200) <= 0:
         raise AgentLoopError("--ci-queued-grace-seconds must be greater than zero.")
+    if getattr(args, "mergeability_poll_attempts", 3) <= 0:
+        raise AgentLoopError("--mergeability-poll-attempts must be greater than zero.")
+    if getattr(args, "mergeability_poll_interval_seconds", 5) <= 0:
+        raise AgentLoopError("--mergeability-poll-interval-seconds must be greater than zero.")
     if args.progress_interval_seconds <= 0:
         raise AgentLoopError("--progress-interval-seconds must be greater than zero.")
     if args.agent_max_retries < 0:
@@ -914,6 +923,8 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
         ci_timeout_seconds=args.ci_timeout_seconds,
         ci_poll_interval_seconds=args.ci_poll_interval_seconds,
         ci_queued_grace_seconds=getattr(args, "ci_queued_grace_seconds", 1200),
+        mergeability_poll_attempts=getattr(args, "mergeability_poll_attempts", 3),
+        mergeability_poll_interval_seconds=getattr(args, "mergeability_poll_interval_seconds", 5),
         quiet=args.quiet,
         log_dir=(primary_dir / args.log_dir if not args.log_dir.is_absolute() else args.log_dir),
         progress_interval_seconds=args.progress_interval_seconds,

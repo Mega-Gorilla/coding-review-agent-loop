@@ -118,6 +118,50 @@ def test_coder_prompts_include_assigned_workdir_rule(tmp_path):
         assert "`pwd` and `git status --branch --short`" in prompt
 
 
+def test_build_merge_conflict_prompt_content(tmp_path):
+    config = make_config(tmp_path)
+
+    prompt = build_merge_conflict_prompt(
+        77,
+        2,
+        "Codex unresolved blocking item [item-1] from round 1:\n- Fix the null check.",
+        config,
+        base_branch="release-2",
+        head_sha="deadbeef",
+        merge_state_detail="mergeable=CONFLICTING, mergeStateStatus=DIRTY",
+    )
+
+    assert "merge conflict" in prompt
+    assert "`release-2`" in prompt
+    assert "mergeable=CONFLICTING, mergeStateStatus=DIRTY" in prompt
+    assert "`deadbeef`" in prompt
+    assert "merge `origin/release-2`" in prompt
+    assert "push to the same PR branch" in prompt
+    assert "Do not open a new PR" in prompt
+    assert "Do not check CI status or wait for CI runs" in prompt
+    assert "run relevant tests" in prompt
+    assert "[item-1]" in prompt
+    assert '"kind": "coder_followup"' in prompt
+    assert "This is round 2." in prompt
+    assert "<!-- AGENT_STATE: blocking -->" in prompt
+
+
+def test_build_merge_conflict_prompt_head_sha_optional(tmp_path):
+    config = make_config(tmp_path)
+
+    prompt = build_merge_conflict_prompt(
+        77,
+        1,
+        "",
+        config,
+        base_branch="main",
+        head_sha=None,
+        merge_state_detail="mergeable=unknown, mergeStateStatus=unknown",
+    )
+
+    assert "the current PR head" in prompt
+
+
 def test_coder_test_reporting_guidance_forbids_background_completion_work(tmp_path):
     config = make_config(tmp_path)
 

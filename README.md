@@ -615,6 +615,15 @@ instead of a coder round waiting on it. See
 [External CI infrastructure stalls](docs/local_agent_loop.md#external-ci-infrastructure-stalls)
 for details.
 
+A confirmed GitHub merge conflict (`mergeStateStatus: DIRTY` or `mergeable:
+CONFLICTING`) is checked before every reviewer round and again before CI
+checks/auto-merge, and routes the PR to the coder to resolve instead of
+waiting on CI or attempting a merge; `--mergeability-poll-attempts` (default
+3) and `--mergeability-poll-interval-seconds` (default 5) bound how long a
+still-computing (`UNKNOWN`) GitHub mergeability result is re-checked before
+being treated as unresolved. See
+[Merge conflicts](docs/local_agent_loop.md#merge-conflicts) for details.
+
 By default Claude is the coder and Codex is the reviewer. Reverse that with:
 
 ```bash
