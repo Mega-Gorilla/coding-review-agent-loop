@@ -1320,8 +1320,14 @@ class CiWatchOutcome:
     """Terminal result from the opt-in full-board post-approval watcher."""
 
     status: Literal[
-        "passed", "no_checks", "failed", "timeout", "infrastructure_stall",
-        "merge_conflict", "head_changed", "dry_run",
+        "passed",
+        "no_checks",
+        "failed",
+        "timeout",
+        "infrastructure_stall",
+        "merge_conflict",
+        "head_changed",
+        "dry_run",
     ]
     pr_checks: PullRequestChecks | None = None
     failed_checks: tuple[PullRequestCheck, ...] = ()

@@ -14,10 +14,13 @@ from coding_review_agent_loop.comment_rendering import (
 from coding_review_agent_loop.errors import QuotaResetExceededError
 from coding_review_agent_loop.followups import MAX_APPROVED_FOLLOWUP_ISSUES, reconcile_approved_followups
 from coding_review_agent_loop.github import (
+    CiWaitOutcome,
     CiWatchOutcome,
     HumanReviewRequirement,
     IssueComment,
     IssueContext,
+    PullRequestCheck,
+    PullRequestChecks,
     PullRequestMetadata,
     PullRequestReviewContext,
     get_pr_checks,
@@ -880,9 +883,33 @@ def test_pr_loop_routes_failing_github_checks_through_coder_followup(tmp_path, m
     assert "Do not claim global test success unless GitHub PR checks are green." in followup_prompt
 
 
-def test_watch_mode_success_skips_legacy_wait_for_ci(tmp_path, monkeypatch):
+def _watch_check_board(
+    state,
+    *,
+    failing=(),
+    pending=(),
+    missing_required=(),
+    errors=(),
+):
+    return PullRequestChecks(
+        state=state,
+        required_checks=("test",),
+        passing=(),
+        pending=tuple(pending),
+        failing=tuple(failing),
+        missing_required=tuple(missing_required),
+        branch_protection_status="configured",
+        check_query_status="partial" if errors else "ok",
+        check_query_errors=tuple(errors),
+    )
+
+
+@pytest.mark.parametrize("auto_merge", [False, True])
+def test_watch_mode_success_skips_legacy_wait_for_ci(
+    tmp_path, monkeypatch, auto_merge
+):
     runner = FakeRunner(codex_outputs=[structured_pr_review(state="approved", summary="Approved.")])
-    config = make_config(tmp_path, watch_pending_ci=True, auto_merge=False)
+    config = make_config(tmp_path, watch_pending_ci=True, auto_merge=auto_merge)
     monkeypatch.setattr(
         orchestrator,
         "watch_pr_checks",
@@ -895,6 +922,338 @@ def test_watch_mode_success_skips_legacy_wait_for_ci(tmp_path, monkeypatch):
     )
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
     assert any("watching GitHub checks" in comment for comment in runner.comments)
+    merge_commands = [
+        cmd for cmd, _cwd in runner.commands if cmd[:3] == ["gh", "pr", "merge"]
+    ]
+    assert bool(merge_commands) is auto_merge
+
+
+def test_watch_failure_on_final_round_dispatches_coder_with_check_diagnostic(
+    tmp_path, monkeypatch
+):
+    failure_url = "https://github.com/OWNER/REPO/actions/runs/555"
+    failed_check = PullRequestCheck(
+        name="test",
+        kind="check_run",
+        status="failure",
+        url=failure_url,
+    )
+    outcomes = iter(
+        [
+            CiWatchOutcome(
+                status="failed",
+                pr_checks=_watch_check_board("failing", failing=(failed_check,)),
+                failed_checks=(failed_check,),
+                attempts_used=1,
+            ),
+            CiWatchOutcome(status="passed", attempts_used=1),
+        ]
+    )
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(state="approved", summary="Approved."),
+            structured_pr_review(
+                state="approved",
+                summary="Approved after CI fix.",
+                prior_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "resolved"}
+                ],
+            ),
+        ],
+        claude_outputs=[
+            structured_coder_followup(
+                state="blocking",
+                summary="Fixed the CI failure.",
+                addressed_items=["item-1"],
+            )
+        ],
+    )
+    config = make_config(tmp_path, watch_pending_ci=True, max_rounds=1)
+    monkeypatch.setattr(
+        orchestrator, "watch_pr_checks", lambda *args, **kwargs: next(outcomes)
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    coder_prompts = [cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]
+    assert len(coder_prompts) == 1
+    assert "GitHub PR checks unresolved blocking item [item-1] from round 1" in coder_prompts[0]
+    assert "Failing checks: test (failure)" in coder_prompts[0]
+    assert failure_url in coder_prompts[0]
+    assert any(
+        comment.startswith("GitHub PR checks are failing for PR #77.")
+        and failure_url in comment
+        for comment in runner.comments
+    )
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]) == 2
+
+
+def test_watch_head_change_re_reviews_without_coder_and_preserves_budget(
+    tmp_path, monkeypatch
+):
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(state="approved", summary="Old head approved."),
+            structured_pr_review(state="approved", summary="New head approved."),
+        ]
+    )
+    config = make_config(
+        tmp_path,
+        watch_pending_ci=True,
+        max_rounds=1,
+        ci_timeout_seconds=60,
+        ci_poll_interval_seconds=10,
+    )
+    watch_calls = []
+
+    def watch(*args, **kwargs):
+        watch_calls.append((kwargs["deadline"], kwargs["attempts"]))
+        if len(watch_calls) == 1:
+            runner.pr_payload["headRefOid"] = "new-head"
+            return CiWatchOutcome(
+                status="head_changed", head_sha="new-head", attempts_used=2
+            )
+        return CiWatchOutcome(status="passed", head_sha="new-head", attempts_used=1)
+
+    monkeypatch.setattr(orchestrator, "watch_pr_checks", watch)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]) == 2
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+    assert watch_calls[0][0] == watch_calls[1][0]
+    assert [attempts for _deadline, attempts in watch_calls] == [6, 4]
+
+
+def test_watch_combined_failure_and_head_change_can_use_both_extensions(
+    tmp_path, monkeypatch
+):
+    failed_check = PullRequestCheck(
+        name="test", kind="check_run", status="failure", url="https://example.test/run"
+    )
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(state="approved", summary="Round one approved."),
+            structured_pr_review(
+                state="approved",
+                summary="Round two approved.",
+                prior_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "resolved"}
+                ],
+            ),
+            structured_pr_review(state="approved", summary="Round three approved."),
+        ],
+        claude_outputs=[
+            structured_coder_followup(
+                state="blocking",
+                summary="Fixed CI.",
+                addressed_items=["item-1"],
+            )
+        ],
+    )
+    config = make_config(tmp_path, watch_pending_ci=True, max_rounds=1)
+    call_count = 0
+
+    def watch(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return CiWatchOutcome(
+                status="failed",
+                pr_checks=_watch_check_board("failing", failing=(failed_check,)),
+                failed_checks=(failed_check,),
+                attempts_used=1,
+            )
+        if call_count == 2:
+            runner.pr_payload["headRefOid"] = "newer-head"
+            return CiWatchOutcome(
+                status="head_changed", head_sha="newer-head", attempts_used=1
+            )
+        return CiWatchOutcome(status="passed", head_sha="newer-head", attempts_used=1)
+
+    monkeypatch.setattr(orchestrator, "watch_pr_checks", watch)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+    assert call_count == 3
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]) == 3
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]) == 1
+
+
+@pytest.mark.parametrize(
+    ("invocation_argv", "expected_rerun", "expected_note"),
+    [
+        (
+            ("agent-loop", "pr", "77", "--claude-arg", "token value"),
+            "agent-loop pr 77 --claude-arg 'token value'",
+            "",
+        ),
+        (
+            (),
+            "agent-loop pr 77 --watch-pending-ci",
+            "deterministic fallback; original invocation unavailable",
+        ),
+    ],
+)
+def test_watch_timeout_renders_local_rerun_without_leaking_it_to_comment(
+    tmp_path, monkeypatch, capsys, invocation_argv, expected_rerun, expected_note
+):
+    pending_check = PullRequestCheck(
+        name="test", kind="check_run", status="in_progress"
+    )
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="Approved.")]
+    )
+    config = make_config(
+        tmp_path,
+        watch_pending_ci=True,
+        invocation_argv=invocation_argv,
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "watch_pr_checks",
+        lambda *args, **kwargs: CiWatchOutcome(
+            status="timeout",
+            pr_checks=_watch_check_board(
+                "pending",
+                pending=(pending_check,),
+                errors=("transient check-runs API failure",),
+            ),
+            attempts_used=1,
+        ),
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    output = capsys.readouterr().out
+    assert expected_rerun in output
+    assert expected_note in output
+    assert "Pending checks: test (in_progress)" in output
+    assert all(expected_rerun not in comment for comment in runner.comments)
+    assert all("token value" not in comment for comment in runner.comments)
+
+
+def test_watch_dry_run_previews_without_poll_sleep_coder_or_merge(tmp_path, capsys):
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="Approved.")]
+    )
+    config = make_config(
+        tmp_path,
+        watch_pending_ci=True,
+        auto_merge=True,
+        dry_run=True,
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    commands = [cmd for cmd, _cwd in runner.commands]
+    assert not any(cmd[:1] == ["sleep"] for cmd in commands)
+    assert not any(cmd[:1] == ["claude"] for cmd in commands)
+    assert not any(cmd[:3] == ["gh", "pr", "merge"] for cmd in commands)
+    assert "dry-run preview did not perform live CI watching" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("auto_merge", [False, True])
+def test_disabled_watch_mode_preserves_legacy_pending_and_auto_merge_paths(
+    tmp_path, monkeypatch, auto_merge
+):
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="Approved.")],
+        pr_check_runs_payload={
+            "check_runs": [
+                {"name": "test", "status": "in_progress", "conclusion": None}
+            ]
+        },
+    )
+    config = make_config(tmp_path, watch_pending_ci=False, auto_merge=auto_merge)
+    monkeypatch.setattr(
+        orchestrator,
+        "watch_pr_checks",
+        lambda *args, **kwargs: pytest.fail("disabled watch mode must not invoke watcher"),
+    )
+    wait_calls = []
+
+    def legacy_wait(*args, **kwargs):
+        wait_calls.append((args, kwargs))
+        return CiWaitOutcome(status="passed")
+
+    monkeypatch.setattr(orchestrator, "wait_for_ci", legacy_wait)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert bool(wait_calls) is auto_merge
+    merge_commands = [
+        cmd for cmd, _cwd in runner.commands if cmd[:3] == ["gh", "pr", "merge"]
+    ]
+    assert bool(merge_commands) is auto_merge
+    if not auto_merge:
+        assert any("checks are still pending" in comment for comment in runner.comments)
+
+
+def test_watch_publishes_approved_followups_only_after_terminal_success(
+    tmp_path, monkeypatch
+):
+    failed_check = PullRequestCheck(
+        name="test", kind="check_run", status="failure", url="https://example.test/run"
+    )
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(
+                state="approved",
+                summary="Approved with follow-up.",
+                future_followups=["Document the optional tuning knob."],
+            ),
+            structured_pr_review(
+                state="approved",
+                summary="Approved after CI fix.",
+                future_followups=["Document the optional tuning knob."],
+                prior_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "future"},
+                    {"item_id": "item-2", "disposition": "resolved"}
+                ],
+            ),
+        ],
+        claude_outputs=[
+            structured_coder_followup(
+                state="blocking",
+                summary="Fixed CI.",
+                addressed_items=["item-2"],
+            )
+        ],
+    )
+    config = make_config(
+        tmp_path,
+        watch_pending_ci=True,
+        max_rounds=1,
+        approved_followups="summarize",
+    )
+    call_count = 0
+
+    def watch(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        assert not any(
+            comment.startswith("Approved-review future follow-ups")
+            for comment in runner.comments
+        )
+        if call_count == 1:
+            return CiWatchOutcome(
+                status="failed",
+                pr_checks=_watch_check_board("failing", failing=(failed_check,)),
+                failed_checks=(failed_check,),
+                attempts_used=1,
+            )
+        return CiWatchOutcome(status="passed", attempts_used=1)
+
+    monkeypatch.setattr(orchestrator, "watch_pr_checks", watch)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+    followup_comments = [
+        comment
+        for comment in runner.comments
+        if comment.startswith("Approved-review future follow-ups")
+    ]
+    assert len(followup_comments) == 1
+    assert "Document the optional tuning knob." in followup_comments[0]
 
 
 def test_pr_loop_refreshes_checks_between_reviewers_and_before_coder(tmp_path, monkeypatch):

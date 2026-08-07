@@ -5297,7 +5297,12 @@ def run_pr_loop(
         # One extra slot is only activated by a watcher-discovered failure on
         # the configured final round; ordinary review failures retain the cap.
         allowed_rounds = config.max_rounds
-        for round_number in range(start_round_number, config.max_rounds + 2):
+        # The two independent one-shot watcher allowances below can extend the
+        # effective ceiling by two rounds in one invocation. Keep the static
+        # range large enough to reach both; ``allowed_rounds`` remains the
+        # authoritative guard and prevents either slot from being used unless
+        # its corresponding watcher transition grants it.
+        for round_number in range(start_round_number, config.max_rounds + 3):
             if round_number > allowed_rounds:
                 raise AgentLoopError(
                     f"One or more reviewers still reported blocking issues after round {allowed_rounds}; human review required."
@@ -6298,7 +6303,14 @@ def run_pr_loop(
                         print(f"PR #{pr_number} approval found; dry-run preview did not perform live CI watching.")
                         return 0
                     if watch_outcome.status in {"passed", "no_checks"}:
-                        _publish_approved_followups(runner, config=config, pr_number=pr_number, head_sha=pr_metadata.head_sha, pr_comments=pr_comments, followups=future_followups)
+                        _publish_approved_followups(
+                            runner,
+                            config=config,
+                            pr_number=pr_number,
+                            head_sha=pr_metadata.head_sha,
+                            pr_comments=pr_comments,
+                            followups=future_followups,
+                        )
                         run_optional_tests(runner, config)
                         if config.auto_merge:
                             merge_pr(runner, config, pr_number)
@@ -6354,8 +6366,16 @@ def run_pr_loop(
                             pr_number=pr_number,
                             body=_pending_ci_stop_message(pr_number, "pending", details),
                         )
-                        rerun = shlex.join(config.invocation_argv) if config.invocation_argv else f"agent-loop pr {pr_number} --watch-pending-ci"
-                        note = "" if config.invocation_argv else " (deterministic fallback; original invocation unavailable)"
+                        rerun = (
+                            shlex.join(config.invocation_argv)
+                            if config.invocation_argv
+                            else f"agent-loop pr {pr_number} --watch-pending-ci"
+                        )
+                        note = (
+                            ""
+                            if config.invocation_argv
+                            else " (deterministic fallback; original invocation unavailable)"
+                        )
                         print(
                             f"PR #{pr_number} CI watch timed out: {'; '.join(details)}. "
                             f"Rerun: {rerun}{note}"
@@ -6375,7 +6395,12 @@ def run_pr_loop(
                         )
                         continue
                     elif watch_outcome.status == "merge_conflict":
-                        unresolved_items = _reconcile_merge_conflict_item(unresolved_items, mergeability=watch_outcome.mergeability, source_round=round_number, current_head_sha=pr_metadata.head_sha)
+                        unresolved_items = _reconcile_merge_conflict_item(
+                            unresolved_items,
+                            mergeability=watch_outcome.mergeability,
+                            source_round=round_number,
+                            current_head_sha=pr_metadata.head_sha,
+                        )
                     elif watch_outcome.status == "failed":
                         details = (
                             _pr_check_details(watch_outcome.pr_checks)
