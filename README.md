@@ -117,8 +117,10 @@ agent-loop pr 123 --repo OWNER/REPO --reviewer antigravity
 agent-loop task "Fix the flaky test" --repo OWNER/REPO --coder antigravity --reviewer codex
 ```
 
-Pick the model with `--antigravity-model "<name>"` (as listed by `agy models`;
-default `Gemini 3.1 Pro (High)`). When a `gemini` invocation fails with an
+Pick the model with `--antigravity-model "<name>"` (as listed by `agy models`),
+or supply an ordered fallback chain with `--antigravity-models "<name>" ["<name>" ...]`
+(tried in order on quota exhaustion; default `Gemini 3.6 Flash (High)` →
+`Gemini 3.5 Flash (High)` → `Gemini 3.1 Pro (High)`). When a `gemini` invocation fails with an
 auth/quota error near or after the cutoff, the tool surfaces this migration
 guidance. Notes: Antigravity turns are single-shot (no cross-round session
 resume) and report estimated token usage (`agy` emits no token counts).

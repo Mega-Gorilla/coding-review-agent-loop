@@ -15,6 +15,7 @@ from .agents.registry import (
 )
 from .config import (
     DEFAULT_ANTIGRAVITY_PRINT_TIMEOUT_SECONDS,
+    DEFAULT_MAX_ROUNDS,
     DEFAULT_REPAIR_MODELS,
     DEFAULT_ANTIGRAVITY_QUOTA_SIGNATURES,
     AgentLoopConfig,
@@ -129,7 +130,12 @@ def build_parser() -> argparse.ArgumentParser:
             ),
         )
         subparser.add_argument("--allow-shared-dir", action="store_true")
-        subparser.add_argument("--max-rounds", type=int, default=5)
+        subparser.add_argument(
+            "--max-rounds",
+            type=int,
+            default=DEFAULT_MAX_ROUNDS,
+            help=f"Maximum review/revision rounds (default: {DEFAULT_MAX_ROUNDS}).",
+        )
         subparser.add_argument("--auto-merge", action="store_true")
         subparser.add_argument("--dry-run", action="store_true")
         subparser.add_argument(

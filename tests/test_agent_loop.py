@@ -1446,6 +1446,25 @@ def test_omitted_cli_base_is_preserved_for_runtime_resolution(tmp_path):
     assert config_from_args(args, FakeRunner()).base is None
 
 
+def test_max_rounds_cli_default_is_shared_constant(tmp_path):
+    from coding_review_agent_loop.config import DEFAULT_MAX_ROUNDS
+
+    parser = build_parser()
+    args = parser.parse_args([
+        "pr",
+        "77",
+        "--repo",
+        "OWNER/REPO",
+        "--claude-dir",
+        str(tmp_path / "claude"),
+        "--codex-dir",
+        str(tmp_path / "codex"),
+    ])
+
+    assert args.max_rounds == DEFAULT_MAX_ROUNDS == 10
+    assert config_from_args(args, FakeRunner()).max_rounds == DEFAULT_MAX_ROUNDS
+
+
 def test_discuss_max_rounds_cli_is_discuss_only():
     parser = build_parser()
     args = parser.parse_args([
@@ -3702,7 +3721,7 @@ def test_agent_signature_uses_configured_model(tmp_path):
     config = make_config(tmp_path, codex_model="gpt-5.2-codex", codex_reasoning_effort="high")
     assert agent_signature("codex", config) == "OpenAI Codex: gpt-5.2-codex (high)"
     # antigravity model is always declared (effort already embedded).
-    assert agent_signature("antigravity", config) == "Google Antigravity: Gemini 3.5 Flash (High)"
+    assert agent_signature("antigravity", config) == "Google Antigravity: Gemini 3.6 Flash (High)"
     # gemini with no declared model falls back to the generic signature.
     assert agent_signature("gemini", make_config(tmp_path)) == "Google Gemini"
 
