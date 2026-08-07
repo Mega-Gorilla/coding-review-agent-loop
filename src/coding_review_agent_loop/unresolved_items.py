@@ -267,13 +267,22 @@ def _reconcile_human_requirements_ack_item(
     return _clear_human_requirements_ack_item(unresolved_items)
 
 
+_CONFIRMED_CONFLICT_HEAD_NOTE_PREFIX = "confirmed-head:"
+
+
 def _upsert_merge_conflict_item(
     unresolved_items: Sequence[UnresolvedReviewItem],
     *,
     source_round: int,
     text: str,
+    confirmed_head_sha: str | None,
 ) -> list[UnresolvedReviewItem]:
     retained = [item for item in unresolved_items if item.item_id != MERGE_CONFLICT_ITEM_ID]
+    notes = (
+        (f"{_CONFIRMED_CONFLICT_HEAD_NOTE_PREFIX}{confirmed_head_sha}",)
+        if confirmed_head_sha
+        else ()
+    )
     retained.append(
         UnresolvedReviewItem(
             item_id=MERGE_CONFLICT_ITEM_ID,
@@ -282,6 +291,7 @@ def _upsert_merge_conflict_item(
             text=text,
             status="blocking",
             source_status="blocking",
+            notes=notes,
         )
     )
     return retained
@@ -293,31 +303,62 @@ def _clear_merge_conflict_item(
     return [item for item in unresolved_items if item.item_id != MERGE_CONFLICT_ITEM_ID]
 
 
+def _confirmed_conflict_head(item: UnresolvedReviewItem) -> str | None:
+    for note in item.notes:
+        if note.startswith(_CONFIRMED_CONFLICT_HEAD_NOTE_PREFIX):
+            return note[len(_CONFIRMED_CONFLICT_HEAD_NOTE_PREFIX):]
+    return None
+
+
 def _reconcile_merge_conflict_item(
     unresolved_items: Sequence[UnresolvedReviewItem],
     *,
     mergeability: PullRequestMergeability,
     source_round: int,
+    current_head_sha: str | None,
 ) -> list[UnresolvedReviewItem]:
     """Keep the synthetic conflict item in sync with the latest GitHub probe.
 
-    A confirmed `conflicted` state (re-)adds the blocking item; `mergeable`
-    or `unknown` clears it -- `unknown` is deliberately treated the same as
-    `mergeable` here so a transient GitHub mergeability computation window
-    does not leave a stale blocking item in the ledger (#606).
+    A confirmed `conflicted` state (re-)adds the blocking item, recording the
+    head it was confirmed against. A positively `mergeable` result clears it.
+    `unknown` clears it too -- but only when there was no previously
+    confirmed conflict, or the head has since advanced -- so a transient
+    GitHub mergeability computation window never creates a spurious blocker
+    (#606). If a conflict was already confirmed and `current_head_sha` is
+    unchanged, a later `unknown` (a probe hiccup, not new information) must
+    not silently drop the blocker: doing so would let reviewers, checks, or
+    a merge proceed against a branch GitHub last told us is still conflicted.
     """
-    if mergeability.state != "conflicted":
+    if mergeability.state == "conflicted":
+        base = mergeability.base_branch or "the base branch"
+        head = mergeability.head_sha or current_head_sha or "the current head"
+        text = (
+            f"PR branch has a merge conflict with `{base}` (GitHub reports "
+            f"mergeable={mergeability.mergeable_raw or 'unknown'}, "
+            f"mergeStateStatus={mergeability.merge_state_raw or 'unknown'}) at head `{head}`. "
+            "Merge or rebase onto the current base and resolve the conflict before this "
+            "PR can be reviewed or merged."
+        )
+        return _upsert_merge_conflict_item(
+            unresolved_items,
+            source_round=source_round,
+            text=text,
+            confirmed_head_sha=mergeability.head_sha or current_head_sha,
+        )
+    if mergeability.state == "mergeable":
         return _clear_merge_conflict_item(unresolved_items)
-    base = mergeability.base_branch or "the base branch"
-    head = mergeability.head_sha or "the current head"
-    text = (
-        f"PR branch has a merge conflict with `{base}` (GitHub reports "
-        f"mergeable={mergeability.mergeable_raw or 'unknown'}, "
-        f"mergeStateStatus={mergeability.merge_state_raw or 'unknown'}) at head `{head}`. "
-        "Merge or rebase onto the current base and resolve the conflict before this "
-        "PR can be reviewed or merged."
+
+    # mergeability.state == "unknown"
+    existing = next(
+        (item for item in unresolved_items if item.item_id == MERGE_CONFLICT_ITEM_ID), None
     )
-    return _upsert_merge_conflict_item(unresolved_items, source_round=source_round, text=text)
+    if existing is None:
+        return list(unresolved_items)
+    if _confirmed_conflict_head(existing) == current_head_sha:
+        # Same head the conflict was confirmed against; preserve the blocker
+        # until GitHub positively reports `mergeable` or the head advances.
+        return list(unresolved_items)
+    return _clear_merge_conflict_item(unresolved_items)
 
 
 def _validate_structured_coder_followup_items(

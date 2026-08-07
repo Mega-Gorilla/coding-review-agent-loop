@@ -255,13 +255,18 @@ def test_reconcile_adds_blocking_item_when_conflicted():
         base_branch="main",
     )
 
-    items = _reconcile_merge_conflict_item([], mergeability=mergeability, source_round=1)
+    items = _reconcile_merge_conflict_item(
+        [], mergeability=mergeability, source_round=1, current_head_sha="abc123"
+    )
 
     assert len(items) == 1
     assert items[0].item_id == MERGE_CONFLICT_ITEM_ID
     assert items[0].status == "blocking"
     assert "main" in items[0].text
     assert "abc123" in items[0].text
+    # The confirmed head is recorded so a later transient `unknown` probe on
+    # the same head can be told apart from a genuinely resolved conflict.
+    assert any("abc123" in note for note in items[0].notes)
 
 
 def test_reconcile_clears_item_when_mergeable():
@@ -273,33 +278,90 @@ def test_reconcile_clears_item_when_mergeable():
             text="stale conflict text",
             status="blocking",
             source_status="blocking",
+            notes=("confirmed-head:h1",),
         )
     ]
     mergeability = PullRequestMergeability(
         state="mergeable", mergeable_raw="MERGEABLE", merge_state_raw="CLEAN", head_sha="h2", base_branch="main"
     )
 
-    items = _reconcile_merge_conflict_item(prior, mergeability=mergeability, source_round=2)
+    items = _reconcile_merge_conflict_item(
+        prior, mergeability=mergeability, source_round=2, current_head_sha="h2"
+    )
 
     assert items == []
 
 
-def test_reconcile_clears_item_when_unknown():
+def test_reconcile_no_op_when_unknown_without_prior_conflict():
+    """A fresh `unknown` with nothing previously confirmed must never create
+    a blocker -- a transient GitHub mergeability computation window must not
+    trigger an unnecessary coder round."""
+    mergeability = PullRequestMergeability(
+        state="unknown", mergeable_raw=None, merge_state_raw=None, head_sha=None, base_branch=None
+    )
+
+    items = _reconcile_merge_conflict_item(
+        [], mergeability=mergeability, source_round=2, current_head_sha="h1"
+    )
+
+    assert items == []
+
+
+def test_reconcile_preserves_confirmed_conflict_when_unknown_on_same_head():
+    """Regression (#609 review): once a conflict is confirmed on a head, a
+    later probe returning `unknown` for that *same* head (a probe hiccup, not
+    new information -- e.g. the coder round made no push) must not silently
+    clear the blocker. Clearing it would let reviewers, checks, or a merge
+    proceed against a branch GitHub last told us is still conflicted, and
+    would bypass the unchanged-head bounded-progress guard, which only fires
+    while the synthetic item remains present."""
     prior = [
         UnresolvedReviewItem(
             item_id=MERGE_CONFLICT_ITEM_ID,
             reviewer="Orchestrator",
             source_round=1,
-            text="stale conflict text",
+            text="PR branch has a merge conflict with `main`.",
             status="blocking",
             source_status="blocking",
+            notes=("confirmed-head:abc123",),
         )
     ]
     mergeability = PullRequestMergeability(
         state="unknown", mergeable_raw=None, merge_state_raw=None, head_sha=None, base_branch=None
     )
 
-    items = _reconcile_merge_conflict_item(prior, mergeability=mergeability, source_round=2)
+    items = _reconcile_merge_conflict_item(
+        prior, mergeability=mergeability, source_round=2, current_head_sha="abc123"
+    )
+
+    assert len(items) == 1
+    assert items[0].item_id == MERGE_CONFLICT_ITEM_ID
+    assert items[0].status == "blocking"
+
+
+def test_reconcile_clears_item_when_unknown_after_head_advanced():
+    """Once the head genuinely changes (a resolution attempt happened), a
+    fresh `unknown` for that new commit is ordinary -- not a hiccup on the
+    known-conflicted head -- so it clears normally and lets the round
+    re-evaluate the new head."""
+    prior = [
+        UnresolvedReviewItem(
+            item_id=MERGE_CONFLICT_ITEM_ID,
+            reviewer="Orchestrator",
+            source_round=1,
+            text="PR branch has a merge conflict with `main`.",
+            status="blocking",
+            source_status="blocking",
+            notes=("confirmed-head:abc123",),
+        )
+    ]
+    mergeability = PullRequestMergeability(
+        state="unknown", mergeable_raw=None, merge_state_raw=None, head_sha=None, base_branch=None
+    )
+
+    items = _reconcile_merge_conflict_item(
+        prior, mergeability=mergeability, source_round=2, current_head_sha="def456"
+    )
 
     assert items == []
 
@@ -317,7 +379,9 @@ def test_reconcile_preserves_other_items():
         state="conflicted", mergeable_raw="CONFLICTING", merge_state_raw="DIRTY", head_sha="h1", base_branch="main"
     )
 
-    items = _reconcile_merge_conflict_item([other_item], mergeability=mergeability, source_round=2)
+    items = _reconcile_merge_conflict_item(
+        [other_item], mergeability=mergeability, source_round=2, current_head_sha="h1"
+    )
 
     assert other_item in items
     assert any(item.item_id == MERGE_CONFLICT_ITEM_ID for item in items)

@@ -145,6 +145,42 @@ def test_persistent_conflict_with_unchanged_head_stops_cleanly(tmp_path):
     assert any("still conflicted" in comment for comment in runner.comments)
 
 
+def test_confirmed_conflict_survives_transient_unknown_reprobe_on_same_head(tmp_path):
+    """Regression (#609 review): DIRTY at round start, the coder is
+    dispatched but does not push (head unchanged), and the next round's probe
+    comes back `UNKNOWN` (a transient GitHub failure) for that same head. The
+    confirmed conflict must be preserved rather than silently cleared -- which
+    would otherwise let reviewers run, GitHub checks be fetched, and (with
+    auto-merge) a merge be attempted against a branch GitHub last told us was
+    still conflicted. Instead, the unchanged-head bounded-progress guard
+    should fire: no second coder round, no reviewer, no checks fetch, no
+    merge."""
+    runner = FakeRunner(
+        claude_outputs=["Tried to resolve.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"],
+        codex_outputs=["LGTM.\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"],
+        mergeability_payloads=[
+            {
+                "mergeable": "CONFLICTING",
+                "mergeStateStatus": "DIRTY",
+                "headRefOid": "abc123",
+                "baseRefName": "main",
+            },
+            {"mergeable": "UNKNOWN", "mergeStateStatus": "UNKNOWN"},
+        ],
+        advance_pr_head_on_coder_followup=False,
+    )
+    config = make_config(tmp_path, auto_merge=True, mergeability_poll_attempts=1)
+
+    result = run_pr_loop(runner, pr_number=77, config=config)
+
+    assert result == 0
+    assert len(_claude_commands(runner)) == 1
+    assert _codex_exec_commands(runner) == []
+    assert _check_runs_commands(runner) == []
+    assert _merge_commands(runner) == []
+    assert any("still conflicted" in comment for comment in runner.comments)
+
+
 def test_conflict_resolution_requires_fresh_ci_and_review(tmp_path):
     """A resolution push is treated as code-changing: stale approvals/checks
     are not reused, and the new head goes through a full reviewer + CI cycle

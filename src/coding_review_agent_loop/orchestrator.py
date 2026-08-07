@@ -5321,8 +5321,17 @@ def run_pr_loop(
                 unresolved_items,
                 mergeability=round_start_mergeability,
                 source_round=round_number,
+                current_head_sha=pr_metadata.head_sha,
             )
-            conflict_pending = round_start_mergeability.state == "conflicted"
+            # A confirmed conflict from this probe is pending; so is a
+            # preserved blocker from an earlier confirmed conflict that this
+            # probe merely returned `unknown` for on the same head (a probe
+            # hiccup, not evidence the conflict resolved) -- checking the
+            # ledger, not the raw probe state, is what keeps the coder from
+            # being bypassed by a transient GitHub mergeability failure.
+            conflict_pending = any(
+                item.item_id == MERGE_CONFLICT_ITEM_ID for item in unresolved_items
+            )
             if conflict_pending:
                 log(
                     config,
@@ -6181,9 +6190,13 @@ def run_pr_loop(
                     unresolved_items,
                     mergeability=merge_gate_mergeability,
                     source_round=round_number,
+                    current_head_sha=pr_metadata.head_sha,
                 )
                 must_fix_items = [item for item in unresolved_items if item.status in {"blocking", "same-pr"}]
-                if merge_gate_mergeability.state == "conflicted":
+                merge_gate_conflict_pending = any(
+                    item.item_id == MERGE_CONFLICT_ITEM_ID for item in unresolved_items
+                )
+                if merge_gate_conflict_pending:
                     log(
                         config,
                         f"Round {round_number}: PR #{pr_number} became conflicted with "
@@ -6354,6 +6367,7 @@ def run_pr_loop(
                                 unresolved_items,
                                 mergeability=wait_outcome.mergeability,
                                 source_round=round_number,
+                                current_head_sha=pr_metadata.head_sha,
                             )
                             must_fix_items = [
                                 item for item in unresolved_items if item.status in {"blocking", "same-pr"}
