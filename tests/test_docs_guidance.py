@@ -9,6 +9,7 @@ README = REPO_ROOT / "README.md"
 
 HEADING_TEXT = "Phased decomposition versus split materialization"
 CI_STALL_HEADING_TEXT = "External CI infrastructure stalls"
+LOCAL_TEST_SCOPE_HEADING_TEXT = "Focused, bounded local test selection"
 
 
 def _github_anchor(heading_text: str) -> str:
@@ -94,6 +95,25 @@ def test_readme_links_to_ci_infrastructure_stall_section():
     readme_text = README.read_text(encoding="utf-8")
     assert f"docs/local_agent_loop.md#{expected_anchor}" in readme_text
     assert "`--ci-queued-grace-seconds`" in readme_text
+
+
+def test_local_agent_loop_doc_has_focused_bounded_local_test_section():
+    text = LOCAL_AGENT_LOOP_DOC.read_text(encoding="utf-8")
+    assert f"### {LOCAL_TEST_SCOPE_HEADING_TEXT}" in text
+    section_start = text.index(f"### {LOCAL_TEST_SCOPE_HEADING_TEXT}")
+    next_heading = text.index("## Agent Permission Flags", section_start)
+    section = " ".join(text[section_start:next_heading].split())
+
+    assert "External CI infrastructure" in section
+    assert "distinct from" in section
+    assert "900 seconds" in section
+    assert "must not launch pytest in the background" in section
+    assert "poll process" in section
+    assert "`ps`/`kill -0`/`wait`" in section
+    assert "task-output files" in section
+    assert "a human or the issue explicitly asked for full-suite" in section
+    assert "no-PR `AGENT_STATE: blocking`" in section
+    assert "agent_unavailable" in section
 
 
 def test_cli_help_documents_ci_queued_grace_seconds():

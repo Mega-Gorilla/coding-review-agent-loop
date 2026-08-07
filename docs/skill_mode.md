@@ -212,6 +212,32 @@ the same bounded-observation guidance, so this applies whether the coder turn
 runs through the CLI orchestrator or through the skill's own external-coder
 path.
 
+## Focused, bounded local test runs
+
+A same-PR follow-up or reviewer item scoped to a couple of files does not
+justify running the whole `tests/` suite, an `--ignore` list that amounts to
+the whole suite, or a broad server/database/integration suite — those add
+minutes of runtime and hide progress when they are launched in the background
+and polled from an auxiliary shell loop. The host coder must select tests
+proportionate to the files actually changed and the reviewer item being
+addressed, prefer the repository's verified focused test command when one
+covers the change, and give a one-line rationale tying each selected test
+module to a changed file or reviewer item. Broad suites remain available when
+the change genuinely touches those surfaces, focused tests demonstrably do
+not cover it, or a human or the issue explicitly asked for full-suite
+verification. Required completion tests must run in the foreground with
+visible output under an explicit bounded timeout; never launch pytest in the
+background or poll a process ID, `ps`/`kill -0`/`wait`, or a task-output file
+to learn whether it finished. If a required test exceeds its bound, terminate
+it and report the blocker immediately, naming the exact command and the
+timeout, instead of waiting silently or retrying with a broader selection.
+
+Every coder prompt built by `coding_review_agent_loop.prompts` — including the
+ones `helpers/prompt_builders.py` reuses for skill mode's `run-pr-fix` —
+carries this policy, but the skill's host coder drives its own shell commands
+directly and is not itself constrained by the CLI orchestrator's test
+plumbing, so this section states the policy explicitly for that path.
+
 ## Session state
 
 Local session state is stored at:

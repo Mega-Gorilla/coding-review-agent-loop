@@ -1592,6 +1592,37 @@ class TestPromptCheckoutPath:
         assert "120 seconds" in prompt
         assert "resume once GitHub Actions runners recover" in prompt
 
+    def test_pr_fix_prompt_carries_focused_local_test_guidance(self) -> None:
+        # #604: the run-pr-fix prompt delegates to build_followup_prompt, which
+        # must carry the same proportionate/bounded local-test policy as the
+        # CLI orchestrator so the skill's external-coder path can't pull in an
+        # unnecessarily broad suite or poll a backgrounded test run either.
+        from helpers.prompt_builders import build_pr_fix_prompt_for_skill
+        wd = "/tmp/coding-review-agent-loop/skill-runner-codex"
+        prompt = " ".join(
+            build_pr_fix_prompt_for_skill(
+                295,
+                [{
+                    "item_id": "item-1",
+                    "reviewer": "codex",
+                    "source_round": 1,
+                    "text": "Fix the bug.",
+                    "status": "blocking",
+                }],
+                1,
+                repo="wwind123/coding-review-agent-loop",
+                coder="codex",
+                reviewers=["gemini"],
+                workdir=wd,
+            ).split()
+        )
+        assert "proportionate to the files you actually changed" in prompt
+        assert "Do not run the whole `tests/` suite" in prompt
+        assert "Never launch pytest in the background" in prompt
+        assert "poll process IDs" in prompt
+        assert "`tests_run` as machine-readable strings only" in prompt
+        assert "include a short `Tests:` line" not in prompt
+
 
 # ---------------------------------------------------------------------------
 # helpers/skill_runner.py  _run_test_gate (#296, increment 2)
