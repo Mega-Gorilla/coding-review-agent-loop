@@ -7,6 +7,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -1312,6 +1313,106 @@ class CiWaitOutcome:
     stall: CiInfrastructureStall | None = None
     pr_checks: PullRequestChecks | None = None
     mergeability: PullRequestMergeability | None = None
+
+
+@dataclass(frozen=True)
+class CiWatchOutcome:
+    """Terminal result from the opt-in full-board post-approval watcher."""
+
+    status: Literal[
+        "passed",
+        "no_checks",
+        "failed",
+        "timeout",
+        "infrastructure_stall",
+        "merge_conflict",
+        "head_changed",
+        "dry_run",
+    ]
+    pr_checks: PullRequestChecks | None = None
+    failed_checks: tuple[PullRequestCheck, ...] = ()
+    mergeability: PullRequestMergeability | None = None
+    head_sha: str | None = None
+    stall: CiInfrastructureStall | None = None
+    attempts_used: int = 0
+
+
+def watch_pr_checks(
+    runner: Runner,
+    config: AgentLoopConfig,
+    pr_number: int,
+    *,
+    metadata: PullRequestMetadata,
+    deadline: float | None = None,
+    attempts: int | None = None,
+) -> CiWatchOutcome:
+    """Synchronously watch the complete current-head check board.
+
+    This deliberately sits beside the legacy single-check ``wait_for_ci``.
+    It has no worker or persisted process; interrupting the foreground runner
+    stops it immediately and a later invocation simply fetches fresh state.
+    """
+    if config.dry_run:
+        return CiWatchOutcome(status="dry_run", head_sha=metadata.head_sha)
+    deadline = deadline if deadline is not None else time.monotonic() + config.ci_timeout_seconds
+    limit = attempts if attempts is not None else max(
+        1, config.ci_timeout_seconds // config.ci_poll_interval_seconds
+    )
+    latest: PullRequestChecks | None = None
+    for attempt in range(limit):
+        # A flaky head probe is diagnostic only.  The full-board and
+        # mergeability probes already degrade transient API failures safely.
+        try:
+            current_head = get_pr_head_sha(runner, config, pr_number)
+        except AgentLoopError as error:
+            log(config, f"PR #{pr_number}: head probe failed while watching ({error}); retrying")
+            current_head = metadata.head_sha
+        if metadata.head_sha and current_head != metadata.head_sha:
+            return CiWatchOutcome(
+                status="head_changed", pr_checks=latest, head_sha=current_head,
+                attempts_used=attempt + 1,
+            )
+        mergeability = get_pr_mergeability(runner, config=config, pr_number=pr_number)
+        if mergeability.state == "conflicted":
+            return CiWatchOutcome(
+                status="merge_conflict", pr_checks=latest, mergeability=mergeability,
+                head_sha=current_head, attempts_used=attempt + 1,
+            )
+        snapshot = get_pr_checks(runner, config=config, metadata=metadata)
+        latest = snapshot
+        if is_wholly_infrastructure_blocked(snapshot):
+            return CiWatchOutcome(
+                status="infrastructure_stall",
+                pr_checks=snapshot,
+                head_sha=current_head,
+                stall=CiInfrastructureStall(checks=snapshot.infrastructure_stalls),
+                attempts_used=attempt + 1,
+            )
+        if snapshot.state == "failing":
+            return CiWatchOutcome(
+                status="failed", pr_checks=snapshot, failed_checks=snapshot.failing,
+                head_sha=current_head, attempts_used=attempt + 1,
+            )
+        reliable = snapshot.check_query_status == "ok" and snapshot.branch_protection_status in {
+            "configured", "not_found", "forbidden",
+        }
+        if snapshot.state == "passing" and reliable and not snapshot.pending and not snapshot.missing_required:
+            return CiWatchOutcome(
+                status="passed", pr_checks=snapshot, head_sha=current_head,
+                attempts_used=attempt + 1,
+            )
+        if snapshot.state == "no_checks" and reliable and not snapshot.missing_required:
+            return CiWatchOutcome(
+                status="no_checks", pr_checks=snapshot, head_sha=current_head,
+                attempts_used=attempt + 1,
+            )
+        if time.monotonic() >= deadline or attempt == limit - 1:
+            return CiWatchOutcome(
+                status="timeout", pr_checks=latest, head_sha=current_head,
+                attempts_used=attempt + 1,
+            )
+        runner.run(["sleep", str(config.ci_poll_interval_seconds)], cwd=active_workdir(config))
+    raise AssertionError("CI watch loop must return a terminal outcome")
 
 
 def wait_for_ci(

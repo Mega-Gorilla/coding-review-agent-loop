@@ -1248,6 +1248,22 @@ def test_omitted_agent_dirs_default_to_repo_scoped_temp_checkouts(monkeypatch, t
     ).resolve()
 
 
+def test_config_captures_watch_invocation_without_rebuilding_antigravity_model(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args([
+        "pr", "77", "--repo", "OWNER/REPO", "--antigravity-model", "Gemini 3.1 Pro (High)",
+        "--watch-pending-ci",
+    ])
+    config = config_from_args(
+        args,
+        FakeRunner(),
+        invocation_argv=("agent-loop", "pr", "77", "--watch-pending-ci"),
+    )
+    assert config.watch_pending_ci is True
+    assert config.invocation_argv[-1] == "--watch-pending-ci"
+    assert config.antigravity_models == ("Gemini 3.1 Pro (High)",)
+
+
 @pytest.mark.parametrize(
     ("coder", "reviewer", "missing_command", "override_flag"),
     [

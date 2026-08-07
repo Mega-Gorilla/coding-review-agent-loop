@@ -1210,6 +1210,23 @@ When enabled, the tool waits for the configured GitHub check-run to pass before 
 
 Failing GitHub checks always block approval and can route back to the coder. Pending or unavailable GitHub checks are treated as an external wait state rather than actionable coder feedback: if every reviewer approves the code and only GitHub checks are pending/unavailable, the loop posts a comment and stops with a clear message instead of erroring or starting another coder/reviewer round. If those checks later pass, manual merge is fine and rerunning is optional unless you want agent-loop to re-check or automate the final step. With `--auto-merge`, the loop instead keeps waiting for the configured check-run to resolve before merging, as before.
 
+### Watch pending CI
+
+`--watch-pending-ci` is an opt-in alternative after approval. It foreground-polls
+the full PR check/status/required-check board using the existing timeout and poll
+interval controls. It does not call reviewers or the coder while checks remain
+pending. A completed actionable failure resumes the normal coder loop with the
+check name, conclusion, and URL; success or a reliable no-check board is
+merge-ready, or merges directly with `--auto-merge` (the legacy single
+`--ci-check-name` waiter is not used in this mode). A new head is re-reviewed,
+and the final-round CI-failure path receives one bounded extra round.
+
+The watch runs synchronously with interruptible `sleep` subprocesses, so Ctrl-C
+and restarts leave no hidden worker. Timeout and transient API snapshots remain
+bounded and print a shell-quoted rerun command only locally; GitHub comments do
+not repeat invocation arguments. Dry-run previews the watch without polling,
+sleeping, resuming agents, or merging. Disabled mode retains the behavior above.
+
 ### External CI infrastructure stalls
 
 GitHub-hosted runner capacity incidents can leave a check-run `queued` indefinitely with no job ever starting, or cause it to be cancelled before execution because a runner could not be acquired. Left unhandled, a coder round could otherwise run an unbounded `gh run watch` and consume an entire session without producing a result.

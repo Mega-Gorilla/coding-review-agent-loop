@@ -334,6 +334,14 @@ def build_parser() -> argparse.ArgumentParser:
             help="Polling interval for the CI check before auto-merge (default: 30).",
         )
         subparser.add_argument(
+            "--watch-pending-ci",
+            action="store_true",
+            help=(
+                "After approval, foreground-poll the full GitHub check board and resume "
+                "the coder if CI fails. Disabled by default."
+            ),
+        )
+        subparser.add_argument(
             "--ci-queued-grace-seconds",
             type=int,
             default=1200,
@@ -687,7 +695,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     runner = Runner(dry_run=args.dry_run)
     try:
-        config = config_from_args(args, runner)
+        # Preserve tokens (rather than a rendered command) so timeout guidance can
+        # be safely shell-quoted locally. Programmatic callers have no sys.argv.
+        invocation = tuple([sys.argv[0], *sys.argv[1:]]) if argv is None else tuple(["agent-loop", *argv])
+        config = config_from_args(args, runner, invocation_argv=invocation)
         implementation_override_requested = (
             args.implementation_coder is not None
             or args.implementation_coder_model

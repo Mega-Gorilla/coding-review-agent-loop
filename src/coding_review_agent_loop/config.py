@@ -165,11 +165,22 @@ class AgentLoopConfig:
     # from a confirmed conflict, which is never re-polled here (#606).
     mergeability_poll_attempts: int = 3
     mergeability_poll_interval_seconds: int = 5
+    # Opt-in foreground full-board CI watch after reviewer approval (#587).
+    # These are defaulted to keep direct AgentLoopConfig constructors compatible.
+    watch_pending_ci: bool = False
+    invocation_argv: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.reviewer, str):
             object.__setattr__(self, "reviewer", (self.reviewer,))
-        if self.antigravity_model is not None and self.antigravity_models:
+        # Reconstructing a normalized frozen config (for example to add an
+        # invocation token list) feeds the legacy single model back as its
+        # equivalent one-item chain.  Treat that representation as idempotent.
+        if (
+            self.antigravity_model is not None
+            and self.antigravity_models
+            and self.antigravity_models != (self.antigravity_model,)
+        ):
             raise AgentLoopError("Cannot specify both antigravity_model and a custom antigravity_models chain.")
         if self.antigravity_model is not None:
             object.__setattr__(self, "antigravity_models", (self.antigravity_model,))
@@ -784,7 +795,12 @@ def preflight_agent_commands(
         runner.remember_agent_command(command, resolved, override_flag)
 
 
-def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfig:
+def config_from_args(
+    args: argparse.Namespace,
+    runner: Runner,
+    *,
+    invocation_argv: tuple[str, ...] = (),
+) -> AgentLoopConfig:
     configured_reviewers = tuple(args.reviewer or ["codex"])
     if len(set(configured_reviewers)) != len(configured_reviewers):
         raise AgentLoopError("--reviewer cannot include the same agent more than once.")
@@ -922,6 +938,8 @@ def config_from_args(args: argparse.Namespace, runner: Runner) -> AgentLoopConfi
         ci_check_name=args.ci_check_name,
         ci_timeout_seconds=args.ci_timeout_seconds,
         ci_poll_interval_seconds=args.ci_poll_interval_seconds,
+        watch_pending_ci=getattr(args, "watch_pending_ci", False),
+        invocation_argv=invocation_argv,
         ci_queued_grace_seconds=getattr(args, "ci_queued_grace_seconds", 1200),
         mergeability_poll_attempts=getattr(args, "mergeability_poll_attempts", 3),
         mergeability_poll_interval_seconds=getattr(args, "mergeability_poll_interval_seconds", 5),
