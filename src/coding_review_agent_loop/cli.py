@@ -334,6 +334,16 @@ def build_parser() -> argparse.ArgumentParser:
             help="Polling interval for the CI check before auto-merge (default: 30).",
         )
         subparser.add_argument(
+            "--ci-queued-grace-seconds",
+            type=int,
+            default=1200,
+            help=(
+                "How long a check-run may sit queued with no job started before it is "
+                "treated as external GitHub Actions infrastructure blocking (for example "
+                "a hosted-runner capacity outage) rather than a normal wait (default: 1200)."
+            ),
+        )
+        subparser.add_argument(
             "--quiet",
             action="store_true",
             help="Suppress progress logs.",

@@ -606,6 +606,15 @@ reviewer rounds, and again after final reviewer approval before auto-merge. Add
 gate. The coder prompt also asks the coding agent to report the exact tests it
 ran, or explain why it could not run tests.
 
+A queued GitHub check that never starts a job (a hosted-runner capacity outage)
+or one cancelled before execution because a runner was unavailable is treated
+as external CI infrastructure blocking, not a code defect or actionable coder
+feedback: `--ci-queued-grace-seconds` (default 1200) bounds how long a queued
+check is treated as normal before the loop stops with a resumable message
+instead of a coder round waiting on it. See
+[External CI infrastructure stalls](docs/local_agent_loop.md#external-ci-infrastructure-stalls)
+for details.
+
 By default Claude is the coder and Codex is the reviewer. Reverse that with:
 
 ```bash

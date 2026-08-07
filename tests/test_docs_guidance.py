@@ -8,6 +8,7 @@ LOCAL_AGENT_LOOP_DOC = REPO_ROOT / "docs" / "local_agent_loop.md"
 README = REPO_ROOT / "README.md"
 
 HEADING_TEXT = "Phased decomposition versus split materialization"
+CI_STALL_HEADING_TEXT = "External CI infrastructure stalls"
 
 
 def _github_anchor(heading_text: str) -> str:
@@ -75,3 +76,37 @@ def test_cli_help_points_to_decision_section():
     anchor = "phased-decomposition-versus-split-materialization"
     for help_text in (plan_execution_mode_help, issue_materialize_help, discuss_materialize_help):
         assert anchor in help_text
+
+
+def test_local_agent_loop_doc_has_ci_infrastructure_stall_section():
+    text = LOCAL_AGENT_LOOP_DOC.read_text(encoding="utf-8")
+    assert f"### {CI_STALL_HEADING_TEXT}" in text
+    assert "`--ci-queued-grace-seconds`" in text
+    assert "queued_too_long" in text
+    assert "runner_unavailable" in text
+
+
+def test_readme_links_to_ci_infrastructure_stall_section():
+    doc_text = LOCAL_AGENT_LOOP_DOC.read_text(encoding="utf-8")
+    assert f"### {CI_STALL_HEADING_TEXT}" in doc_text, "heading moved; update CI_STALL_HEADING_TEXT"
+    expected_anchor = _github_anchor(CI_STALL_HEADING_TEXT)
+
+    readme_text = README.read_text(encoding="utf-8")
+    assert f"docs/local_agent_loop.md#{expected_anchor}" in readme_text
+    assert "`--ci-queued-grace-seconds`" in readme_text
+
+
+def test_cli_help_documents_ci_queued_grace_seconds():
+    parser = build_parser()
+    pr_parser = None
+    for action in parser._actions:
+        if hasattr(action, "choices") and isinstance(action.choices, dict):
+            pr_parser = action.choices.get("pr", pr_parser)
+    assert pr_parser is not None
+
+    help_text = None
+    for sub_action in pr_parser._actions:
+        if "--ci-queued-grace-seconds" in getattr(sub_action, "option_strings", []):
+            help_text = sub_action.help
+    assert help_text is not None
+    assert "1200" in help_text

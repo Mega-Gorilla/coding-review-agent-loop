@@ -1210,6 +1210,17 @@ When enabled, the tool waits for the configured GitHub check-run to pass before 
 
 Failing GitHub checks always block approval and can route back to the coder. Pending or unavailable GitHub checks are treated as an external wait state rather than actionable coder feedback: if every reviewer approves the code and only GitHub checks are pending/unavailable, the loop posts a comment and stops with a clear message instead of erroring or starting another coder/reviewer round. If those checks later pass, manual merge is fine and rerunning is optional unless you want agent-loop to re-check or automate the final step. With `--auto-merge`, the loop instead keeps waiting for the configured check-run to resolve before merging, as before.
 
+### External CI infrastructure stalls
+
+GitHub-hosted runner capacity incidents can leave a check-run `queued` indefinitely with no job ever starting, or cause it to be cancelled before execution because a runner could not be acquired. Left unhandled, a coder round could otherwise run an unbounded `gh run watch` and consume an entire session without producing a result.
+
+Two independent, complementary mechanisms bound this instead:
+
+- **Detection and classification.** Every `get_pr_checks` fetch classifies each check-run against `--ci-queued-grace-seconds` (default 1200): a check still `queued`/`pending` with no job started past the grace period is `queued_too_long`; a check-run cancelled (or `startup_failure`) with no real start is `runner_unavailable`. A check is only ever treated as a full stop when the *whole* check board is wholly infrastructure-blocked — every failing/pending check is a classified stall, no required check is missing, and branch protection and the check query both succeeded. A single genuinely failing test, a never-reporting required check, or a partial API failure never takes this exit; it falls back to ordinary pending/failing handling instead. When the whole board is wholly blocked, the loop posts a comment explaining that no code change is required and no merge was attempted, and stops in a state that is safe to resume later — rerun the same command once GitHub Actions runners recover. With `--auto-merge`, the same predicate governs whether the CI wait loop exits early with that message instead of merging.
+- **Bounded coder observation policy.** Independent of classification, every coder prompt forbids `gh run watch`, `gh pr checks --watch`, or any other unbounded CI wait. A coder may take at most 3 status snapshots, spaced at least 30 seconds apart, for at most 120 seconds of total CI observation per turn; past that bound it must return its terminal blocking response immediately, naming the affected check/run and noting that work should resume once GitHub Actions runners recover. This applies even if a reviewer's finding is not recognized as a canonical stall-only item, so a coder round can never wait indefinitely on GitHub Actions infrastructure.
+
+Reviewers see the same classification (an "External CI infrastructure stalls" section in the PR checks context) and are instructed not to record a classified stall as a blocking code item; any other failing or never-reporting check remains ordinary review work.
+
 ## Agent Permission Flags
 
 By default, this standalone package does not pass permission-bypass flags to either agent. This is safer for open-source use, but some CLIs may prompt or fail in non-interactive mode unless you provide suitable flags.

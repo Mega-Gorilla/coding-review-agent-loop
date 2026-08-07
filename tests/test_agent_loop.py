@@ -2589,6 +2589,62 @@ def test_config_rejects_non_positive_max_rounds(tmp_path, max_rounds):
         config_from_args(args, FakeRunner())
 
 
+def test_config_defaults_ci_queued_grace_seconds(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args([
+        "pr",
+        "77",
+        "--repo",
+        "OWNER/REPO",
+        "--claude-dir",
+        str(tmp_path / "claude"),
+        "--codex-dir",
+        str(tmp_path / "codex"),
+    ])
+    config = config_from_args(args, FakeRunner())
+
+    assert config.ci_queued_grace_seconds == 1200
+
+
+def test_config_parses_custom_ci_queued_grace_seconds(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args([
+        "pr",
+        "77",
+        "--repo",
+        "OWNER/REPO",
+        "--ci-queued-grace-seconds",
+        "600",
+        "--claude-dir",
+        str(tmp_path / "claude"),
+        "--codex-dir",
+        str(tmp_path / "codex"),
+    ])
+    config = config_from_args(args, FakeRunner())
+
+    assert config.ci_queued_grace_seconds == 600
+
+
+@pytest.mark.parametrize("ci_queued_grace_seconds", ["0", "-1"])
+def test_config_rejects_non_positive_ci_queued_grace_seconds(tmp_path, ci_queued_grace_seconds):
+    parser = build_parser()
+    args = parser.parse_args([
+        "pr",
+        "77",
+        "--repo",
+        "OWNER/REPO",
+        "--ci-queued-grace-seconds",
+        ci_queued_grace_seconds,
+        "--claude-dir",
+        str(tmp_path / "claude"),
+        "--codex-dir",
+        str(tmp_path / "codex"),
+    ])
+
+    with pytest.raises(AgentLoopError, match="--ci-queued-grace-seconds must be greater than zero"):
+        config_from_args(args, FakeRunner())
+
+
 def test_config_defaults_do_not_bypass_agent_permissions(tmp_path):
     parser = build_parser()
     args = parser.parse_args([

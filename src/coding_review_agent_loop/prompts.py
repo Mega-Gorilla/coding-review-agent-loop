@@ -96,10 +96,40 @@ def _coder_test_reporting_guidance() -> str:
     )
 
 
+def _coder_ci_wait_guidance() -> str:
+    return (
+        "Do not run `gh run watch`, `gh pr checks --watch`, or any other unbounded wait "
+        "on a GitHub Actions check or workflow run. If you need to confirm CI status, take "
+        "at most 3 status snapshots (for example `gh run view <run-id> "
+        "--json status,conclusion,startedAt` or `gh pr checks`), spaced at least 30 seconds "
+        "apart, for at most 120 seconds of total CI observation in this turn. If a run is "
+        "still queued past that bound, or was cancelled before any job started, stop "
+        "observing it and return your terminal blocking response immediately: name the "
+        "affected check, run ID, and URL in `remaining_items`/`remaining_item_notes` (or the "
+        "equivalent prose for prompt shapes without that structured schema) and say work "
+        "should resume once GitHub Actions runners recover. This does not apply to a check "
+        "that is actively running or that fails due to a real repository test failure — "
+        "those remain real work to investigate and fix.\n"
+    )
+
+
 def _coder_documentation_guidance() -> str:
     return (
         "If your implementation adds or changes a user-facing subcommand, flag, "
         "or mode, update README.md and any relevant docs/ files as part of this PR.\n"
+    )
+
+
+def _reviewer_ci_infrastructure_guidance() -> str:
+    return (
+        "A check listed under \"External CI infrastructure stalls\" in the GitHub PR "
+        "checks block is external GitHub Actions infrastructure blocking (a queued check "
+        "that never started a job, or one cancelled before execution because a hosted "
+        "runner was unavailable), not a code-level finding. Do not record it as a "
+        "`blocking_items` entry or as the reason for a `blocking` review; mention it in "
+        "`summary` only if relevant. Any other failing check, or a required check that "
+        "never reports at all, remains ordinary review work and may still justify a "
+        "blocking review.\n"
     )
 
 
@@ -698,6 +728,17 @@ def format_pr_checks(checks: PullRequestChecks) -> str:
         lines.append(f"- Required checks not yet reporting: {', '.join(checks.missing_required)}")
     if checks.branch_protection_note:
         lines.append(f"- Branch protection: {checks.branch_protection_note}")
+    if checks.infrastructure_stalls:
+        lines.append("- External CI infrastructure stalls:")
+        for stall in checks.infrastructure_stalls:
+            lines.append(f"  - {stall.describe()}")
+        lines.append(
+            "  A check listed above is external GitHub Actions infrastructure blocking "
+            "(a queued check that never started a job, or one cancelled before execution "
+            "because a hosted runner was unavailable). Do not record it as a blocking "
+            "code item. Any other failing check, or a required check that never reports "
+            "at all, remains ordinary review work."
+        )
     return "\n".join(lines)
 
 
@@ -1016,7 +1057,7 @@ Use this local checkout as your workspace. Create a branch, implement the fix,
 run relevant tests, commit, push, and open a pull request against {config.base}.
 {_coder_workdir_guidance(config)}
 {_scratch_file_guidance()}
-{_coder_test_reporting_guidance()}{_coder_documentation_guidance()}
+{_coder_test_reporting_guidance()}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
 {_issue_pr_reference_guidance(issue_number)}
 {human_requirements_context.block}{_coder_human_requirements_guidance(
     human_requirements_context,
@@ -1611,7 +1652,7 @@ approved plan, run relevant tests, commit, push, and open a pull request against
 {config.base}.
 {_coder_workdir_guidance(config)}
 {_scratch_file_guidance()}
-{_coder_test_reporting_guidance()}{_coder_documentation_guidance()}
+{_coder_test_reporting_guidance()}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
 {pr_reference_guidance}
 {human_requirements_context.block}{_coder_human_requirements_guidance(
     human_requirements_context,
@@ -1654,7 +1695,7 @@ background, check on it or re-run it in the foreground now and wait for it to
 finish; do not launch anything new in the background. Then commit, push, and
 open the pull request if that is not already done, or continue exactly where
 you left off.
-{_coder_test_reporting_guidance()}{_coder_documentation_guidance()}
+{_coder_test_reporting_guidance()}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
 {_issue_implementation_terminal_marker_guidance(reviewer_name=reviewer_name, coder_signature=coder_signature)}"""
 
 
@@ -1679,7 +1720,7 @@ Use this local checkout as your workspace. Decide between two paths:
     {config.base}. Do not wait for {reviewer_name}; this local orchestrator
     will run {reviewer_name} after you create the PR.
 {_scratch_file_guidance()}
-{_coder_test_reporting_guidance()}{_coder_documentation_guidance()}
+{_coder_test_reporting_guidance()}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
 
 (b) If the task is genuinely ambiguous or missing information that would change
     the implementation, do NOT write code. Instead, ask focused clarifying
@@ -1727,7 +1768,7 @@ Clarification so far:
 Now proceed. Strongly prefer to implement the task and open a PR. Only ask
 again if a critical detail is still missing.
 {_scratch_file_guidance()}
-{_coder_test_reporting_guidance()}{_coder_documentation_guidance()}
+{_coder_test_reporting_guidance()}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
 
 {_agent_unavailable_guidance(coder_signature)}
 Do not place your signature before the AGENT_STATE or AGENT_CLARIFY marker.
@@ -1887,7 +1928,7 @@ Pending or unavailable GitHub checks are an external wait state: mention them
 only in `summary`, never in `blocking_items`, and never as the sole reason to
 return `state: "blocking"` — only failing checks or real code-level findings
 justify a blocking review.
-When the PR changes files under `alembic/versions/`, verify migration topology:
+{_reviewer_ci_infrastructure_guidance()}When the PR changes files under `alembic/versions/`, verify migration topology:
 new revisions should descend from the current head unless the PR intentionally
 adds a merge migration.
 {_reviewer_documentation_check()}"""
@@ -2211,7 +2252,7 @@ Pending or unavailable GitHub checks are an external wait state: mention them
 only in `summary`, never in `blocking_items`, and never as the sole reason to
 return `state: "blocking"` — only failing checks or real code-level findings
 justify a blocking review.
-When the PR changes files under `alembic/versions/`, verify migration topology:
+{_reviewer_ci_infrastructure_guidance()}When the PR changes files under `alembic/versions/`, verify migration topology:
 new revisions should descend from the current head unless the PR intentionally
 adds a merge migration.
 {_reviewer_documentation_check()}{human_requirements_guidance}
@@ -2306,7 +2347,7 @@ needed, implement fixes, run relevant tests, commit, and push to the same PR.
 Do not create a new PR.
 {_coder_workdir_guidance(config)}
 {_scratch_file_guidance()}
-{_coder_test_reporting_guidance()}{_coder_documentation_guidance()}
+{_coder_test_reporting_guidance()}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
 {_issue_context_block(issue_context)}
 {human_requirements_context.block}{_coder_human_requirements_guidance(human_requirements_context)}
 {_memory_block(memory)}
@@ -2355,7 +2396,7 @@ current PR. Keep the change narrowly scoped to the listed items. Do not take on
 larger redesigns or unrelated future work; call that out instead. The PR
 remains blocked pending another review round after this cleanup.
 {_scratch_file_guidance()}
-{_coder_test_reporting_guidance()}{_coder_documentation_guidance()}
+{_coder_test_reporting_guidance()}{_coder_ci_wait_guidance()}{_coder_documentation_guidance()}
 {_issue_context_block(issue_context)}
 {human_requirements_context.block}{_coder_human_requirements_guidance(human_requirements_context)}
 {_memory_block(memory)}

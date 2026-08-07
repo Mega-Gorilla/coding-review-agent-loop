@@ -185,6 +185,33 @@ repair pass. The original response is saved before recovery; `retry-validate`
 repair directories and PR-fix debug directories remain the final fallback for
 genuinely unrecoverable output.
 
+## No unbounded CI waits
+
+A queued GitHub check-run can sit indefinitely with no job started during a
+hosted-runner capacity incident, or be cancelled before execution because a
+runner could not be acquired. The orchestrating Claude session running this
+skill (the host coder) must not run `gh run watch`, `gh pr checks --watch`, or
+any other unbounded wait on such a check — including while fixing a
+reviewer-reported check failure. Take at most 3 bounded status snapshots
+(`gh run view <run-id> --json status,conclusion,startedAt` or `gh pr
+checks`), spaced at least 30 seconds apart, for at most 120 seconds of total
+CI observation, then stop with a resumable result instead of waiting further:
+name the affected check/run and note that work should resume once GitHub
+Actions runners recover, rather than treating the stall as a code defect. A
+check that is actively running, or that fails due to a real repository test
+failure, is unaffected — that remains real work to investigate and fix.
+
+The `coding_review_agent_loop` CLI orchestrator (used directly, outside skill
+mode) applies the equivalent bound automatically, plus board-wide stall
+classification driven by `--ci-queued-grace-seconds`; see [External CI
+infrastructure
+stalls](local_agent_loop.md#external-ci-infrastructure-stalls). Every coder
+prompt built by `coding_review_agent_loop.prompts` — including the ones
+`helpers/prompt_builders.py` reuses for skill mode's `run-pr-fix` — carries
+the same bounded-observation guidance, so this applies whether the coder turn
+runs through the CLI orchestrator or through the skill's own external-coder
+path.
+
 ## Session state
 
 Local session state is stored at:
