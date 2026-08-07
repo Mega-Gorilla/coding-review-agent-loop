@@ -1079,6 +1079,60 @@ def test_watch_combined_failure_and_head_change_can_use_both_extensions(
     assert len([cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]) == 1
 
 
+def test_watch_combined_head_change_and_failure_can_use_both_extensions(
+    tmp_path, monkeypatch
+):
+    failed_check = PullRequestCheck(
+        name="test", kind="check_run", status="failure", url="https://example.test/run"
+    )
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(state="approved", summary="Round one approved."),
+            structured_pr_review(state="approved", summary="Round two approved."),
+            structured_pr_review(
+                state="approved",
+                summary="Round three approved.",
+                prior_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "resolved"}
+                ],
+            ),
+        ],
+        claude_outputs=[
+            structured_coder_followup(
+                state="blocking",
+                summary="Fixed CI.",
+                addressed_items=["item-1"],
+            )
+        ],
+    )
+    config = make_config(tmp_path, watch_pending_ci=True, max_rounds=1)
+    call_count = 0
+
+    def watch(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            runner.pr_payload["headRefOid"] = "newer-head"
+            return CiWatchOutcome(
+                status="head_changed", head_sha="newer-head", attempts_used=1
+            )
+        if call_count == 2:
+            return CiWatchOutcome(
+                status="failed",
+                pr_checks=_watch_check_board("failing", failing=(failed_check,)),
+                failed_checks=(failed_check,),
+                attempts_used=1,
+            )
+        return CiWatchOutcome(status="passed", head_sha="newer-head", attempts_used=1)
+
+    monkeypatch.setattr(orchestrator, "watch_pr_checks", watch)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+    assert call_count == 3
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]) == 3
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]) == 1
+
+
 @pytest.mark.parametrize(
     ("invocation_argv", "expected_rerun", "expected_note"),
     [

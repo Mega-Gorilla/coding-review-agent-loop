@@ -38,7 +38,12 @@ def _mergeability():
 
 def test_watch_pending_to_failure_reports_failed_records_and_sleeps(tmp_path):
     runner = _Runner()
-    failed = PullRequestCheck("test", "completed", "failure", "https://checks/1", None, None)
+    failed = PullRequestCheck(
+        name="test",
+        kind="check_run",
+        status="failure",
+        url="https://checks/1",
+    )
     with patch("coding_review_agent_loop.github.get_pr_head_sha", return_value="sha"), \
          patch("coding_review_agent_loop.github.get_pr_mergeability", return_value=_mergeability()), \
          patch("coding_review_agent_loop.github.get_pr_checks", side_effect=[_checks("pending"), _checks("failing", failing=(failed,))]):

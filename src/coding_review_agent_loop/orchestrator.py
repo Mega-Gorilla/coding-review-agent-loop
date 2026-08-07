@@ -6426,7 +6426,7 @@ def run_pr_loop(
                             )
                         )
                         next_unresolved_item_number += 1
-                        if round_number == config.max_rounds and not watch_failure_extension_used:
+                        if round_number == allowed_rounds and not watch_failure_extension_used:
                             allowed_rounds += 1
                             watch_failure_extension_used = True
                     must_fix_items = [item for item in unresolved_items if item.status in {"blocking", "same-pr"}]
