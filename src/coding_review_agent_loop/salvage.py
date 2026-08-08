@@ -24,6 +24,7 @@ from .errors import AgentLoopError
 from .github import IssueComment, post_issue_comment
 from .logging import log
 from .runner import ensure_log_dir_ignored
+from .round_transport import MAX_GITHUB_BODY_CHARS
 
 if TYPE_CHECKING:
     from .config import AgentLoopConfig
@@ -40,7 +41,7 @@ AGENT_SALVAGE_MARKER_RE = re.compile(
 )
 
 _SALVAGE_SCHEMA_VERSION = 1
-_MAX_COMMENT_CHARS = 60_000
+_MAX_COMMENT_CHARS = MAX_GITHUB_BODY_CHARS
 _GIT_BINARY_PATCH_MARKER = "GIT binary patch"
 _SECRET_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),
@@ -581,6 +582,21 @@ def _render_clamped_salvage_comment(payload: dict[str, object]) -> str:
         payload.pop("patch_text", None)
         payload["patch_included"] = False
         body = _render_salvage_comment_body(payload)
+    # The marker encodes fields too, so shortening the displayed reason alone
+    # is insufficient.  Preserve the operational identifiers while shrinking
+    # both representations deterministically.
+    if len(body) > _MAX_COMMENT_CHARS:
+        payload = dict(payload)
+        reason = str(payload.get("failure_reason", ""))
+        suffix = " [omitted to keep salvage comment within GitHub's limit]"
+        while len(body) > _MAX_COMMENT_CHARS and reason:
+            reduction = max(1, (len(body) - _MAX_COMMENT_CHARS) // 2 + 32)
+            reason = reason[: max(0, len(reason) - reduction)].rstrip()
+            payload["failure_reason"] = reason + suffix
+            body = _render_salvage_comment_body(payload)
+        if len(body) > _MAX_COMMENT_CHARS:
+            payload["failure_reason"] = suffix.strip()
+            body = _render_salvage_comment_body(payload)
     return body
 
 

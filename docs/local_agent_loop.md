@@ -474,6 +474,13 @@ from the last completed round instead of silently exiting without a result;
 if no completed round exists to finalize from, it raises instead of exiting
 silently.
 
+`AGENT_LOOP_META` uses a `v1_` prefix followed by zlib-compressed URL-safe
+base64 data (legacy plain-base64 markers remain readable). If metadata cannot
+fit in one GitHub comment, the loop posts `AGENT_LOOP_SIDECAR` transport comments
+before the metadata-bearing anchor. Keep those sidecars with the anchor: resume
+fails loudly if one is missing or corrupt, at which point restore the sidecars
+or remove the incomplete anchor and rerun.
+
 Discuss mode accepts `--reviewer` the same way as PR mode — repeat the flag to
 require multiple reviewers:
 

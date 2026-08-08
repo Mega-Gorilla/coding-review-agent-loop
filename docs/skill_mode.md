@@ -263,7 +263,8 @@ call includes the path so Claude can re-post it.
 ## Resume from existing round
 
 `state_manager build-resume` reads GitHub issue comments, extracts all
-`AGENT_LOOP_META` base64 blobs, calls `_resume_plan_round(comments,
+`AGENT_LOOP_META` markers (versioned `v1_` zlib-compressed URL-safe base64,
+with legacy plain-base64 support), calls `_resume_plan_round(comments,
 configured_reviewers=...)` or `_resume_pr_round(comments, head_sha=...,
 configured_reviewers=...)`, and outputs a JSON descriptor:
 
@@ -277,6 +278,11 @@ configured_reviewers=...)`, and outputs a JSON descriptor:
   "current_plan": "..."
 }
 ```
+
+Oversized metadata is split into `AGENT_LOOP_SIDECAR` comments posted before its
+anchor. These are protocol transport records rather than agent replies; retain
+them. If resume reports missing sidecars, restore them or remove the incomplete
+anchor and rerun.
 
 The skill then skips already-completed reviewer turns and resumes from where
 the last session ended.

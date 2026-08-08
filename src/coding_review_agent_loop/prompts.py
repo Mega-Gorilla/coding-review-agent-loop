@@ -16,6 +16,7 @@ from .decomposition import MAX_DECOMPOSITION_PHASES
 from .github import HumanReviewRequirement, IssueContext, PullRequestChecks, PullRequestMetadata
 from .memory import AgentMemoryContext, format_agent_memory_context
 from .salvage import AGENT_SALVAGE_MARKER_RE
+from .round_transport import is_round_transport_sidecar
 from .protocol import (
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
     HUMAN_REQUIREMENTS_DIRECT_DISCUSSION_ACK,
@@ -302,7 +303,10 @@ def format_issue_context(issue_context: IssueContext, *, max_chars: int = 24_000
     # (#507); they are consumed separately via latest_salvage_context and
     # would otherwise bloat/displace real discussion in this raw rendering.
     visible_comments = tuple(
-        comment for comment in issue_context.comments if not _is_salvage_breadcrumb_comment(comment)
+        comment
+        for comment in issue_context.comments
+        if not _is_salvage_breadcrumb_comment(comment)
+        and not (comment.body and is_round_transport_sidecar(comment.body))
     )
     if visible_comments:
         comments = [

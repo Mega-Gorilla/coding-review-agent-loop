@@ -23,6 +23,7 @@ from .ci_health import (
 )
 from .errors import AgentLoopError
 from .logging import log
+from .round_transport import MAX_GITHUB_BODY_CHARS, prepare_round_comment
 from .protocol import parse_signed_human_requirement_body
 from .runner import Runner
 from .workdirs import active_workdir
@@ -1046,36 +1047,12 @@ def post_pr_comment(
     pr_number: int,
     body: str,
 ) -> None:
+    bodies = prepare_round_comment(body)
+    if len(bodies) > 1:
+        log(config, f"Posting round transport with {len(bodies) - 1} sidecars to PR #{pr_number}")
     log(config, f"Posting agent output to PR #{pr_number}")
-    if config.dry_run:
-        runner.run(
-            [config.gh_cmd, "pr", "comment", str(pr_number), "--repo", config.repo, "--body", body],
-            cwd=active_workdir(config),
-        )
-        return
-
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
-        handle.write(body)
-        path = handle.name
-    try:
-        runner.run(
-            [
-                config.gh_cmd,
-                "pr",
-                "comment",
-                str(pr_number),
-                "--repo",
-                config.repo,
-                "--body-file",
-                path,
-            ],
-            cwd=active_workdir(config),
-        )
-    finally:
-        try:
-            os.unlink(path)
-        except FileNotFoundError:
-            pass
+    for prepared in bodies:
+        _post_comment_body(runner, config=config, command=["pr", "comment", str(pr_number)], body=prepared)
 
 
 def post_issue_comment(
@@ -1085,40 +1062,25 @@ def post_issue_comment(
     issue_number: int,
     body: str,
 ) -> None:
+    bodies = prepare_round_comment(body)
+    if len(bodies) > 1:
+        log(config, f"Posting round transport with {len(bodies) - 1} sidecars to issue #{issue_number}")
     log(config, f"Posting agent output to issue #{issue_number}")
-    if config.dry_run:
-        runner.run(
-            [
-                config.gh_cmd,
-                "issue",
-                "comment",
-                str(issue_number),
-                "--repo",
-                config.repo,
-                "--body",
-                body,
-            ],
-            cwd=active_workdir(config),
-        )
-        return
+    for prepared in bodies:
+        _post_comment_body(runner, config=config, command=["issue", "comment", str(issue_number)], body=prepared)
 
+
+def _post_comment_body(runner: Runner, *, config: AgentLoopConfig, command: list[str], body: str) -> None:
+    if len(body) > MAX_GITHUB_BODY_CHARS:
+        raise AgentLoopError(f"GitHub comment body exceeds {MAX_GITHUB_BODY_CHARS} characters; shorten the response.")
+    if config.dry_run:
+        runner.run([config.gh_cmd, *command, "--repo", config.repo, "--body", body], cwd=active_workdir(config))
+        return
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
         handle.write(body)
         path = handle.name
     try:
-        runner.run(
-            [
-                config.gh_cmd,
-                "issue",
-                "comment",
-                str(issue_number),
-                "--repo",
-                config.repo,
-                "--body-file",
-                path,
-            ],
-            cwd=active_workdir(config),
-        )
+        runner.run([config.gh_cmd, *command, "--repo", config.repo, "--body-file", path], cwd=active_workdir(config))
     finally:
         try:
             os.unlink(path)
@@ -1133,6 +1095,8 @@ def create_issue(
     title: str,
     body: str,
 ) -> str | None:
+    if len(body) > MAX_GITHUB_BODY_CHARS:
+        raise AgentLoopError(f"GitHub issue body exceeds {MAX_GITHUB_BODY_CHARS} characters; shorten the response.")
     log(config, f"Creating GitHub issue: {title}")
     if config.dry_run:
         result = runner.run(

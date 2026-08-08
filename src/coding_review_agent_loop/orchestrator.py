@@ -295,6 +295,7 @@ from .round_state import (
     _serialize_unresolved_item,
     _strip_round_metadata,
 )
+from .round_transport import is_round_transport_sidecar
 from .unresolved_items import (
     ALL_RESOLVED_PROSE_RE,
     CODER_DISPUTE_NOTE_PREFIX,
@@ -6940,6 +6941,8 @@ DISCUSS_CONSENSUS_MARKER_RE = re.compile(
 
 
 def _is_bot_authored_discuss_comment(body: str) -> bool:
+    if is_round_transport_sidecar(body):
+        return True
     if DISCUSS_CONSENSUS_MARKER_RE.search(body):
         return True
     # Split-materialization comments (#476) can land on the same issue a

@@ -561,8 +561,12 @@ This location is outside git checkouts, so it never dirties any working tree.
   `build-resume` and skips already-completed reviewer turns.
 - Long-running Codex/Gemini subprocess progress is not streamed; check the log
   file in `/tmp/coding-review-agent-loop/skill-logs/` if a reviewer hangs.
-- The structured protocol (AGENT_LOOP_META markers, structured JSON responses)
-  must match the versions expected by the existing library in `src/`.
+- The structured protocol uses `AGENT_LOOP_META` markers with a `v1_` zlib-
+  compressed URL-safe base64 payload (while accepting legacy plain-base64
+  markers). Oversized metadata is carried in `AGENT_LOOP_SIDECAR` comments that
+  precede the anchor. Keep those sidecars: if resume reports one missing or
+  corrupt, restore it or remove the incomplete anchor and rerun. Structured JSON
+  responses must match the versions expected by the existing library in `src/`.
 
 ---
 
