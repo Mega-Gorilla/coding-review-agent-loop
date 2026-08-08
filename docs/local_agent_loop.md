@@ -1084,11 +1084,12 @@ executable in *program position* -- for example `/usr/bin/python3`, a venv's
 treated as a test location, and neither is the value of a narrow set of
 interpreter-valued flags/env-vars (`--python`, `PYTHONPATH=`, and similar).
 The supported wrappers are parsed only far enough to locate their nested
-program: `timeout`, `sudo`, `nice`, `stdbuf`, `env`, and `xargs`. GNU `timeout`
-consumes one duration after its options (including bare, suffixed, and
-fractional values); value-taking wrapper options are likewise consumed only
-for their defined options such as `timeout -k`/`-s`, `sudo -u`/`-g`, `nice -n`,
-`stdbuf -i`/`-o`/`-e`, `env -u`/`-C`, and `xargs -n`/`-P`/`-I`. These exemptions
+program: `timeout`, `sudo`, `nohup`, `nice`, `time`, `stdbuf`, `command`,
+`env`, and `xargs`. GNU `timeout` consumes one duration after its options
+(including bare, suffixed, and fractional values); value-taking wrapper options
+are likewise consumed only for their defined options such as `timeout -k`/`-s`,
+`sudo -u`/`-g`, `nice -n`, `stdbuf -i`/`-o`/`-e`, `env -u`/`-C`, and
+`xargs -n`/`-P`/`-I`. These exemptions
 are gated on command position or on a specific interpreter-valued construct,
 not on path components: wrapper operands, option values, workdirs,
 test/script targets, outputs, remote targets, malformed commands, and

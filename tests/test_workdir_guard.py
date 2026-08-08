@@ -250,6 +250,15 @@ def test_timeout_wrapped_urls_in_response_are_command_classified(tmp_path):
             validate_response_tests_within_workdir(f"Tests: `{command}`", assigned_workdir=assigned)
 
 
+@pytest.mark.parametrize("text", [
+    "Tests: time constraints meant we relied on the report at https://ci.example/123",
+    "Tests: env variables are documented at https://ci.example/123",
+    "Tests: Command output was saved to https://ci.example/123",
+])
+def test_accepts_wrapper_word_narrative_with_unattached_url(tmp_path, text):
+    validate_response_tests_within_workdir(text, assigned_workdir=_assigned(tmp_path))
+
+
 def test_timeout_wrapped_package_acquisition_keeps_path_checks(tmp_path):
     assigned = _assigned(tmp_path)
     validate_test_commands_within_workdir(

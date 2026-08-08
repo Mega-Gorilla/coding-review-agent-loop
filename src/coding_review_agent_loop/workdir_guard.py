@@ -566,7 +566,7 @@ def _is_command_clause(clause: _Clause) -> bool:
         return True
     tokens = clause.tokens
     traversal = _wrapper_traversal(tokens)
-    if traversal.recognized_prefix:
+    if traversal.recognized_prefix and traversal.effective_head_index is None:
         # A malformed recognized wrapper remains command syntax.  It gets no
         # nested-program exemption, but must not hide live URLs as prose.
         return True
