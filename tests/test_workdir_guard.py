@@ -168,6 +168,101 @@ def test_accepts_windows_interpreter_absolute_path(tmp_path):
     validate_test_commands_within_workdir((command,), assigned_workdir=assigned)
 
 
+# ---------------------------------------------------------------------------
+# Issue #616: operand-aware wrapper traversal.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", [
+    "timeout 180s /other/checkout/.venv/bin/python -m pytest tests/test_foo.py",
+    "timeout 180s /other/checkout/.venv/bin/pytest tests/test_foo.py",
+    "timeout -k 10s -s TERM 180s /other/checkout/.venv/bin/python -m pytest tests/test_foo.py",
+    "timeout -k10s -sTERM 180s /other/checkout/.venv/bin/python -m pytest tests/test_foo.py",
+    "timeout --kill-after=10s --signal=TERM 180 /other/checkout/.venv/bin/python -m pytest tests/test_foo.py",
+    "timeout -- 0.5 /other/checkout/.venv/bin/python -m pytest tests/test_foo.py",
+    "timeout --foreground 1h /other/checkout/.venv/bin/python -m pytest tests/test_foo.py",
+    "timeout 180s env VAR=1 /other/checkout/.venv/bin/python -m pytest tests/test_foo.py",
+    "sudo -u root /usr/bin/python3 -m pytest tests/test_foo.py",
+    "sudo -E /usr/bin/python3 -m pytest tests/test_foo.py",
+    "nice -n 10 /usr/bin/python3 -m pytest tests/test_foo.py",
+    "nice -10 /usr/bin/python3 -m pytest tests/test_foo.py",
+    "stdbuf -o L /usr/bin/python3 -m pytest tests/test_foo.py",
+    "env -i /usr/bin/python3 -m pytest tests/test_foo.py",
+    "xargs -n 1 /usr/bin/python3 -m pytest tests/test_foo.py",
+])
+def test_accepts_operand_aware_wrapper_interpreters(tmp_path, command):
+    validate_test_commands_within_workdir((command,), assigned_workdir=_assigned(tmp_path))
+
+
+def test_accepts_gnu_timeout_windows_interpreter(tmp_path):
+    validate_test_commands_within_workdir(
+        (r"timeout 180s C:\Python311\python.exe -m pytest tests\test_foo.py",),
+        assigned_workdir=_assigned(tmp_path),
+    )
+
+
+@pytest.mark.parametrize("command", [
+    "timeout 180s /outside/checkout/run_tests.sh",
+    "timeout 180s pytest /outside/checkout/tests/test_foo.py",
+    "timeout 180s cd /outside/checkout && pytest tests/test_foo.py",
+    "timeout 180s pytest --rootdir /outside/checkout tests/test_foo.py",
+    "timeout 180s pytest tests/test_foo.py > /outside/results.log",
+    "timeout -k /outside/value 180s /usr/bin/python3 -m pytest tests/test_foo.py",
+    "timeout /outside/checkout/run_tests.sh",
+])
+def test_rejects_timeout_wrapped_outside_paths(tmp_path, command):
+    with pytest.raises(AgentLoopError, match="outside the assigned checkout"):
+        validate_test_commands_within_workdir((command,), assigned_workdir=_assigned(tmp_path))
+
+
+@pytest.mark.parametrize("command", [
+    "timeout curl https://live.example",
+    "timeout badduration curl https://live.example",
+    "timeout -k",
+    "timeout 180s",
+    "sudo -u",
+])
+def test_malformed_wrappers_do_not_grant_exemptions(tmp_path, command):
+    assigned = _assigned(tmp_path)
+    if "https://" in command:
+        with pytest.raises(AgentLoopError, match="live remote target"):
+            validate_test_commands_within_workdir((command,), assigned_workdir=assigned)
+    else:
+        validate_test_commands_within_workdir((command,), assigned_workdir=assigned)
+
+
+def test_rejects_windows_native_timeout_option(tmp_path):
+    with pytest.raises(AgentLoopError, match="cannot be validated"):
+        validate_test_commands_within_workdir(
+            (r"timeout /t 180 C:\Python311\python.exe -m pytest tests\test_foo.py",),
+            assigned_workdir=_assigned(tmp_path),
+        )
+
+
+def test_timeout_wrapped_urls_in_response_are_command_classified(tmp_path):
+    assigned = _assigned(tmp_path)
+    for command in (
+        "timeout 180s curl https://live.example",
+        "timeout curl https://live.example",
+        "timeout badduration curl https://live.example",
+    ):
+        with pytest.raises(AgentLoopError, match="live remote target"):
+            validate_response_tests_within_workdir(f"Tests: `{command}`", assigned_workdir=assigned)
+
+
+def test_timeout_wrapped_package_acquisition_keeps_path_checks(tmp_path):
+    assigned = _assigned(tmp_path)
+    validate_test_commands_within_workdir(
+        ("timeout 180s python -m pip install https://packages.example/pkg.whl",),
+        assigned_workdir=assigned,
+    )
+    with pytest.raises(AgentLoopError, match="outside the assigned checkout"):
+        validate_test_commands_within_workdir(
+            ("timeout 180s python -m pip install --target /outside/site https://packages.example/pkg.whl",),
+            assigned_workdir=assigned,
+        )
+
+
 def test_accepts_ran_absolute_interpreter_through_response_path(tmp_path):
     assigned = _assigned(tmp_path)
     text = "Tests: ran /usr/bin/python3 -m pytest tests/test_foo.py - 12 passed."
