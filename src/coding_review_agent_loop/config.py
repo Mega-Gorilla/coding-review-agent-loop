@@ -942,8 +942,7 @@ def config_from_args(
         watch_pending_ci=(
             bool(getattr(args, "auto_merge", False))
             if getattr(args, "watch_pending_ci", None) is None
-            else bool(getattr(args, "auto_merge", False))
-            and bool(args.watch_pending_ci)
+            else bool(args.watch_pending_ci)
         ),
         invocation_argv=invocation_argv,
         ci_queued_grace_seconds=getattr(args, "ci_queued_grace_seconds", 1200),

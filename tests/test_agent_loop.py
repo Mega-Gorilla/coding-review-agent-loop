@@ -1284,6 +1284,18 @@ def test_config_allows_disabling_auto_merge_ci_watch(tmp_path):
     assert config.watch_pending_ci is False
 
 
+def test_config_honors_explicit_ci_watch_without_auto_merge(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args([
+        "pr", "77", "--repo", "OWNER/REPO", "--watch-pending-ci",
+    ])
+
+    config = config_from_args(args, FakeRunner())
+
+    assert config.watch_pending_ci is True
+    assert config.auto_merge is False
+
+
 @pytest.mark.parametrize(
     ("coder", "reviewer", "missing_command", "override_flag"),
     [

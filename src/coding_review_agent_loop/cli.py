@@ -335,7 +335,6 @@ def build_parser() -> argparse.ArgumentParser:
         )
         subparser.add_argument(
             "--watch-pending-ci",
-            "--no-watch-pending-ci",
             action=argparse.BooleanOptionalAction,
             dest="watch_pending_ci",
             default=None,

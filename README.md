@@ -634,7 +634,9 @@ no worker behind, and a rerun starts from fresh PR state. On timeout the local
 terminal prints a shell-quoted rerun command; PR comments intentionally contain
 no captured command arguments. Use `--no-watch-pending-ci` with `--auto-merge`
 to retain the previous behavior. Without `--auto-merge`, agent-loop reports an
-approved PR as merge-ready and does not wait for CI.
+approved PR as merge-ready and does not wait for CI, unless `--watch-pending-ci`
+is passed explicitly, in which case it still watches the check board and
+reports merge-ready without merging.
 
 By default Claude is the coder and Codex is the reviewer. Reverse that with:
 
