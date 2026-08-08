@@ -471,8 +471,19 @@ def _recover_unrecorded_pr_head_advance(
         if record.metadata.role == "reviewer"
         and (latest_coder_record is None or record.index > latest_coder_record.index)
     )
+    new_item_records_after_coder = tuple(
+        record
+        for record in current_round_records
+        if record.metadata.role in {"reviewer", "summary"}
+        and (latest_coder_record is None or record.index > latest_coder_record.index)
+    )
     all_reviewer_records = tuple(
         record for record in current_round_records if record.metadata.role == "reviewer"
+    )
+    all_new_item_records = tuple(
+        record
+        for record in current_round_records
+        if record.metadata.role in {"reviewer", "summary"}
     )
 
     if latest_coder_record is not None and not reviewer_records_after_coder:
@@ -488,7 +499,7 @@ def _recover_unrecorded_pr_head_advance(
             retain_future=False,
         )
         recovered_items = _active_pr_items(recovered_items)
-        _append_active_pr_new_items(recovered_items, reviewer_records_after_coder)
+        _append_active_pr_new_items(recovered_items, new_item_records_after_coder)
         coder_output = latest_coder_record.metadata.raw_structured_coder_response or latest_coder_record.body
         compact_prior_summaries = latest_coder_record.metadata.compact_prior_summaries
     elif all_reviewer_records:
@@ -499,7 +510,7 @@ def _recover_unrecorded_pr_head_advance(
             retain_future=False,
         )
         recovered_items = _active_pr_items(recovered_items)
-        _append_active_pr_new_items(recovered_items, all_reviewer_records)
+        _append_active_pr_new_items(recovered_items, all_new_item_records)
         coder_output = None
         compact_prior_summaries = ()
     else:

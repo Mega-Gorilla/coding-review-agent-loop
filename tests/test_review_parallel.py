@@ -189,6 +189,8 @@ class _EarlyPublicationBarrierRunner(FakeRunner):
 
     def run_with_log(self, args, *, cwd, **kwargs):
         cmd = [str(arg) for arg in args]
+        if cmd[:1] == ["claude"] and not self.gemini_finished.is_set():
+            self.coder_started_before_gemini_finished = True
         if cmd[:1] == ["gemini"]:
             time.sleep(0.15)
             result = super().run_with_log(args, cwd=cwd, **kwargs)
@@ -198,8 +200,6 @@ class _EarlyPublicationBarrierRunner(FakeRunner):
 
     def run(self, args, *, cwd, **kwargs):
         cmd = [str(arg) for arg in args]
-        if cmd[:1] == ["claude"] and not self.gemini_finished.is_set():
-            self.coder_started_before_gemini_finished = True
         if cmd[:3] == ["gh", "pr", "comment"] and not self.gemini_finished.is_set():
             self.codex_published_before_gemini_finished = True
         return super().run(args, cwd=cwd, **kwargs)
