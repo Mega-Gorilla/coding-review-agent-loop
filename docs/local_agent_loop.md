@@ -759,11 +759,14 @@ Execution model:
   plan/PR state (current plan or PR diff, prior unresolved items, PR checks
   snapshot), then all pending turns are submitted to a thread pool. Same-round
   reviewers never see each other's in-progress output.
-- All outcomes are collected before any round state is mutated. Healthy
-  reviewers are applied — comment posted, unresolved items numbered, session
-  IDs recorded — from the main thread, in configured `--reviewer` order, so
-  transcripts and resume state stay deterministic regardless of completion
-  order.
+- A validated healthy review is posted by the main thread as soon as its worker
+  completes. Its provisional publication checkpoint is durable, so resume
+  avoids duplicate comments even if the next run is sequential.
+- The orchestrator still waits for every reviewer to settle before shared state
+  changes: it aggregates outcomes, numbers unresolved items, and may begin
+  coder work only in configured `--reviewer` order. It then posts a neutral
+  reconciliation checkpoint; this summary is not a reviewer verdict and is
+  excluded from reviewer/approval selection.
 - Only after every healthy outcome is applied does the orchestrator raise a
   fatal failure, if any: a quota-reset failure takes priority; otherwise the
   first failure in configured `--reviewer` order. Because healthy reviewers
@@ -779,8 +782,8 @@ Execution model:
   the remaining reviewers still launch. A single shared PR-checks snapshot is
   used for every concurrently launched reviewer's prompt in the round,
   instead of one fetch per reviewer as sequential mode does.
-- Resume works unchanged: already-posted round reviews are reused without
-  re-invoking their reviewers, and when every configured reviewer's review
+- Resume works in either mode: already-posted parallel publication checkpoints
+  are reused without re-invoking or reposting their reviewers, and when every configured reviewer's review
   resumes from comments (or a round is entirely skipped, e.g. head-advance
   recovery routing), no thread pool is constructed at all.
 - Parallel mode requires a distinct workdir per reviewer and rejects the run

@@ -1,5 +1,6 @@
 """Tests for opt-in parallel plan/PR reviewer execution (#594)."""
 import threading
+import time
 from unittest.mock import patch
 
 import pytest
@@ -10,6 +11,7 @@ from coding_review_agent_loop.errors import QuotaResetExceededError
 from agent_loop_helpers import (
     FakeRunner,
     make_config,
+    structured_coder_followup,
     structured_plan_review,
     structured_plan_state,
     structured_pr_review,
@@ -85,10 +87,9 @@ def test_plan_first_parallel_runs_same_round_reviewers_concurrently(tmp_path):
     assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
 
     assert runner.overlap_confirmed, "same-round plan reviewers did not run concurrently"
-    assert "Codex plan review complete." in runner.comments[1]
-    assert "-- OpenAI Codex" in runner.comments[1]
-    assert "Gemini plan review complete." in runner.comments[2]
-    assert "-- Google Gemini" in runner.comments[2]
+    assert any("Codex plan review complete." in comment for comment in runner.comments)
+    assert any("Gemini plan review complete." in comment for comment in runner.comments)
+    assert any("reconciliation" in comment for comment in runner.comments)
 
 
 def test_pr_loop_parallel_runs_same_round_reviewers_concurrently(tmp_path):
@@ -103,10 +104,9 @@ def test_pr_loop_parallel_runs_same_round_reviewers_concurrently(tmp_path):
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
     assert runner.overlap_confirmed, "same-round PR reviewers did not run concurrently"
-    assert "Codex PR review complete." in runner.comments[0]
-    assert "-- OpenAI Codex" in runner.comments[0]
-    assert "Gemini PR review complete." in runner.comments[1]
-    assert "-- Google Gemini" in runner.comments[1]
+    assert any("Codex PR review complete." in comment for comment in runner.comments)
+    assert any("Gemini PR review complete." in comment for comment in runner.comments)
+    assert "reconciliation" in runner.comments[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +143,11 @@ def test_plan_first_parallel_matches_sequential_comments(tmp_path):
     assert run_issue_loop(sequential_runner, issue_number=56, config=sequential_config, plan_first=True) == 0
     assert run_issue_loop(parallel_runner, issue_number=56, config=parallel_config, plan_first=True) == 0
 
-    assert parallel_runner.comments == sequential_runner.comments
+    reviewer_comments = lambda runner: {
+        comment for comment in runner.comments if comment.startswith("**Review verdict:")
+    }
+    assert reviewer_comments(parallel_runner) == reviewer_comments(sequential_runner)
+    assert "reconciliation" in parallel_runner.comments[-2]
 
 
 def test_pr_loop_parallel_matches_sequential_comments(tmp_path):
@@ -167,7 +171,122 @@ def test_pr_loop_parallel_matches_sequential_comments(tmp_path):
     assert run_pr_loop(sequential_runner, pr_number=77, config=sequential_config) == 0
     assert run_pr_loop(parallel_runner, pr_number=77, config=parallel_config) == 0
 
-    assert parallel_runner.comments == sequential_runner.comments
+    reviewer_comments = lambda runner: {
+        comment for comment in runner.comments if comment.startswith("**Review verdict:")
+    }
+    assert reviewer_comments(parallel_runner) == reviewer_comments(sequential_runner)
+    assert "reconciliation" in parallel_runner.comments[-1]
+
+
+class _EarlyPublicationBarrierRunner(FakeRunner):
+    """Makes Gemini slow enough to observe completion-order publication."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.gemini_finished = threading.Event()
+        self.codex_published_before_gemini_finished = False
+        self.coder_started_before_gemini_finished = False
+
+    def run_with_log(self, args, *, cwd, **kwargs):
+        cmd = [str(arg) for arg in args]
+        if cmd[:1] == ["claude"] and not self.gemini_finished.is_set():
+            self.coder_started_before_gemini_finished = True
+        if cmd[:1] == ["gemini"]:
+            time.sleep(0.15)
+            result = super().run_with_log(args, cwd=cwd, **kwargs)
+            self.gemini_finished.set()
+            return result
+        return super().run_with_log(args, cwd=cwd, **kwargs)
+
+    def run(self, args, *, cwd, **kwargs):
+        cmd = [str(arg) for arg in args]
+        if cmd[:3] == ["gh", "pr", "comment"] and not self.gemini_finished.is_set():
+            self.codex_published_before_gemini_finished = True
+        return super().run(args, cwd=cwd, **kwargs)
+
+
+def test_pr_parallel_publishes_fast_review_before_settlement_and_coder_followup(tmp_path):
+    runner = _EarlyPublicationBarrierRunner(
+        codex_outputs=[structured_pr_review(
+            state="blocking", summary="Codex found two blockers.",
+            blocking_items=["First blocker.", "Second blocker."],
+        ), structured_pr_review(
+            summary="Codex approves after the fix.",
+            prior_item_dispositions=[
+                {"item_id": "item-1", "disposition": "resolved"},
+                {"item_id": "item-2", "disposition": "resolved"},
+            ],
+        )],
+        gemini_outputs=[structured_pr_review(summary="Gemini approves.", reviewer="Google Gemini"),
+                        structured_pr_review(
+                            summary="Gemini approves after the fix.", reviewer="Google Gemini",
+                            prior_item_dispositions=[
+                                {"item_id": "item-1", "disposition": "resolved"},
+                                {"item_id": "item-2", "disposition": "resolved"},
+                            ],
+                        )],
+        claude_outputs=[structured_coder_followup(
+            summary="Fixed both blockers.", addressed_items=["item-1", "item-2"]
+        )],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), review_parallel=True)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert runner.codex_published_before_gemini_finished
+    assert not runner.coder_started_before_gemini_finished
+    coder_prompt = next("\n".join(cmd) for cmd, _cwd in runner.commands if cmd[:1] == ["claude"])
+    assert "[item-1]" in coder_prompt and "[item-2]" in coder_prompt
+
+
+def test_pr_parallel_resume_after_publication_does_not_duplicate_or_lose_items(tmp_path):
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(
+                state="blocking", summary="Codex found a blocker.", blocking_items=["Persist this item."]
+            ),
+            structured_pr_review(
+                summary="Codex approves after the fix.",
+                prior_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+            ),
+        ],
+        gemini_outputs=[
+            structured_pr_review(summary="Gemini approves.", reviewer="Google Gemini"),
+            structured_pr_review(
+                summary="Gemini approves after the fix.", reviewer="Google Gemini",
+                prior_item_dispositions=[{"item_id": "item-1", "disposition": "resolved"}],
+            ),
+        ],
+        claude_outputs=[structured_coder_followup(
+            summary="Fixed the persisted item.", addressed_items=["item-1"]
+        )],
+    )
+    config = make_config(tmp_path, reviewer=("codex", "gemini"), review_parallel=True)
+    real_post = orchestrator.post_pr_comment
+
+    def interrupt_before_reconciliation(*args, **kwargs):
+        if "reconciliation" in kwargs["body"]:
+            raise KeyboardInterrupt
+        return real_post(*args, **kwargs)
+
+    with patch.object(orchestrator, "post_pr_comment", side_effect=interrupt_before_reconciliation):
+        with pytest.raises(KeyboardInterrupt):
+            run_pr_loop(runner, pr_number=77, config=config)
+
+    codex_publications = lambda: sum(
+        (metadata := orchestrator._decode_round_metadata(
+            orchestrator.ROUND_RESUME_MARKER_RE.search(comment["body"])["payload"]
+        )).agent == "Codex"
+        and metadata.phase == "publication"
+        and metadata.round_number == 1
+        for comment in runner.pr_payload["comments"]
+        if orchestrator.ROUND_RESUME_MARKER_RE.search(comment["body"])
+    )
+    assert codex_publications() == 1
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+    assert codex_publications() == 1
+    coder_prompt = next("\n".join(cmd) for cmd, _cwd in runner.commands if cmd[:1] == ["claude"])
+    assert "[item-1]" in coder_prompt
 
 
 # ---------------------------------------------------------------------------
@@ -194,8 +313,8 @@ def test_plan_first_parallel_collects_healthy_review_before_raising_then_resumes
 
     # Gemini's healthy review is posted (comment[0] is the coder's plan) even
     # though Codex's failure aborts the round afterward.
-    assert len(runner.comments) == 2
-    assert "Gemini approves the plan." in runner.comments[1]
+    assert len(runner.comments) == 3
+    assert any("Gemini approves the plan." in comment for comment in runner.comments)
 
     # A rerun resumes Gemini's posted review instead of re-invoking it.
     commands_before_rerun = len(runner.commands)
@@ -222,8 +341,8 @@ def test_pr_loop_parallel_collects_healthy_review_before_raising_then_resumes(tm
     with pytest.raises(AgentLoopError, match="Codex"):
         run_pr_loop(runner, pr_number=77, config=config)
 
-    assert len(runner.comments) == 1
-    assert "Gemini approves the PR." in runner.comments[0]
+    assert len(runner.comments) == 2
+    assert any("Gemini approves the PR." in comment for comment in runner.comments)
 
     commands_before_rerun = len(runner.commands)
     runner.codex_outputs.append(structured_pr_review(summary="Codex approves after rerun."))
@@ -257,8 +376,8 @@ def test_pr_loop_parallel_sync_failure_isolated_from_healthy_reviewer(tmp_path):
             run_pr_loop(runner, pr_number=77, config=config)
 
     assert not any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
-    assert len(runner.comments) == 1
-    assert "Gemini approves the PR." in runner.comments[0]
+    assert len(runner.comments) == 2
+    assert any("Gemini approves the PR." in comment for comment in runner.comments)
 
 
 # ---------------------------------------------------------------------------
@@ -469,5 +588,5 @@ def test_plan_first_parallel_repair_isolated_between_reviewers(tmp_path):
         assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
 
     assert len(repair_calls) == 1
-    assert "Codex approves after repair." in runner.comments[1]
-    assert "Gemini approves the plan." in runner.comments[2]
+    assert any("Codex approves after repair." in comment for comment in runner.comments)
+    assert any("Gemini approves the plan." in comment for comment in runner.comments)

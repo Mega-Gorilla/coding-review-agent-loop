@@ -3924,6 +3924,62 @@ def test_resume_pr_round_recovers_unrecorded_head_advance_reviewer_new_item():
     assert [item.item_id for item in resumed.prior_items] == ["item-2"]
     assert resumed.next_unresolved_item_number == 3
 
+
+def test_resume_pr_round_recovers_parallel_reconciliation_new_items_after_head_advance():
+    """Parallel publication checkpoints omit items; reconciliation owns the ledger."""
+    active_items = (
+        UnresolvedReviewItem(
+            item_id="item-1",
+            reviewer="OpenAI Codex",
+            source_round=1,
+            text="Preserve the first reconciled blocker.",
+            status="blocking",
+        ),
+        UnresolvedReviewItem(
+            item_id="item-2",
+            reviewer="OpenAI Codex",
+            source_round=1,
+            text="Preserve the second reconciled blocker.",
+            status="same-pr",
+        ),
+    )
+    coder_comment = _attach_round_metadata(
+        "Initial PR handoff.\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        PostedRoundMetadata(
+            flow="pr", role="coder", agent="Claude", round_number=1,
+            subject="old-sha", prior_items=(),
+        ),
+    )
+    publication_comment = _attach_round_metadata(
+        "Blocked.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+        PostedRoundMetadata(
+            flow="pr", role="reviewer", agent="Codex", round_number=1,
+            subject="old-sha", prior_items=(), state="blocking", phase="publication",
+        ),
+    )
+    reconciliation_comment = _attach_round_metadata(
+        "Reconciliation.\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex",
+        PostedRoundMetadata(
+            flow="pr", role="summary", agent="Review reconciliation", round_number=1,
+            subject="old-sha", prior_items=(), new_items=active_items, state="blocking",
+        ),
+    )
+
+    resumed = _resume_pr_round(
+        [
+            IssueComment(author="bot", created_at="2026-05-25T00:00:00Z", body=coder_comment),
+            IssueComment(author="bot", created_at="2026-05-25T00:01:00Z", body=publication_comment),
+            IssueComment(author="bot", created_at="2026-05-25T00:02:00Z", body=reconciliation_comment),
+        ],
+        head_sha="new-sha",
+        configured_reviewers=("codex",),
+    )
+
+    assert resumed is not None
+    assert resumed.unrecorded_head_advance is True
+    assert [item.item_id for item in resumed.prior_items] == ["item-1", "item-2"]
+    assert resumed.next_unresolved_item_number == 3
+
 def test_resume_pr_round_recovers_coder_only_unrecorded_head_advance():
     carried_item = UnresolvedReviewItem(
         item_id="item-1",

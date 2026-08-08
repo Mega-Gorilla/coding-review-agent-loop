@@ -82,6 +82,10 @@ class PostedRoundMetadata:
     # the current signed requirements from one made before new requirements
     # were surfaced for the same immutable PR head.
     surfaced_reviewer_requirement_ids: tuple[str, ...] = ()
+    # Parallel reviewers publish a durable provisional checkpoint before the
+    # configured-order settlement barrier.  Legacy records are authoritative.
+    phase: str = "authoritative"
+    canonical_reviewer_response: str | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +111,7 @@ class ResumedReviewRound:
     ledger_may_be_incomplete: bool = False
     compact_prior_summaries: tuple[str, ...] = ()
     unrecorded_head_advance: bool = False
+    reconciled: bool = False
 
 
 def _serialize_unresolved_item(item: UnresolvedReviewItem) -> dict[str, object]:
@@ -184,6 +189,8 @@ def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
         "result_mode": metadata.result_mode,
         "evidence_reconciliation": metadata.evidence_reconciliation,
         "surfaced_reviewer_requirement_ids": list(metadata.surfaced_reviewer_requirement_ids),
+        "phase": metadata.phase,
+        "canonical_reviewer_response": metadata.canonical_reviewer_response,
     }
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -254,6 +261,11 @@ def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
             ),
             surfaced_reviewer_requirement_ids=tuple(
                 str(item) for item in payload.get("surfaced_reviewer_requirement_ids", [])
+            ),
+            phase=str(payload.get("phase", "authoritative")),
+            canonical_reviewer_response=(
+                str(payload["canonical_reviewer_response"])
+                if payload.get("canonical_reviewer_response") is not None else None
             ),
         )
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
@@ -459,8 +471,19 @@ def _recover_unrecorded_pr_head_advance(
         if record.metadata.role == "reviewer"
         and (latest_coder_record is None or record.index > latest_coder_record.index)
     )
+    new_item_records_after_coder = tuple(
+        record
+        for record in current_round_records
+        if record.metadata.role in {"reviewer", "summary"}
+        and (latest_coder_record is None or record.index > latest_coder_record.index)
+    )
     all_reviewer_records = tuple(
         record for record in current_round_records if record.metadata.role == "reviewer"
+    )
+    all_new_item_records = tuple(
+        record
+        for record in current_round_records
+        if record.metadata.role in {"reviewer", "summary"}
     )
 
     if latest_coder_record is not None and not reviewer_records_after_coder:
@@ -476,7 +499,7 @@ def _recover_unrecorded_pr_head_advance(
             retain_future=False,
         )
         recovered_items = _active_pr_items(recovered_items)
-        _append_active_pr_new_items(recovered_items, reviewer_records_after_coder)
+        _append_active_pr_new_items(recovered_items, new_item_records_after_coder)
         coder_output = latest_coder_record.metadata.raw_structured_coder_response or latest_coder_record.body
         compact_prior_summaries = latest_coder_record.metadata.compact_prior_summaries
     elif all_reviewer_records:
@@ -487,7 +510,7 @@ def _recover_unrecorded_pr_head_advance(
             retain_future=False,
         )
         recovered_items = _active_pr_items(recovered_items)
-        _append_active_pr_new_items(recovered_items, all_reviewer_records)
+        _append_active_pr_new_items(recovered_items, all_new_item_records)
         coder_output = None
         compact_prior_summaries = ()
     else:
@@ -602,6 +625,7 @@ def _resume_pr_round(
             if latest_coder_record is not None
             else ()
         ),
+        reconciled=any(record.metadata.role == "summary" for record in current_round_records),
     )
 
 
@@ -652,6 +676,7 @@ def _resume_plan_round(
             + 1,
             ledger_may_be_incomplete=ledger_may_be_incomplete,
             compact_prior_summaries=latest_coder_record.metadata.compact_prior_summaries,
+            reconciled=any(record.metadata.role == "summary" for record in current_round_records),
         ),
     )
 
