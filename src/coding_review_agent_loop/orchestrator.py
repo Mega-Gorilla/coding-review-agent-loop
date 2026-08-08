@@ -3976,6 +3976,38 @@ def _run_plan_first_loop(
                 and record.metadata.phase == "publication"
             )
         }
+
+        def _post_plan_reviewer_comment(
+            reviewer_name: str,
+            parsed: ParsedPlanReview,
+            *,
+            review_output: str,
+            model_used: str | None,
+            new_items: tuple[UnresolvedReviewItem, ...] = (),
+            phase: str = "authoritative",
+        ) -> None:
+            """Post one plan review using the same rendering and durable record."""
+            post_issue_comment(
+                runner, config=config, issue_number=issue_number,
+                body=_attach_round_metadata(
+                    render_public_agent_comment(
+                        kind="plan_review", parsed=parsed, agent=reviewer_name,
+                        prior_items=prior_unresolved_items, dispositions=parsed.dispositions,
+                        human_requirements_resolved_flag=human_requirements_resolved(review_output),
+                        config=config, model_used=model_used,
+                    ),
+                    PostedRoundMetadata(
+                        flow="plan", role="reviewer", agent=reviewer_name,
+                        round_number=round_number, subject=_plan_subject(current_plan),
+                        prior_items=prior_unresolved_items, dispositions=parsed.dispositions,
+                        new_items=new_items, state=parsed.state,
+                        compact_prior_summaries=tuple(compact_prior_summaries),
+                        model_used=model_used, phase=phase,
+                        canonical_reviewer_response=(review_output if phase == "publication" else None),
+                    ),
+                ),
+            )
+
         if config.review_parallel:
             pending_plan_reviewers = [
                 reviewer for reviewer in configured_reviewers
@@ -4057,27 +4089,9 @@ def _run_plan_first_loop(
                     )
                     if _is_incomplete_plan_review(parsed):
                         return
-                    post_issue_comment(
-                        runner, config=config, issue_number=issue_number,
-                        body=_attach_round_metadata(
-                            render_public_agent_comment(
-                                kind="plan_review", parsed=parsed, agent=reviewer_name,
-                                prior_items=prior_unresolved_items,
-                                dispositions=parsed.dispositions,
-                                human_requirements_resolved_flag=human_requirements_resolved(turn.response.text),
-                                config=config, model_used=turn.response.model_used,
-                            ),
-                            PostedRoundMetadata(
-                                flow="plan", role="reviewer", agent=reviewer_name,
-                                round_number=round_number, subject=_plan_subject(current_plan),
-                                prior_items=prior_unresolved_items,
-                                dispositions=parsed.dispositions, state=parsed.state,
-                                compact_prior_summaries=tuple(compact_prior_summaries),
-                                model_used=turn.response.model_used, phase="publication",
-                                canonical_reviewer_response=turn.response.text,
-                                publication_identity=f"plan:{_plan_subject(current_plan)}:{round_number}:{reviewer_name}",
-                            ),
-                        ),
+                    _post_plan_reviewer_comment(
+                        reviewer_name, parsed, review_output=turn.response.text,
+                        model_used=turn.response.model_used, phase="publication",
                     )
                     early_published_plan_reviewers.add(reviewer)
 
@@ -4267,37 +4281,10 @@ def _run_plan_first_loop(
                     reviewer_new_unresolved_items.append(tracked_item)
                     next_unresolved_item_number += 1
                 if reviewer not in early_published_plan_reviewers:
-                    post_issue_comment(
-                    runner,
-                    config=config,
-                    issue_number=issue_number,
-                    body=_attach_round_metadata(
-                        render_public_agent_comment(
-                            kind="plan_review",
-                            parsed=parsed_review,
-                            agent=reviewer_name,
-                            prior_items=prior_unresolved_items,
-                            dispositions=parsed_review.dispositions,
-                            human_requirements_resolved_flag=human_requirements_resolved(
-                                review_output
-                            ),
-                            config=config,
-                            model_used=review_model_used,
-                        ),
-                        PostedRoundMetadata(
-                            flow="plan",
-                            role="reviewer",
-                            agent=reviewer_name,
-                            round_number=round_number,
-                            subject=_plan_subject(current_plan),
-                            prior_items=prior_unresolved_items,
-                            dispositions=parsed_review.dispositions,
-                            new_items=tuple(reviewer_new_unresolved_items),
-                            state=review_state,
-                            compact_prior_summaries=tuple(compact_prior_summaries),
-                            model_used=review_model_used,
-                        ),
-                    ),
+                    _post_plan_reviewer_comment(
+                        reviewer_name, parsed_review, review_output=review_output,
+                        model_used=review_model_used,
+                        new_items=tuple(reviewer_new_unresolved_items),
                     )
             else:
                 round_new_unresolved_items.extend(reviewer_new_unresolved_items)
@@ -5504,8 +5491,46 @@ def run_pr_loop(
             pr_fatal_errors: list[tuple[str, AgentLoopError]] = []
             pr_prep_failures: dict[AgentName, AgentLoopError] = {}
             pr_turn_results: dict[AgentName, _ReviewerTurnResult] = {}
-            early_published_pr_reviewers: set[AgentName] = set()
+            early_published_pr_reviewers: set[AgentName] = {
+                reviewer
+                for reviewer in configured_reviewers
+                if (
+                    (record := resumed_by_name.get(agent_display_name(reviewer))) is not None
+                    and record.metadata.phase == "publication"
+                )
+            }
             shared_reviewer_pr_checks: PullRequestChecks | None = None
+
+            def _post_pr_reviewer_comment(
+                reviewer_name: str,
+                parsed: ParsedReview,
+                *,
+                review_output: str,
+                model_used: str | None,
+                new_items: tuple[UnresolvedReviewItem, ...] = (),
+                phase: str = "authoritative",
+            ) -> None:
+                """Post one PR review using the same rendering and durable record."""
+                post_pr_comment(
+                    runner, config=config, pr_number=pr_number,
+                    body=_attach_round_metadata(
+                        render_public_agent_comment(
+                            kind="pr_review", parsed=parsed, agent=reviewer_name,
+                            human_requirements_resolved_flag=human_requirements_resolved(review_output),
+                            prior_items=prior_unresolved_items, dispositions=parsed.dispositions,
+                            config=config, model_used=model_used,
+                        ),
+                        PostedRoundMetadata(
+                            flow="pr", role="reviewer", agent=reviewer_name,
+                            round_number=round_number, subject=current_pr_subject,
+                            prior_items=prior_unresolved_items, dispositions=parsed.dispositions,
+                            new_items=new_items, state=parsed.state, model_used=model_used,
+                            surfaced_reviewer_requirement_ids=surfaced_reviewer_requirement_ids,
+                            phase=phase,
+                            canonical_reviewer_response=(review_output if phase == "publication" else None),
+                        ),
+                    ),
+                )
 
             def _pr_reviewer_prelaunch_kind(reviewer: AgentName) -> str:
                 # Pure classification, no agent calls: mirrors the resumed/
@@ -5663,25 +5688,9 @@ def run_pr_loop(
                                 parsed = dataclasses_replace(parsed, state="approved", blocking_items=())
                             if _is_incomplete_pr_review(parsed):
                                 return
-                            post_pr_comment(
-                                runner, config=config, pr_number=pr_number,
-                                body=_attach_round_metadata(
-                                    render_public_agent_comment(
-                                        kind="pr_review", parsed=parsed, agent=reviewer_name,
-                                        human_requirements_resolved_flag=human_requirements_resolved(turn.response.text),
-                                        prior_items=prior_unresolved_items, dispositions=parsed.dispositions,
-                                        config=config, model_used=turn.response.model_used,
-                                    ),
-                                    PostedRoundMetadata(
-                                        flow="pr", role="reviewer", agent=reviewer_name,
-                                        round_number=round_number, subject=current_pr_subject,
-                                        prior_items=prior_unresolved_items, dispositions=parsed.dispositions,
-                                        state=parsed.state, model_used=turn.response.model_used,
-                                        surfaced_reviewer_requirement_ids=surfaced_reviewer_requirement_ids,
-                                        phase="publication", canonical_reviewer_response=turn.response.text,
-                                        publication_identity=f"pr:{current_pr_subject}:{round_number}:{reviewer_name}",
-                                    ),
-                                ),
+                            _post_pr_reviewer_comment(
+                                reviewer_name, parsed, review_output=turn.response.text,
+                                model_used=turn.response.model_used, phase="publication",
                             )
                             early_published_pr_reviewers.add(reviewer)
 
@@ -5974,9 +5983,8 @@ def run_pr_loop(
                 )
                 if review_state == "blocking":
                     if (
-                        resumed_record is None
+                        (resumed_record is None or resumed_record.metadata.phase == "publication")
                         and carried_approval_record is None
-                        and reviewer not in early_published_pr_reviewers
                     ):
                         if parsed_review.blocking_items:
                             for blocking_item in parsed_review.blocking_items:
@@ -6033,38 +6041,12 @@ def run_pr_loop(
                                 round_new_unresolved_items.append(tracked_item)
                                 reviewer_new_unresolved_items.append(tracked_item)
                                 next_unresolved_item_number += 1
-                        post_pr_comment(
-                            runner,
-                            config=config,
-                            pr_number=pr_number,
-                            body=_attach_round_metadata(
-                                render_public_agent_comment(
-                                    kind="pr_review",
-                                    parsed=parsed_review,
-                                    agent=reviewer_name,
-                                    human_requirements_resolved_flag=human_requirements_resolved(
-                                        review_output
-                                    ),
-                                    prior_items=prior_unresolved_items,
-                                    dispositions=parsed_review.dispositions,
-                                    config=config,
-                                    model_used=review_model_used,
-                                ),
-                                PostedRoundMetadata(
-                                    flow="pr",
-                                    role="reviewer",
-                                    agent=reviewer_name,
-                                    round_number=round_number,
-                                    subject=current_pr_subject,
-                                    prior_items=prior_unresolved_items,
-                                    dispositions=parsed_review.dispositions,
-                                    new_items=tuple(reviewer_new_unresolved_items),
-                                    state=review_state,
-                                    model_used=review_model_used,
-                                    surfaced_reviewer_requirement_ids=surfaced_reviewer_requirement_ids,
-                                ),
-                            ),
-                        )
+                        if reviewer not in early_published_pr_reviewers:
+                            _post_pr_reviewer_comment(
+                                reviewer_name, parsed_review, review_output=review_output,
+                                model_used=review_model_used,
+                                new_items=tuple(reviewer_new_unresolved_items),
+                            )
                     else:
                         if resumed_record is not None:
                             round_new_unresolved_items.extend(reviewer_new_unresolved_items)
@@ -6072,9 +6054,8 @@ def run_pr_loop(
 
                 approved_review_outputs.append((reviewer_name, review_output))
                 if (
-                    resumed_record is None
+                    (resumed_record is None or resumed_record.metadata.phase == "publication")
                     and carried_approval_record is None
-                    and reviewer not in early_published_pr_reviewers
                 ):
                     if config.approved_followups != "ignore":
                         for followup in parsed_review.followups.future:
@@ -6088,38 +6069,12 @@ def run_pr_loop(
                             round_new_unresolved_items.append(tracked_item)
                             reviewer_new_unresolved_items.append(tracked_item)
                             next_unresolved_item_number += 1
-                    post_pr_comment(
-                        runner,
-                        config=config,
-                        pr_number=pr_number,
-                        body=_attach_round_metadata(
-                            render_public_agent_comment(
-                                kind="pr_review",
-                                parsed=parsed_review,
-                                agent=reviewer_name,
-                                human_requirements_resolved_flag=human_requirements_resolved(
-                                    review_output
-                                ),
-                                prior_items=prior_unresolved_items,
-                                dispositions=parsed_review.dispositions,
-                                config=config,
-                                model_used=review_model_used,
-                            ),
-                            PostedRoundMetadata(
-                                flow="pr",
-                                role="reviewer",
-                                agent=reviewer_name,
-                                round_number=round_number,
-                                    subject=current_pr_subject,
-                                prior_items=prior_unresolved_items,
-                                dispositions=parsed_review.dispositions,
-                                new_items=tuple(reviewer_new_unresolved_items),
-                                state=review_state,
-                                model_used=review_model_used,
-                                surfaced_reviewer_requirement_ids=surfaced_reviewer_requirement_ids,
-                            ),
-                        ),
-                    )
+                    if reviewer not in early_published_pr_reviewers:
+                        _post_pr_reviewer_comment(
+                            reviewer_name, parsed_review, review_output=review_output,
+                            model_used=review_model_used,
+                            new_items=tuple(reviewer_new_unresolved_items),
+                        )
                 else:
                     if resumed_record is not None:
                         round_new_unresolved_items.extend(reviewer_new_unresolved_items)

@@ -86,7 +86,6 @@ class PostedRoundMetadata:
     # configured-order settlement barrier.  Legacy records are authoritative.
     phase: str = "authoritative"
     canonical_reviewer_response: str | None = None
-    publication_identity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -192,7 +191,6 @@ def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
         "surfaced_reviewer_requirement_ids": list(metadata.surfaced_reviewer_requirement_ids),
         "phase": metadata.phase,
         "canonical_reviewer_response": metadata.canonical_reviewer_response,
-        "publication_identity": metadata.publication_identity,
     }
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -268,10 +266,6 @@ def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
             canonical_reviewer_response=(
                 str(payload["canonical_reviewer_response"])
                 if payload.get("canonical_reviewer_response") is not None else None
-            ),
-            publication_identity=(
-                str(payload["publication_identity"])
-                if payload.get("publication_identity") is not None else None
             ),
         )
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
