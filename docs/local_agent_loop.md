@@ -1206,26 +1206,40 @@ agent-loop pr 123 \
   --ci-check-name test
 ```
 
-When enabled, the tool waits for the configured GitHub check-run to pass before merging. Local `--test-command` is an additional local gate, not a replacement for CI. By default, `--test-command` also runs after coder-created or coder-updated changes before reviewer rounds, so reviewers are less likely to spend rounds on code that already fails the configured local test command. Use `--no-pre-review-tests` to keep `--test-command` as a post-approval gate only.
+When enabled with the full-board watcher (the default — see "Watch pending CI"
+below), the tool foreground-polls the whole PR check board before merging.
+With `--no-watch-pending-ci`, it instead waits for the single configured
+`--ci-check-name` check-run to pass before merging, as in earlier releases.
+Local `--test-command` is an additional local gate, not a replacement for CI.
+By default, `--test-command` also runs after coder-created or coder-updated
+changes before reviewer rounds, so reviewers are less likely to spend rounds
+on code that already fails the configured local test command. Use
+`--no-pre-review-tests` to keep `--test-command` as a post-approval gate only.
 
-Failing GitHub checks always block approval and can route back to the coder. Pending or unavailable GitHub checks are treated as an external wait state rather than actionable coder feedback: if every reviewer approves the code and only GitHub checks are pending/unavailable, the loop posts a comment and stops with a clear message instead of erroring or starting another coder/reviewer round. If those checks later pass, manual merge is fine and rerunning is optional unless you want agent-loop to re-check or automate the final step. With `--auto-merge`, the loop instead keeps waiting for the configured check-run to resolve before merging, as before.
+Failing GitHub checks always block approval and can route back to the coder. Pending or unavailable GitHub checks are treated as an external wait state rather than actionable coder feedback: if every reviewer approves the code and only GitHub checks are pending/unavailable, the loop posts a comment and stops with a clear message instead of erroring or starting another coder/reviewer round. If those checks later pass, manual merge is fine and rerunning is optional unless you want agent-loop to re-check or automate the final step. With `--auto-merge`, the loop instead keeps watching until checks resolve before merging.
 
 ### Watch pending CI
 
-`--watch-pending-ci` is an opt-in alternative after approval. It foreground-polls
-the full PR check/status/required-check board using the existing timeout and poll
-interval controls. It does not call reviewers or the coder while checks remain
-pending. A completed actionable failure resumes the normal coder loop with the
-check name, conclusion, and URL; success or a reliable no-check board is
-merge-ready, or merges directly with `--auto-merge` (the legacy single
-`--ci-check-name` waiter is not used in this mode). A new head is re-reviewed,
-and the final-round CI-failure path receives one bounded extra round.
+`--watch-pending-ci` is enabled by default whenever `--auto-merge` is set;
+pass `--no-watch-pending-ci` to fall back to the legacy single
+`--ci-check-name` waiter described above. It can also be passed explicitly
+without `--auto-merge`, in which case it watches checks after approval and
+reports merge-ready without merging.
+
+When active, it foreground-polls the full PR check/status/required-check board
+using the existing timeout and poll interval controls. It does not call
+reviewers or the coder while checks remain pending. A completed actionable
+failure resumes the normal coder loop with the check name, conclusion, and
+URL; success or a reliable no-check board is merge-ready, or merges directly
+with `--auto-merge`. A new head is re-reviewed, and the final-round
+CI-failure path receives one bounded extra round.
 
 The watch runs synchronously with interruptible `sleep` subprocesses, so Ctrl-C
 and restarts leave no hidden worker. Timeout and transient API snapshots remain
 bounded and print a shell-quoted rerun command only locally; GitHub comments do
 not repeat invocation arguments. Dry-run previews the watch without polling,
-sleeping, resuming agents, or merging. Disabled mode retains the behavior above.
+sleeping, resuming agents, or merging. `--no-watch-pending-ci` retains the
+legacy named-check-only behavior described above.
 
 ### External CI infrastructure stalls
 

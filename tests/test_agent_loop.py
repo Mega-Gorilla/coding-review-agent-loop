@@ -1248,20 +1248,52 @@ def test_omitted_agent_dirs_default_to_repo_scoped_temp_checkouts(monkeypatch, t
     ).resolve()
 
 
-def test_config_captures_watch_invocation_without_rebuilding_antigravity_model(tmp_path):
+def test_config_enables_ci_watch_with_auto_merge_without_rebuilding_antigravity_model(tmp_path):
     parser = build_parser()
     args = parser.parse_args([
-        "pr", "77", "--repo", "OWNER/REPO", "--antigravity-model", "Gemini 3.1 Pro (High)",
-        "--watch-pending-ci",
+        "pr", "77", "--repo", "OWNER/REPO", "--auto-merge",
+        "--antigravity-model", "Gemini 3.1 Pro (High)",
     ])
     config = config_from_args(
         args,
         FakeRunner(),
-        invocation_argv=("agent-loop", "pr", "77", "--watch-pending-ci"),
+        invocation_argv=("agent-loop", "pr", "77"),
     )
     assert config.watch_pending_ci is True
-    assert config.invocation_argv[-1] == "--watch-pending-ci"
+    assert config.invocation_argv[-1] == "77"
     assert config.antigravity_models == ("Gemini 3.1 Pro (High)",)
+
+
+def test_config_does_not_enable_ci_watch_without_auto_merge(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args(["pr", "77", "--repo", "OWNER/REPO"])
+
+    config = config_from_args(args, FakeRunner())
+
+    assert config.watch_pending_ci is False
+
+
+def test_config_allows_disabling_auto_merge_ci_watch(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args([
+        "pr", "77", "--repo", "OWNER/REPO", "--auto-merge", "--no-watch-pending-ci",
+    ])
+
+    config = config_from_args(args, FakeRunner())
+
+    assert config.watch_pending_ci is False
+
+
+def test_config_honors_explicit_ci_watch_without_auto_merge(tmp_path):
+    parser = build_parser()
+    args = parser.parse_args([
+        "pr", "77", "--repo", "OWNER/REPO", "--watch-pending-ci",
+    ])
+
+    config = config_from_args(args, FakeRunner())
+
+    assert config.watch_pending_ci is True
+    assert config.auto_merge is False
 
 
 @pytest.mark.parametrize(
