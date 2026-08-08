@@ -214,30 +214,109 @@ def _is_windows_toolchain_executable(token: str) -> bool:
     return any(pattern.search(parent) for pattern in _WINDOWS_TOOLCHAIN_PARENT_RES)
 
 
-def _program_position_indices(tokens: Sequence[str]) -> tuple[set[int], int]:
-    """Indices occupied by wrapper programs plus the final effective head index."""
+_WRAPPER_VALUE_OPTIONS = {
+    "timeout": {"-k", "--kill-after", "-s", "--signal"},
+    "sudo": {"-u", "-g"},
+    "nice": {"-n"},
+    "stdbuf": {"-i", "-o", "-e"},
+    "env": {"-u", "-C"},
+    "xargs": {"-n", "-P", "-I"},
+}
+_TIMEOUT_DURATION_RE = re.compile(r"(?:\d+(?:\.\d*)?|\.\d+)(?:[smhd])?$")
+
+
+@dataclass(frozen=True)
+class _WrapperTraversal:
+    """Wrapper-prefix recognition is deliberately distinct from a valid head."""
+
+    recognized_prefix: bool
+    program_positions: set[int]
+    effective_head_index: int | None
+
+
+def _program_basename(token: str) -> str:
+    """Return a platform-neutral executable basename without treating /foo as an option."""
+    return _strip_wrap(token).rstrip(".,;:!?").replace("\\", "/").rsplit("/", 1)[-1].lower()
+
+
+def _consume_wrapper_options(tokens: Sequence[str], start: int, wrapper: str) -> int | None:
+    """Consume GNU-style wrapper options, preserving unknown options as valueless."""
+    i = start
+    value_options = _WRAPPER_VALUE_OPTIONS.get(wrapper, set())
+    while i < len(tokens):
+        token = tokens[i]
+        if token == "--":
+            return i + 1
+        # Deliberately do not recognize slash-prefixed Windows tokens as options.
+        if not token.startswith("-") or _is_path_like_token(token):
+            return i
+        option, sep, _value = token.partition("=")
+        if option in value_options:
+            if sep:
+                i += 1
+                continue
+            # Attached short values, such as -k10s or -n10, are valid.
+            if option.startswith("-") and not option.startswith("--") and len(token) > len(option):
+                i += 1
+                continue
+            if i + 1 >= len(tokens):
+                return None
+            i += 2
+            continue
+        if token.startswith("-") and not token.startswith("--"):
+            attached_option = next(
+                (known for known in value_options if token.startswith(known) and len(token) > len(known)),
+                None,
+            )
+            if attached_option is not None:
+                i += 1
+                continue
+        # Every other dash-prefixed option remains a no-value option.
+        i += 1
+    return i
+
+
+def _parse_wrapper(tokens: Sequence[str], index: int, wrapper: str) -> int | None:
+    next_index = _consume_wrapper_options(tokens, index + 1, wrapper)
+    if next_index is None:
+        return None
+    if wrapper == "timeout":
+        if next_index >= len(tokens) or not _TIMEOUT_DURATION_RE.fullmatch(tokens[next_index]):
+            return None
+        next_index += 1
+    if next_index >= len(tokens):
+        return None
+    return next_index
+
+
+def _wrapper_traversal(tokens: Sequence[str]) -> _WrapperTraversal:
     positions: set[int] = set()
     i = 0
-    n = len(tokens)
-    while i < n:
+    recognized_prefix = False
+    while i < len(tokens):
         if VAR_ASSIGNMENT_RE.match(tokens[i]):
             i += 1
             continue
-        if Path(_strip_wrap(tokens[i])).name in WRAPPER_PROGRAMS:
+        wrapper = _program_basename(tokens[i])
+        if wrapper not in WRAPPER_PROGRAMS:
             positions.add(i)
-            i += 1
-            while i < n and tokens[i].startswith("-") and not _is_path_like_token(tokens[i]):
-                i += 1
-            continue
-        break
-    if i < n:
+            return _WrapperTraversal(recognized_prefix, positions, i)
+        recognized_prefix = True
         positions.add(i)
-    return positions, i
+        next_index = _parse_wrapper(tokens, i, wrapper)
+        if next_index is None:
+            return _WrapperTraversal(True, positions, None)
+        i = next_index
+    return _WrapperTraversal(recognized_prefix, positions, None)
 
 
-def _effective_head_index(tokens: Sequence[str]) -> int:
-    _, head_index = _program_position_indices(tokens)
-    return head_index
+def _program_position_indices(tokens: Sequence[str]) -> tuple[set[int], int | None]:
+    traversal = _wrapper_traversal(tokens)
+    return traversal.program_positions, traversal.effective_head_index
+
+
+def _effective_head_index(tokens: Sequence[str]) -> int | None:
+    return _wrapper_traversal(tokens).effective_head_index
 
 
 # ---------------------------------------------------------------------------
@@ -421,20 +500,8 @@ def _windows_path_is_exempt(command: str, raw_windows: str, origin: Origin) -> b
         idx = next((i for i, t in enumerate(tokens) if t.strip("`'\".,") == raw_windows), None)
         if idx is None:
             continue
-        i = 0
-        n = len(tokens)
-        while i < n:
-            tok = tokens[i]
-            if VAR_ASSIGNMENT_RE.match(tok):
-                i += 1
-                continue
-            if tok in WRAPPER_PROGRAMS:
-                i += 1
-                while i < n and tokens[i].startswith("-"):
-                    i += 1
-                continue
-            break
-        if idx != i:
+        traversal = _wrapper_traversal(tokens)
+        if traversal.effective_head_index != idx:
             return False
         if idx > 0 and tokens[idx - 1] in WORKDIR_FLAGS:
             return False
@@ -451,7 +518,7 @@ def _acquisition_exempt(clause: _Clause) -> bool:
     tokens = clause.tokens
     n = len(tokens)
     idx = _effective_head_index(tokens)
-    if idx >= n:
+    if idx is None or idx >= n:
         return False
     head = tokens[idx]
     head_name = Path(_strip_wrap(head)).name
@@ -498,8 +565,13 @@ def _is_command_clause(clause: _Clause) -> bool:
     if clause.mode == "structured" and clause.command_by_contract:
         return True
     tokens = clause.tokens
-    idx = _effective_head_index(tokens)
-    if idx >= len(tokens):
+    traversal = _wrapper_traversal(tokens)
+    if traversal.recognized_prefix and traversal.effective_head_index is None:
+        # A malformed recognized wrapper remains command syntax.  It gets no
+        # nested-program exemption, but must not hide live URLs as prose.
+        return True
+    idx = traversal.effective_head_index
+    if idx is None or idx >= len(tokens):
         return False
     return _is_command_shaped(tokens[idx])
 
@@ -559,7 +631,7 @@ def _head_opened_span_targets(clause: _Clause) -> list[str]:
     tokens = clause.tokens
     n = len(tokens)
     head_idx = _effective_head_index(tokens)
-    if head_idx >= n:
+    if head_idx is None or head_idx >= n:
         return []
     return _walk_span(tokens, head_idx, n)
 

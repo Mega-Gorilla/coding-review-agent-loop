@@ -1083,10 +1083,19 @@ executable in *program position* -- for example `/usr/bin/python3`, a venv's
 `.venv/bin/pytest`, or a wrapper like `sudo`/`env` in front of one -- is not
 treated as a test location, and neither is the value of a narrow set of
 interpreter-valued flags/env-vars (`--python`, `PYTHONPATH=`, and similar).
-These exemptions are gated on command position or on a specific
-interpreter-valued construct, not on path components, so a toolchain-shaped
-path used as an ordinary argument (`pytest /outside/bin/tests/test_foo.py`)
-still fails containment. Package acquisition (`pip install ...`, including the
+The supported wrappers are parsed only far enough to locate their nested
+program: `timeout`, `sudo`, `nohup`, `nice`, `time`, `stdbuf`, `command`,
+`env`, and `xargs`. GNU `timeout` consumes one duration after its options
+(including bare, suffixed, and fractional values); value-taking wrapper options
+are likewise consumed only for their defined options such as `timeout -k`/`-s`,
+`sudo -u`/`-g`, `nice -n`, `stdbuf -i`/`-o`/`-e`, `env -u`/`-C`, and
+`xargs -n`/`-P`/`-I`. These exemptions
+are gated on command position or on a specific interpreter-valued construct,
+not on path components: wrapper operands, option values, workdirs,
+test/script targets, outputs, remote targets, malformed commands, and
+arbitrary `/tmp` paths receive no blanket exemption, so a toolchain-shaped path
+used as an ordinary argument (`pytest /outside/bin/tests/test_foo.py`) still
+fails containment. Package acquisition (`pip install ...`, including the
 `python -m pip install ...` form) is exempted from the separate live-target
 check described below, but never from path containment.
 A URL is rejected as a live remote target when it appears in command syntax
