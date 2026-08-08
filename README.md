@@ -624,16 +624,17 @@ still-computing (`UNKNOWN`) GitHub mergeability result is re-checked before
 being treated as unresolved. See
 [Merge conflicts](docs/local_agent_loop.md#merge-conflicts) for details.
 
-Use `--watch-pending-ci` to opt into a foreground post-approval watcher. It
-polls the complete check board with `--ci-timeout-seconds` and
+With `--auto-merge`, agent-loop foreground-polls the complete check board after
+approval with
+`--ci-timeout-seconds` and
 `--ci-poll-interval-seconds`, without invoking agents while checks are pending.
 Failure resumes the coder with the failed-check details; a successful/no-check
-board is reported as merge-ready (or merged with `--auto-merge`). The watcher
-is synchronous and interruptible: Ctrl-C leaves no worker behind, and a rerun
-starts from fresh PR state. On timeout the local terminal prints a shell-quoted
-rerun command; PR comments intentionally contain no captured command arguments.
-Without this flag, existing pending-CI and legacy `--ci-check-name` behavior is
-unchanged.
+board is merged. The watcher is synchronous and interruptible: Ctrl-C leaves
+no worker behind, and a rerun starts from fresh PR state. On timeout the local
+terminal prints a shell-quoted rerun command; PR comments intentionally contain
+no captured command arguments. Use `--no-watch-pending-ci` with `--auto-merge`
+to retain the previous behavior. Without `--auto-merge`, agent-loop reports an
+approved PR as merge-ready and does not wait for CI.
 
 By default Claude is the coder and Codex is the reviewer. Reverse that with:
 

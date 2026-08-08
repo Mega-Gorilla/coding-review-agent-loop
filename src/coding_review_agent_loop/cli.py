@@ -335,10 +335,13 @@ def build_parser() -> argparse.ArgumentParser:
         )
         subparser.add_argument(
             "--watch-pending-ci",
-            action="store_true",
+            "--no-watch-pending-ci",
+            action=argparse.BooleanOptionalAction,
+            dest="watch_pending_ci",
+            default=None,
             help=(
-                "After approval, foreground-poll the full GitHub check board and resume "
-                "the coder if CI fails. Disabled by default."
+                "With --auto-merge, foreground-poll the full GitHub check board after approval "
+                "and resume the coder if CI fails (enabled by default with --auto-merge)."
             ),
         )
         subparser.add_argument(
