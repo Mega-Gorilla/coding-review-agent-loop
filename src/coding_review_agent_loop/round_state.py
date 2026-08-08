@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import hashlib
 import json
 import re
@@ -13,6 +12,7 @@ from pathlib import Path
 from .agents.base import AgentName
 from .agents.registry import agent_display_name
 from .errors import AgentLoopError
+from .round_transport import ROUND_RESUME_MARKER_RE, decode_mapping, encode_mapping, hydrate_mapping
 from .workdir_guard import validate_checkout_inspected_evidence
 from .protocol import (
     HTML_COMMENT_RE,
@@ -31,8 +31,6 @@ from .protocol import (
     parse_legacy_structured_discuss_answer,
 )
 from .unresolved_items import _apply_unresolved_item_dispositions
-
-ROUND_RESUME_MARKER_RE = re.compile(r"<!--\s*AGENT_LOOP_META:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->", re.I)
 
 
 @dataclass(frozen=True)
@@ -192,18 +190,12 @@ def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
         "phase": metadata.phase,
         "canonical_reviewer_response": metadata.canonical_reviewer_response,
     }
-    encoded = base64.urlsafe_b64encode(
-        json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    )
-    return encoded.decode("ascii")
+    return encode_mapping(payload)
 
 
 def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
     try:
-        raw = base64.urlsafe_b64decode(encoded.encode("ascii"))
-        payload = json.loads(raw.decode("utf-8"))
-        if not isinstance(payload, dict):
-            raise AgentLoopError("Invalid AGENT_LOOP_META payload.")
+        payload = decode_mapping(encoded)
         return PostedRoundMetadata(
             flow=str(payload["flow"]),
             role=str(payload["role"]),
@@ -307,6 +299,7 @@ def _strip_round_metadata(body: str) -> str:
 
 def _extract_round_metadata_records(comments: Sequence[object], *, flow: str) -> tuple[PostedRoundRecord, ...]:
     records: list[PostedRoundRecord] = []
+    bodies = tuple(body for comment in comments if isinstance((body := getattr(comment, "body", None)), str))
     for index, comment in enumerate(comments):
         body = getattr(comment, "body", None)
         if not isinstance(body, str):
@@ -314,7 +307,13 @@ def _extract_round_metadata_records(comments: Sequence[object], *, flow: str) ->
         matches = list(ROUND_RESUME_MARKER_RE.finditer(body))
         if not matches:
             continue
-        metadata = _decode_round_metadata(matches[-1].group("payload"))
+        payload, missing = hydrate_mapping(decode_mapping(matches[-1].group("payload")), bodies)
+        if "canonical_reviewer_response" in missing and payload.get("phase") == "provisional":
+            raise AgentLoopError(
+                "Incomplete parallel reviewer metadata: canonical_reviewer_response sidecars are unavailable; "
+                "restore sidecars or remove the incomplete anchor and rerun."
+            )
+        metadata = _decode_round_metadata(encode_mapping(payload))
         if metadata.flow != flow:
             continue
         records.append(
