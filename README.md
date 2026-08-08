@@ -536,9 +536,13 @@ PR reviewers concurrently instead of sequentially (`discuss` mode is rejected;
 it has its own `--discuss-parallel`, unaffected by this flag). Every
 reviewer's prompt is built from the same pre-round plan/PR state before any
 reviewer launches, and same-round reviewers never see each other's feedback.
-All outcomes are collected before any round state is mutated: healthy
-reviewers are applied — comment posted, items numbered — in configured
-reviewer order, then any fatal failure is raised only afterward (a quota
+Each validated healthy reviewer comment is published in completion order,
+without waiting for slower peers. The orchestrator then waits for the full
+round settlement barrier before mutating the shared ledger, numbering items,
+starting coder work, or another round; it posts a neutral reconciliation
+checkpoint with the deterministic configured-reviewer aggregation. A rerun
+recognizes these publication checkpoints regardless of whether
+`--review-parallel` is supplied. Any fatal failure is raised only afterward (a quota
 failure takes priority; otherwise the first configured-order failure), so a
 rerun resumes the reviewers that already succeeded instead of re-invoking
 them. Existing per-reviewer retry, repair, unavailable-reviewer, and

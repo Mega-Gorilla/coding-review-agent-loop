@@ -11,7 +11,7 @@ import sys
 import time
 import zoneinfo
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace as dataclasses_replace
 from pathlib import Path
 
@@ -3753,8 +3753,9 @@ class _ReviewerTurnResult:
 
     Worker threads in the --review-parallel path return these instead of
     raising, so exceptions never cross the thread boundary; the main thread
-    applies the existing failure policy in configured reviewer order after
-    every launched turn settles (#594).
+    delivers completed turns to the main thread in completion order.  The
+    caller may publish an individual validated review immediately, but must
+    retain configured-order aggregation until every launched turn settles.
     """
 
     reviewer_name: str
@@ -3768,8 +3769,9 @@ def _launch_reviewer_turns(
     *,
     thread_name_prefix: str,
     run_turn: Callable[[AgentName], _ReviewerTurnResult],
+    on_completion: Callable[[AgentName, _ReviewerTurnResult], None] | None = None,
 ) -> dict[AgentName, _ReviewerTurnResult]:
-    """Run one worker per pending reviewer concurrently and join before returning.
+    """Run workers concurrently, delivering completion-order results before settlement.
 
     ``run_turn`` must never let an exception escape; it is responsible for
     capturing any failure into the returned ``_ReviewerTurnResult`` so the
@@ -3779,8 +3781,23 @@ def _launch_reviewer_turns(
     """
     executor = ThreadPoolExecutor(max_workers=len(pending), thread_name_prefix=thread_name_prefix)
     try:
-        futures = {reviewer: executor.submit(run_turn, reviewer) for reviewer in pending}
-        return {reviewer: future.result() for reviewer, future in futures.items()}
+        futures = {executor.submit(run_turn, reviewer): reviewer for reviewer in pending}
+        results: dict[AgentName, _ReviewerTurnResult] = {}
+        for future in as_completed(futures):
+            reviewer = futures[future]
+            result = future.result()
+            results[reviewer] = result
+            if on_completion is not None:
+                try:
+                    on_completion(reviewer, result)
+                except BaseException:
+                    # A publication failure must not leave reviewer subprocesses
+                    # running or allow a later reconciliation/coder turn.
+                    for other in futures:
+                        other.cancel()
+                    runner.terminate_active_processes()
+                    raise
+        return results
     except KeyboardInterrupt:
         runner.terminate_active_processes()
         raise
@@ -3951,6 +3968,14 @@ def _run_plan_first_loop(
 
         plan_fatal_errors: list[tuple[str, AgentLoopError]] = []
         plan_turn_results: dict[AgentName, _ReviewerTurnResult] = {}
+        early_published_plan_reviewers: set[AgentName] = {
+            reviewer
+            for reviewer in configured_reviewers
+            if (
+                (record := resumed_by_name.get(agent_display_name(reviewer))) is not None
+                and record.metadata.phase == "publication"
+            )
+        }
         if config.review_parallel:
             pending_plan_reviewers = [
                 reviewer for reviewer in configured_reviewers
@@ -4011,18 +4036,64 @@ def _run_plan_first_loop(
                         return _ReviewerTurnResult(reviewer_name=reviewer_name, error=exc)
                     return _ReviewerTurnResult(reviewer_name=reviewer_name, response=response)
 
+                def _publish_plan_completion(reviewer: AgentName, turn: _ReviewerTurnResult) -> None:
+                    """Publish a validated reviewer response without mutating round state.
+
+                    Numbering and ledger mutations stay below the settlement barrier.
+                    The raw validated response in metadata makes this checkpoint
+                    resumable even though its ``new_items`` are provisional.
+                    """
+                    if turn.error is not None or turn.response is None:
+                        return
+                    reviewer_name = agent_display_name(reviewer)
+                    parsed = turn.response.marker_value
+                    assert isinstance(parsed, ParsedPlanReview)
+                    parsed = dataclasses_replace(
+                        parsed,
+                        items=_drop_repeated_carried_plan_future_followups(
+                            parsed.items, prior_items=prior_unresolved_items,
+                            dispositions=parsed.dispositions,
+                        ),
+                    )
+                    if _is_incomplete_plan_review(parsed):
+                        return
+                    post_issue_comment(
+                        runner, config=config, issue_number=issue_number,
+                        body=_attach_round_metadata(
+                            render_public_agent_comment(
+                                kind="plan_review", parsed=parsed, agent=reviewer_name,
+                                prior_items=prior_unresolved_items,
+                                dispositions=parsed.dispositions,
+                                human_requirements_resolved_flag=human_requirements_resolved(turn.response.text),
+                                config=config, model_used=turn.response.model_used,
+                            ),
+                            PostedRoundMetadata(
+                                flow="plan", role="reviewer", agent=reviewer_name,
+                                round_number=round_number, subject=_plan_subject(current_plan),
+                                prior_items=prior_unresolved_items,
+                                dispositions=parsed.dispositions, state=parsed.state,
+                                compact_prior_summaries=tuple(compact_prior_summaries),
+                                model_used=turn.response.model_used, phase="publication",
+                                canonical_reviewer_response=turn.response.text,
+                                publication_identity=f"plan:{_plan_subject(current_plan)}:{round_number}:{reviewer_name}",
+                            ),
+                        ),
+                    )
+                    early_published_plan_reviewers.add(reviewer)
+
                 plan_turn_results = _launch_reviewer_turns(
                     runner,
                     pending_plan_reviewers,
                     thread_name_prefix=f"plan-review-r{round_number}",
                     run_turn=_plan_reviewer_worker,
+                    on_completion=_publish_plan_completion,
                 )
 
         for reviewer in configured_reviewers:
             reviewer_name = agent_display_name(reviewer)
             resumed_record = resumed_by_name.get(reviewer_name)
             if resumed_record is not None:
-                review_output = resumed_record.body
+                review_output = resumed_record.metadata.canonical_reviewer_response or resumed_record.body
                 review_model_used = resumed_record.metadata.model_used
                 structured_review = parse_structured_plan_review(
                     review_output,
@@ -4161,7 +4232,7 @@ def _run_plan_first_loop(
                 blocking_reviews.append((reviewer_name, review_output))
             else:
                 approved_review_outputs.append((reviewer_name, review_output))
-            if resumed_record is None:
+            if resumed_record is None or resumed_record.metadata.phase == "publication":
                 for item in parsed_review.items.blocking:
                     tracked_item = _next_unresolved_item(
                         item_number=next_unresolved_item_number,
@@ -4195,7 +4266,8 @@ def _run_plan_first_loop(
                     round_new_unresolved_items.append(tracked_item)
                     reviewer_new_unresolved_items.append(tracked_item)
                     next_unresolved_item_number += 1
-                post_issue_comment(
+                if reviewer not in early_published_plan_reviewers:
+                    post_issue_comment(
                     runner,
                     config=config,
                     issue_number=issue_number,
@@ -4226,9 +4298,26 @@ def _run_plan_first_loop(
                             model_used=review_model_used,
                         ),
                     ),
-                )
+                    )
             else:
                 round_new_unresolved_items.extend(reviewer_new_unresolved_items)
+
+        if config.review_parallel and not (current_resume is not None and current_resume.reconciled):
+            settled = ", ".join(agent_display_name(reviewer) for reviewer in configured_reviewers)
+            post_issue_comment(
+                runner, config=config, issue_number=issue_number,
+                body=_attach_round_metadata(
+                    f"Plan review round {round_number} reconciliation: settled reviewers: {settled or 'none'}. "
+                    f"Finalization {'stops' if plan_fatal_errors else 'continues'} after reconciliation.",
+                    PostedRoundMetadata(
+                        flow="plan", role="summary", agent="Orchestrator", round_number=round_number,
+                        subject=_plan_subject(current_plan), prior_items=prior_unresolved_items,
+                        dispositions=tuple(
+                            disposition for values in prior_dispositions.values() for disposition in values
+                        ), new_items=tuple(round_new_unresolved_items), phase="reconciliation",
+                    ),
+                ),
+            )
 
         if plan_fatal_errors:
             # Every healthy reviewer above was already applied (comment
@@ -5415,6 +5504,7 @@ def run_pr_loop(
             pr_fatal_errors: list[tuple[str, AgentLoopError]] = []
             pr_prep_failures: dict[AgentName, AgentLoopError] = {}
             pr_turn_results: dict[AgentName, _ReviewerTurnResult] = {}
+            early_published_pr_reviewers: set[AgentName] = set()
             shared_reviewer_pr_checks: PullRequestChecks | None = None
 
             def _pr_reviewer_prelaunch_kind(reviewer: AgentName) -> str:
@@ -5553,11 +5643,54 @@ def run_pr_loop(
                                 return _ReviewerTurnResult(reviewer_name=reviewer_name, error=exc)
                             return _ReviewerTurnResult(reviewer_name=reviewer_name, response=response)
 
+                        def _publish_pr_completion(reviewer: AgentName, turn: _ReviewerTurnResult) -> None:
+                            """Publish a completion-order PR review; settlement remains below."""
+                            if turn.error is not None or turn.response is None:
+                                return
+                            reviewer_name = agent_display_name(reviewer)
+                            parsed = turn.response.marker_value
+                            assert isinstance(parsed, ParsedReview)
+                            parsed = dataclasses_replace(
+                                parsed,
+                                followups=_drop_repeated_carried_future_followups(
+                                    parsed.followups, prior_items=prior_unresolved_items,
+                                    dispositions=parsed.dispositions,
+                                ),
+                            )
+                            if parsed.state == "blocking" and _is_pending_ci_only_review(parsed, shared_reviewer_pr_checks):
+                                parsed = dataclasses_replace(parsed, state="approved", blocking_items=())
+                            if parsed.state == "blocking" and _is_infrastructure_ci_only_review(parsed, shared_reviewer_pr_checks):
+                                parsed = dataclasses_replace(parsed, state="approved", blocking_items=())
+                            if _is_incomplete_pr_review(parsed):
+                                return
+                            post_pr_comment(
+                                runner, config=config, pr_number=pr_number,
+                                body=_attach_round_metadata(
+                                    render_public_agent_comment(
+                                        kind="pr_review", parsed=parsed, agent=reviewer_name,
+                                        human_requirements_resolved_flag=human_requirements_resolved(turn.response.text),
+                                        prior_items=prior_unresolved_items, dispositions=parsed.dispositions,
+                                        config=config, model_used=turn.response.model_used,
+                                    ),
+                                    PostedRoundMetadata(
+                                        flow="pr", role="reviewer", agent=reviewer_name,
+                                        round_number=round_number, subject=current_pr_subject,
+                                        prior_items=prior_unresolved_items, dispositions=parsed.dispositions,
+                                        state=parsed.state, model_used=turn.response.model_used,
+                                        surfaced_reviewer_requirement_ids=surfaced_reviewer_requirement_ids,
+                                        phase="publication", canonical_reviewer_response=turn.response.text,
+                                        publication_identity=f"pr:{current_pr_subject}:{round_number}:{reviewer_name}",
+                                    ),
+                                ),
+                            )
+                            early_published_pr_reviewers.add(reviewer)
+
                         pr_turn_results = _launch_reviewer_turns(
                             runner,
                             launchable_pr_reviewers,
                             thread_name_prefix=f"pr-review-r{round_number}",
                             run_turn=_pr_reviewer_worker,
+                            on_completion=_publish_pr_completion,
                         )
                     else:
                         log(
@@ -5578,7 +5711,7 @@ def run_pr_loop(
                 resumed_record = resumed_by_name.get(reviewer_name)
                 carried_approval_record: PostedRoundRecord | None = None
                 if resumed_record is not None:
-                    review_output = resumed_record.body
+                    review_output = resumed_record.metadata.canonical_reviewer_response or resumed_record.body
                     review_model_used = resumed_record.metadata.model_used
                     reparsed_review = parse_review(review_output, reviewer=reviewer_name)
                     parsed_review = ParsedReview(
@@ -5840,7 +5973,11 @@ def run_pr_loop(
                     f"{_describe_pr_review_outcome(parsed_review, has_blocking_summary=has_blocking_summary)}",
                 )
                 if review_state == "blocking":
-                    if resumed_record is None and carried_approval_record is None:
+                    if (
+                        resumed_record is None
+                        and carried_approval_record is None
+                        and reviewer not in early_published_pr_reviewers
+                    ):
                         if parsed_review.blocking_items:
                             for blocking_item in parsed_review.blocking_items:
                                 tracked_item = _next_unresolved_item(
@@ -5934,7 +6071,11 @@ def run_pr_loop(
                     continue
 
                 approved_review_outputs.append((reviewer_name, review_output))
-                if resumed_record is None and carried_approval_record is None:
+                if (
+                    resumed_record is None
+                    and carried_approval_record is None
+                    and reviewer not in early_published_pr_reviewers
+                ):
                     if config.approved_followups != "ignore":
                         for followup in parsed_review.followups.future:
                             tracked_item = _next_unresolved_item(
@@ -5982,6 +6123,27 @@ def run_pr_loop(
                 else:
                     if resumed_record is not None:
                         round_new_unresolved_items.extend(reviewer_new_unresolved_items)
+
+            if (
+                config.review_parallel
+                and not skip_reviewers_this_round
+                and not (current_resume is not None and current_resume.reconciled)
+            ):
+                settled = ", ".join(agent_display_name(reviewer) for reviewer in configured_reviewers)
+                post_pr_comment(
+                    runner, config=config, pr_number=pr_number,
+                    body=_attach_round_metadata(
+                        f"PR review round {round_number} reconciliation: settled reviewers: {settled or 'none'}. "
+                        f"Finalization {'stops' if pr_fatal_errors else 'continues'} after reconciliation.",
+                        PostedRoundMetadata(
+                            flow="pr", role="summary", agent="Orchestrator", round_number=round_number,
+                            subject=current_pr_subject, prior_items=prior_unresolved_items,
+                            dispositions=tuple(
+                                disposition for values in prior_dispositions.values() for disposition in values
+                            ), new_items=tuple(round_new_unresolved_items), phase="reconciliation",
+                        ),
+                    ),
+                )
 
             if pr_fatal_errors:
                 # Every healthy reviewer above was already applied (comment

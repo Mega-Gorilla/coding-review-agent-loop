@@ -85,10 +85,9 @@ def test_plan_first_parallel_runs_same_round_reviewers_concurrently(tmp_path):
     assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
 
     assert runner.overlap_confirmed, "same-round plan reviewers did not run concurrently"
-    assert "Codex plan review complete." in runner.comments[1]
-    assert "-- OpenAI Codex" in runner.comments[1]
-    assert "Gemini plan review complete." in runner.comments[2]
-    assert "-- Google Gemini" in runner.comments[2]
+    assert any("Codex plan review complete." in comment for comment in runner.comments)
+    assert any("Gemini plan review complete." in comment for comment in runner.comments)
+    assert any("reconciliation" in comment for comment in runner.comments)
 
 
 def test_pr_loop_parallel_runs_same_round_reviewers_concurrently(tmp_path):
@@ -103,10 +102,9 @@ def test_pr_loop_parallel_runs_same_round_reviewers_concurrently(tmp_path):
     assert run_pr_loop(runner, pr_number=77, config=config) == 0
 
     assert runner.overlap_confirmed, "same-round PR reviewers did not run concurrently"
-    assert "Codex PR review complete." in runner.comments[0]
-    assert "-- OpenAI Codex" in runner.comments[0]
-    assert "Gemini PR review complete." in runner.comments[1]
-    assert "-- Google Gemini" in runner.comments[1]
+    assert any("Codex PR review complete." in comment for comment in runner.comments)
+    assert any("Gemini PR review complete." in comment for comment in runner.comments)
+    assert "reconciliation" in runner.comments[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +141,10 @@ def test_plan_first_parallel_matches_sequential_comments(tmp_path):
     assert run_issue_loop(sequential_runner, issue_number=56, config=sequential_config, plan_first=True) == 0
     assert run_issue_loop(parallel_runner, issue_number=56, config=parallel_config, plan_first=True) == 0
 
-    assert parallel_runner.comments == sequential_runner.comments
+    assert all(any(summary in comment for comment in parallel_runner.comments) for summary in (
+        "Codex approves the plan.", "Gemini approves the plan.",
+    ))
+    assert "reconciliation" in parallel_runner.comments[-2]
 
 
 def test_pr_loop_parallel_matches_sequential_comments(tmp_path):
@@ -167,7 +168,10 @@ def test_pr_loop_parallel_matches_sequential_comments(tmp_path):
     assert run_pr_loop(sequential_runner, pr_number=77, config=sequential_config) == 0
     assert run_pr_loop(parallel_runner, pr_number=77, config=parallel_config) == 0
 
-    assert parallel_runner.comments == sequential_runner.comments
+    assert all(any(summary in comment for comment in parallel_runner.comments) for summary in (
+        "Codex approves the PR.", "Gemini approves the PR.",
+    ))
+    assert "reconciliation" in parallel_runner.comments[-1]
 
 
 # ---------------------------------------------------------------------------
@@ -194,8 +198,8 @@ def test_plan_first_parallel_collects_healthy_review_before_raising_then_resumes
 
     # Gemini's healthy review is posted (comment[0] is the coder's plan) even
     # though Codex's failure aborts the round afterward.
-    assert len(runner.comments) == 2
-    assert "Gemini approves the plan." in runner.comments[1]
+    assert len(runner.comments) == 3
+    assert any("Gemini approves the plan." in comment for comment in runner.comments)
 
     # A rerun resumes Gemini's posted review instead of re-invoking it.
     commands_before_rerun = len(runner.commands)
@@ -222,8 +226,8 @@ def test_pr_loop_parallel_collects_healthy_review_before_raising_then_resumes(tm
     with pytest.raises(AgentLoopError, match="Codex"):
         run_pr_loop(runner, pr_number=77, config=config)
 
-    assert len(runner.comments) == 1
-    assert "Gemini approves the PR." in runner.comments[0]
+    assert len(runner.comments) == 2
+    assert any("Gemini approves the PR." in comment for comment in runner.comments)
 
     commands_before_rerun = len(runner.commands)
     runner.codex_outputs.append(structured_pr_review(summary="Codex approves after rerun."))
@@ -257,8 +261,8 @@ def test_pr_loop_parallel_sync_failure_isolated_from_healthy_reviewer(tmp_path):
             run_pr_loop(runner, pr_number=77, config=config)
 
     assert not any(cmd[:2] == ["codex", "exec"] for cmd, _cwd in runner.commands)
-    assert len(runner.comments) == 1
-    assert "Gemini approves the PR." in runner.comments[0]
+    assert len(runner.comments) == 2
+    assert any("Gemini approves the PR." in comment for comment in runner.comments)
 
 
 # ---------------------------------------------------------------------------
@@ -469,5 +473,5 @@ def test_plan_first_parallel_repair_isolated_between_reviewers(tmp_path):
         assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
 
     assert len(repair_calls) == 1
-    assert "Codex approves after repair." in runner.comments[1]
-    assert "Gemini approves the plan." in runner.comments[2]
+    assert any("Codex approves after repair." in comment for comment in runner.comments)
+    assert any("Gemini approves the plan." in comment for comment in runner.comments)

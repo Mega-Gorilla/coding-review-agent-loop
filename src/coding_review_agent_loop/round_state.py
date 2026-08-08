@@ -82,6 +82,11 @@ class PostedRoundMetadata:
     # the current signed requirements from one made before new requirements
     # were surfaced for the same immutable PR head.
     surfaced_reviewer_requirement_ids: tuple[str, ...] = ()
+    # Parallel reviewers publish a durable provisional checkpoint before the
+    # configured-order settlement barrier.  Legacy records are authoritative.
+    phase: str = "authoritative"
+    canonical_reviewer_response: str | None = None
+    publication_identity: str | None = None
 
 
 @dataclass(frozen=True)
@@ -107,6 +112,7 @@ class ResumedReviewRound:
     ledger_may_be_incomplete: bool = False
     compact_prior_summaries: tuple[str, ...] = ()
     unrecorded_head_advance: bool = False
+    reconciled: bool = False
 
 
 def _serialize_unresolved_item(item: UnresolvedReviewItem) -> dict[str, object]:
@@ -184,6 +190,9 @@ def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
         "result_mode": metadata.result_mode,
         "evidence_reconciliation": metadata.evidence_reconciliation,
         "surfaced_reviewer_requirement_ids": list(metadata.surfaced_reviewer_requirement_ids),
+        "phase": metadata.phase,
+        "canonical_reviewer_response": metadata.canonical_reviewer_response,
+        "publication_identity": metadata.publication_identity,
     }
     encoded = base64.urlsafe_b64encode(
         json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
@@ -254,6 +263,15 @@ def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
             ),
             surfaced_reviewer_requirement_ids=tuple(
                 str(item) for item in payload.get("surfaced_reviewer_requirement_ids", [])
+            ),
+            phase=str(payload.get("phase", "authoritative")),
+            canonical_reviewer_response=(
+                str(payload["canonical_reviewer_response"])
+                if payload.get("canonical_reviewer_response") is not None else None
+            ),
+            publication_identity=(
+                str(payload["publication_identity"])
+                if payload.get("publication_identity") is not None else None
             ),
         )
     except (ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
@@ -602,6 +620,7 @@ def _resume_pr_round(
             if latest_coder_record is not None
             else ()
         ),
+        reconciled=any(record.metadata.role == "summary" for record in current_round_records),
     )
 
 
@@ -652,6 +671,7 @@ def _resume_plan_round(
             + 1,
             ledger_may_be_incomplete=ledger_may_be_incomplete,
             compact_prior_summaries=latest_coder_record.metadata.compact_prior_summaries,
+            reconciled=any(record.metadata.role == "summary" for record in current_round_records),
         ),
     )
 
