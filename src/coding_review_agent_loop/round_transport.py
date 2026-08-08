@@ -219,7 +219,7 @@ def hydrate_mapping(
             if hashlib.sha256(raw).hexdigest() != str(ref["sha256"]):
                 raise ValueError("corrupt payload")
             result[field] = raw.decode("utf-8")
-        except (KeyError, TypeError, UnicodeDecodeError, ValueError):
+        except (KeyError, TypeError, UnicodeDecodeError, ValueError, zlib.error):
             missing.add(field)
             result[field] = None
     return result, missing

@@ -136,6 +136,33 @@ def test_hydrate_mapping_bounds_decompression(monkeypatch: pytest.MonkeyPatch) -
     assert hydrated["canonical_plan"] is None
 
 
+def test_hydrate_mapping_reports_invalid_compressed_sidecar() -> None:
+    packed = b"not a zlib stream"
+    reference = {
+        "$round_transport_spill": "anchor",
+        "field": "canonical_plan",
+        "parts": 1,
+        "sha256": hashlib.sha256(b"expected raw payload").hexdigest(),
+        "spill": hashlib.sha256(packed).hexdigest(),
+    }
+    sidecar = transport._sidecar(
+        {
+            "anchor": "anchor",
+            "field": "canonical_plan",
+            "index": 0,
+            "count": 1,
+            "sha256": reference["sha256"],
+            "spill": reference["spill"],
+            "data": transport._b64(packed),
+        }
+    )
+
+    hydrated, missing = transport.hydrate_mapping({"canonical_plan": reference}, (sidecar,))
+
+    assert missing == {"canonical_plan"}
+    assert hydrated["canonical_plan"] is None
+
+
 @pytest.mark.parametrize(
     ("field", "phase"),
     (
