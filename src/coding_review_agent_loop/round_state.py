@@ -193,9 +193,8 @@ def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
     return encode_mapping(payload)
 
 
-def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
+def _decode_round_metadata_mapping(payload: Mapping[str, object]) -> PostedRoundMetadata:
     try:
-        payload = decode_mapping(encoded)
         return PostedRoundMetadata(
             flow=str(payload["flow"]),
             role=str(payload["role"]),
@@ -264,6 +263,10 @@ def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
         raise AgentLoopError("Invalid AGENT_LOOP_META payload.") from exc
 
 
+def _decode_round_metadata(encoded: str) -> PostedRoundMetadata:
+    return _decode_round_metadata_mapping(decode_mapping(encoded))
+
+
 def _attach_round_metadata(body: str, metadata: PostedRoundMetadata) -> str:
     marker = f"<!-- AGENT_LOOP_META: {_encode_round_metadata(metadata)} -->"
     lines = body.splitlines()
@@ -308,12 +311,13 @@ def _extract_round_metadata_records(comments: Sequence[object], *, flow: str) ->
         if not matches:
             continue
         payload, missing = hydrate_mapping(decode_mapping(matches[-1].group("payload")), bodies)
-        if "canonical_reviewer_response" in missing and payload.get("phase") == "provisional":
+        if missing:
             raise AgentLoopError(
-                "Incomplete parallel reviewer metadata: canonical_reviewer_response sidecars are unavailable; "
+                "Incomplete round metadata: "
+                f"{', '.join(sorted(missing))} sidecars are unavailable; "
                 "restore sidecars or remove the incomplete anchor and rerun."
             )
-        metadata = _decode_round_metadata(encode_mapping(payload))
+        metadata = _decode_round_metadata_mapping(payload)
         if metadata.flow != flow:
             continue
         records.append(

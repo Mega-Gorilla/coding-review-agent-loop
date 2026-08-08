@@ -681,6 +681,11 @@ remain earlier in the issue or PR thread, while newer orchestrator-rendered
 comments carry `AGENT_LOOP_META`. When metadata exists for the current head or
 plan subject, resume reconstruction uses that metadata-backed ledger and ignores
 stale visible item IDs from older heads, superseded plans, or replayed rounds.
+Metadata markers use a versioned `v1_` zlib-compressed, URL-safe base64 payload.
+If a marker would exceed GitHub's comment limit, the orchestrator posts one or
+more `AGENT_LOOP_SIDECAR` comments before its anchor comment. These sidecars are
+transport data, not agent output; do not delete them. If resume reports missing
+sidecars, restore them or remove the incomplete anchor and rerun the loop.
 If a PR head advances but no current-head coder metadata was recorded, the PR
 loop recovers from metadata-backed active `blocking` and `same-pr` items on the
 latest recorded head and routes them through a coder follow-up before reviewers

@@ -1048,9 +1048,10 @@ def post_pr_comment(
     body: str,
 ) -> None:
     bodies = prepare_round_comment(body)
-    if len(bodies) > 11: log(config, f"Posting round transport with {len(bodies) - 1} sidecars to PR #{pr_number}")
+    if len(bodies) > 1:
+        log(config, f"Posting round transport with {len(bodies) - 1} sidecars to PR #{pr_number}")
+    log(config, f"Posting agent output to PR #{pr_number}")
     for prepared in bodies:
-        log(config, f"Posting agent output to PR #{pr_number}")
         _post_comment_body(runner, config=config, command=["pr", "comment", str(pr_number)], body=prepared)
 
 
@@ -1062,9 +1063,10 @@ def post_issue_comment(
     body: str,
 ) -> None:
     bodies = prepare_round_comment(body)
-    if len(bodies) > 11: log(config, f"Posting round transport with {len(bodies) - 1} sidecars to issue #{issue_number}")
+    if len(bodies) > 1:
+        log(config, f"Posting round transport with {len(bodies) - 1} sidecars to issue #{issue_number}")
+    log(config, f"Posting agent output to issue #{issue_number}")
     for prepared in bodies:
-        log(config, f"Posting agent output to issue #{issue_number}")
         _post_comment_body(runner, config=config, command=["issue", "comment", str(issue_number)], body=prepared)
 
 
@@ -1075,12 +1077,15 @@ def _post_comment_body(runner: Runner, *, config: AgentLoopConfig, command: list
         runner.run([config.gh_cmd, *command, "--repo", config.repo, "--body", body], cwd=active_workdir(config))
         return
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
-        handle.write(body); path = handle.name
+        handle.write(body)
+        path = handle.name
     try:
         runner.run([config.gh_cmd, *command, "--repo", config.repo, "--body-file", path], cwd=active_workdir(config))
     finally:
-        try: os.unlink(path)
-        except FileNotFoundError: pass
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
 
 
 def create_issue(
