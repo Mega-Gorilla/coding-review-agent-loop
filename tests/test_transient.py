@@ -40,6 +40,13 @@ def test_antigravity_capacity_requires_framed_provider_failure() -> None:
         assert transient.classify_antigravity_capacity(
             text, returncode=1, empty_response=False, signatures=signatures
         ).is_capacity
+    assert transient.classify_antigravity_capacity(
+        "Reading the diff to draft the review...\n"
+        "Error: Our servers are experiencing high traffic right now, please try again in a minute.",
+        returncode=1,
+        empty_response=False,
+        signatures=signatures,
+    ).is_capacity
     assert not transient.classify_antigravity_capacity(
         "The review quotes: Error: Our servers are experiencing high traffic right now, please try again in a minute.",
         returncode=1,
@@ -48,7 +55,7 @@ def test_antigravity_capacity_requires_framed_provider_failure() -> None:
     ).is_capacity
     assert not transient.classify_antigravity_capacity(
         "The review quotes the provider failure below:\n"
-        "Error: Our servers are experiencing high traffic right now, please try again in a minute.",
+        "> Error: Our servers are experiencing high traffic right now, please try again in a minute.",
         returncode=1,
         empty_response=False,
         signatures=signatures,

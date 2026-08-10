@@ -449,11 +449,11 @@ class AntigravityBackend:
             returncode=result.returncode,
             usage=None,
             raw_usage=None,
-            # The model we requested is the model that ran (single-shot, no
-            # server-side substitution); the signature stamps it (#332). #333's
-            # fallback chain will override this with the model that answered.
+            # This single-model backend reports the model it requested; the
+            # caller's attempt state advances to a fallback model if needed.
             model_used=model,
         )
+
     def run_repair(
         self,
         runner: Runner,

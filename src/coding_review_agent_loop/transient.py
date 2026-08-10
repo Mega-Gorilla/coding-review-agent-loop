@@ -52,7 +52,6 @@ _ANTIGRAVITY_ERROR_LINE_RE = re.compile(r"(?i)^\s*(?:error|fatal)\s*[:\[]")
 _ANTIGRAVITY_ERROR_JSON_RE = re.compile(
     r'^\s*\{.{0,2000}?"(?:error|code|status|message)"\s*:', re.I
 )
-_QUOTED_REVIEW_CONTEXT_RE = re.compile(r"\b(?:review|quote[sd]?|example|report)\b", re.I)
 
 
 def classify_antigravity_capacity(
@@ -66,8 +65,9 @@ def classify_antigravity_capacity(
 
     Only failed or empty invocations are eligible. A signature on a provider
     error line (or its adjacent detail line), a compact JSON error line, or an
-    unframed standalone provider diagnostic qualifies. Quoted review content
-    is excluded, and authentication/billing retain non-retryable precedence.
+    unframed standalone provider diagnostic qualifies. Framed provider errors
+    must be terminal output so unrelated transcript wording cannot suppress a
+    real capacity failure; authentication/billing retain non-retryable precedence.
     """
     if (returncode in (None, 0) and not empty_response) or not text.strip():
         return AntigravityCapacityClassification(False)
@@ -86,15 +86,20 @@ def classify_antigravity_capacity(
     for index, line in enumerate(lines):
         if _ANTIGRAVITY_ERROR_LINE_RE.match(line) or _ANTIGRAVITY_ERROR_JSON_RE.match(line):
             adjacent = "\n".join(lines[max(0, index - 1): index + 2])
-            preceding = lines[index - 1] if index else ""
-            if has_signature(adjacent) and not _QUOTED_REVIEW_CONTEXT_RE.search(preceding):
+            # agy emits an error immediately before exiting. Limit the frame to
+            # the last few non-empty lines rather than inspecting normal reviewer
+            # transcript text that may precede it.
+            if has_signature(adjacent) and index >= len(lines) - 3:
                 return AntigravityCapacityClassification(True, diagnostic)
 
     # Older agy versions emitted bare provider diagnostics (for example,
     # "quota exceeded please try again") on a non-zero exit. Preserve that
-    # fallback trigger, while refusing transcript text that identifies itself
-    # as a quoted review/example rather than the provider's own diagnostic.
-    if has_signature(diagnostic) and not _QUOTED_REVIEW_CONTEXT_RE.search(diagnostic):
+    # fallback trigger. A bare diagnostic must be a single line beginning with
+    # a configured capacity signature, so an incidental phrase embedded in a
+    # review transcript cannot qualify.
+    if len(lines) == 1 and any(
+        lines[0].lower().startswith(signature) for signature in lowered_signatures
+    ):
         return AntigravityCapacityClassification(True, diagnostic)
     return AntigravityCapacityClassification(False)
 
