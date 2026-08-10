@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import ipaddress
 import re
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal, Sequence
+from urllib.parse import urlsplit
 
 from .errors import AgentLoopError
 from .protocol import DiscussEvidenceClaim
@@ -15,6 +17,7 @@ from .protocol import DiscussEvidenceClaim
 TEST_SECTION_RE = re.compile(r"(?im)^\s*tests(?:\s+run)?\s*:\s*(?P<body>.*)$")
 WINDOWS_PATH_RE = re.compile(r"(?<![\w.-])[A-Za-z]:\\[^\s`'\"|;&)<>]+")
 URL_SCHEME_RE = re.compile(r"(?i)https?://")
+URL_VALUE_RE = re.compile(r"(?i)https?://[^\s'\"`;&|()<>]+")
 BACKTICK_SPAN_RE = re.compile(r"`([^`]*)`")
 VAR_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 INTERPRETER_BASENAME_RE = re.compile(r"^(python|pypy)\d*(\.\d+)?$")
@@ -138,6 +141,28 @@ def _strip_wrap(token: str) -> str:
 
 def _is_url_token(token: str) -> bool:
     return bool(URL_SCHEME_RE.search(_strip_wrap(token)))
+
+
+def _url_values(token: str) -> tuple[str, ...]:
+    return tuple(
+        match.group(0).rstrip(".,")
+        for match in URL_VALUE_RE.finditer(_strip_wrap(token))
+    )
+
+
+def _is_loopback_url(url: str) -> bool:
+    try:
+        host = urlsplit(url).hostname
+    except ValueError:
+        return False
+    if host is None:
+        return False
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _is_path_like_token(token: str) -> bool:
@@ -738,11 +763,14 @@ def _validate_single_command(command: str, *, assigned: Path, origin: Origin) ->
             _check_path_role(raw_path, role, command=command, assigned=assigned)
 
     for clause in clauses:
-        for url in _url_targets_in_clause(clause):
-            raise AgentLoopError(
-                "Coder reported tests run against a live remote target: "
-                f"{url!r} in command {command!r}. Assigned checkout: {assigned}"
-            )
+        for target in _url_targets_in_clause(clause):
+            for url in _url_values(target):
+                if _is_loopback_url(url):
+                    continue
+                raise AgentLoopError(
+                    "Coder reported tests run against a live remote target: "
+                    f"{url!r} in command {command!r}. Assigned checkout: {assigned}"
+                )
 
 
 def validate_test_commands_within_workdir(

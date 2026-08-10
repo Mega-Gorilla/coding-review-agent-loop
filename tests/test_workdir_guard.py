@@ -355,6 +355,48 @@ def test_rejects_strict_command_code_span_live_target(tmp_path):
         validate_response_tests_within_workdir(text, assigned_workdir=assigned)
 
 
+@pytest.mark.parametrize("url", [
+    "http://localhost:8765",
+    "http://127.0.0.1:8765",
+    "http://127.42.0.9:8765",
+    "http://[::1]:8765",
+])
+def test_accepts_loopback_test_targets(tmp_path, url):
+    validate_test_commands_within_workdir(
+        (f"E2E_BASE={url} node tests/test_e2e.js",),
+        assigned_workdir=_assigned(tmp_path),
+    )
+
+
+def test_accepts_loopback_target_in_nested_shell_command(tmp_path):
+    command = (
+        "timeout 180 bash -c 'ADMISSION_BACKEND=local DEPLOYMENT_MODE=single "
+        "python3 -m server --host 127.0.0.1 --port 8765 >/tmp/server.log 2>&1 & "
+        "server_pid=$!; trap \"kill $server_pid 2>/dev/null || true\" EXIT; sleep 4; "
+        "E2E_BASE=http://127.0.0.1:8765 timeout 120 node tests/test_e2e.js'"
+    )
+    validate_test_commands_within_workdir((command,), assigned_workdir=_assigned(tmp_path))
+
+
+@pytest.mark.parametrize("url", [
+    "http://0.0.0.0:8765",
+    "http://192.168.1.10:8765",
+    "https://live.example",
+])
+def test_loopback_exemption_does_not_accept_other_network_targets(tmp_path, url):
+    with pytest.raises(AgentLoopError, match=re.escape(url)):
+        validate_test_commands_within_workdir(
+            (f"E2E_BASE={url} node tests/test_e2e.js",),
+            assigned_workdir=_assigned(tmp_path),
+        )
+
+
+def test_loopback_target_does_not_hide_remote_target_in_same_command(tmp_path):
+    command = "E2E_BASE=http://127.0.0.1:8765 node tests/test_e2e.js && curl https://live.example"
+    with pytest.raises(AgentLoopError, match="https://live.example"):
+        validate_test_commands_within_workdir((command,), assigned_workdir=_assigned(tmp_path))
+
+
 REJECTED_NARRATIVE_URLS = [
     "Tests: hit https://live.example/health",
     "Tests: curled https://live.example/health",
