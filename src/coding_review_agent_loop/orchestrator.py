@@ -1278,6 +1278,8 @@ def _failure_suggestion(
             "Suggestion: resolve the reported agent environment/provider/tooling problem, "
             "or switch that agent/model before re-running."
         )
+    if category == "self-update-interruption":
+        return "Suggestion: wait for the Claude Code self-update to finish, then re-run."
     if category == "transient":
         if _QUOTA_RATE_LIMIT_RE.search(combined):
             return (
@@ -1365,6 +1367,8 @@ def _format_invalid_agent_response_error(
         category_hint = " Failure category: deterministic (may require a code fix)."
     elif category == "timeout":
         category_hint = " Failure category: timeout (the agent exceeded the configured time limit)."
+    elif category == "self-update-interruption":
+        category_hint = " Failure category: self-update-interruption (Claude Code updated during startup)."
     elif category == "agent-unavailable":
         category_hint = " Failure category: agent-unavailable (the agent explicitly could not continue)."
     if not classification_text:
@@ -2143,7 +2147,7 @@ def _run_validated_agent(
     max_attempts = (
         len(config.antigravity_models) + config.agent_max_retries
         if antigravity_attempts is not None
-        else config.agent_max_retries + 1
+        else config.agent_max_retries + 2 if agent == "claude" else config.agent_max_retries + 1
     )
     last_error = f"{agent_name} produced no output."
     last_result: AgentResult | None = None
@@ -2156,6 +2160,14 @@ def _run_validated_agent(
     # re-parsing the message.
     terminal_public_response: str | None = None
     completion_recovery_attempted = False
+    # Keep the detection guard separate from the replay marker: a failed
+    # stability check must not make the next ordinary retry look like a replay.
+    updater_replay_considered = False
+    updater_replay_pending = False
+    ordinary_retries_used = 0
+    self_update_deadline: float | None = None
+    self_update_stability_error: str | None = None
+    next_timeout_seconds = timeout_seconds
 
     for attempt in range(1, max_attempts + 1):
         attempt_config = (
@@ -2163,6 +2175,14 @@ def _run_validated_agent(
             if antigravity_attempts is not None
             else config
         )
+        invocation_kwargs: dict[str, object] = {}
+        is_self_update_replay = updater_replay_pending
+        if agent == "claude":
+            invocation_kwargs["attempt_suffix"] = (
+                "self-update-attempt2"
+                if is_self_update_replay
+                else f"attempt{ordinary_retries_used + 1}"
+            )
         result = run_agent_result(
             runner,
             agent=agent,
@@ -2172,8 +2192,14 @@ def _run_validated_agent(
             run_id=usage_context.run_id if usage_context is not None else None,
             role=role,
             label=label,
-            timeout_seconds=timeout_seconds,
+            timeout_seconds=next_timeout_seconds,
+            **invocation_kwargs,
         )
+        # The bounded deadline belongs only to the interrupted invocation and
+        # its dedicated replay. A later ordinary retry has its normal budget.
+        if is_self_update_replay:
+            updater_replay_pending = False
+            next_timeout_seconds = timeout_seconds
         last_result = result
         if result.log_path is not None:
             log_paths.append(result.log_path)
@@ -2235,6 +2261,47 @@ def _run_validated_agent(
                 # envelope, even when the command itself failed.
                 text = artifact
 
+        # A Claude process can be replaced by its self-updater after it spawned.
+        # This is exclusive with ordinary transient classification and gets one
+        # full replay only after the bare executable is stable.
+        if (
+            agent == "claude"
+            and result.self_update_reason is not None
+            and not updater_replay_considered
+            and result.command_result is not None
+        ):
+            updater_replay_considered = True
+            observation = result.command_result.observation
+            self_update_deadline = (
+                observation.spawn_monotonic + timeout_seconds
+                if timeout_seconds is not None and observation is not None
+                else None
+            )
+            stable = runner.wait_for_executable_stability(
+                config.claude_cmd, deadline=self_update_deadline
+            )
+            remaining = (
+                self_update_deadline - time.monotonic()
+                if self_update_deadline is not None else None
+            )
+            if not stable or (remaining is not None and remaining <= 0):
+                self_update_stability_error = (
+                    f"likely Claude self-update interruption ({result.self_update_reason}); "
+                    "executable did not stabilize within the invocation deadline"
+                )
+                if usage_record is not None:
+                    usage_record.outcome = "self_update_interruption"
+                    usage_record.log_path = str(result.log_path) if result.log_path else None
+                # Preserve any ordinary transient retry allowance: a failed
+                # stability observation does not make provider errors final.
+            else:
+                updater_replay_pending = True
+                if usage_record is not None:
+                    usage_record.outcome = "self_update_interruption"
+                    usage_record.log_path = str(result.log_path) if result.log_path else None
+                next_timeout_seconds = remaining
+                log(config, f"{agent_name}: {result.self_update_reason}; replaying once after executable stability")
+                continue
         should_retry = False
         provider_capacity = False
         if result.returncode is None and artifact_unavailable is None:
@@ -2771,15 +2838,27 @@ def _run_validated_agent(
                     retryable=should_retry, provider_capacity=provider_capacity
                 )
                 if antigravity_attempts is not None
-                else ("retry" if attempt < max_attempts else "stop")
+                else ("retry" if ordinary_retries_used < config.agent_max_retries else "stop")
             )
             if transition == "retry":
+                if antigravity_attempts is None:
+                    ordinary_retries_used += 1
                 delay = _retry_delay(config, attempt)
                 category = last_failure_category
+                retry_attempt = (
+                    ordinary_retries_used + 1
+                    if antigravity_attempts is None
+                    else attempt + 1
+                )
+                retry_budget = (
+                    config.agent_max_retries + 1
+                    if antigravity_attempts is None
+                    else max_attempts
+                )
                 log(
                     config,
                     f"{agent_name}: {category} failure ({last_error}); "
-                    f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})",
+                    f"retrying in {delay}s (attempt {retry_attempt}/{retry_budget})",
                 )
                 runner.run(("sleep", str(delay)), cwd=active_workdir(config))
                 continue
@@ -2793,6 +2872,9 @@ def _run_validated_agent(
                 continue
         break
 
+    if self_update_stability_error is not None:
+        last_error = f"{self_update_stability_error}; final failure: {last_error}"
+        last_failure_category = "self-update-interruption"
     diagnostics = _failed_run_diagnostics(
         runner=runner,
         config=config,

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -15,7 +17,7 @@ from .base import (
     with_public_response_file_instruction,
 )
 from ..logging import agent_log_path, log
-from ..runner import Runner
+from ..runner import CommandResult, ExecutableIdentity, Runner
 from ..usage import UsageMetadata, coerce_int, first_present
 
 if TYPE_CHECKING:
@@ -91,6 +93,61 @@ def _parse_claude_output(
     return raw, None, None, None, None
 
 
+_UPDATER_DIAGNOSTIC_RE = re.compile(
+    r"(?:^(?:error|fatal).*?(?:auto-update|self-update|update failed|update in progress)|"
+    r"^(?:Installing|Updating|Updated) Claude Code|"
+    r"^(?:error|fatal).*?(?:npm (?:install|update)).*@anthropic-ai/claude-code)",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def _identity_changed(before: ExecutableIdentity, after: ExecutableIdentity, *, spawn_wall: float, exit_wall: float) -> bool:
+    changed = (before.path, before.target, before.entry_identity, before.target_identity) != (
+        after.path, after.target, after.entry_identity, after.target_identity
+    )
+    if not changed:
+        return False
+    mtimes = [identity[2] / 1_000_000_000 for identity in (after.entry_identity, after.target_identity) if identity]
+    return not mtimes or any(spawn_wall - 5 <= mtime <= exit_wall + 2 for mtime in mtimes)
+
+
+def _has_updater_diagnostic(output: str) -> bool:
+    lines = [line.strip() for line in output.splitlines() if line.strip()][-8:]
+    return bool(_UPDATER_DIAGNOSTIC_RE.search("\n".join(lines)[-2048:]))
+
+
+def classify_self_update_interruption(
+    result: CommandResult,
+    *,
+    command: str,
+    response_file_text: str | None,
+    session_id: str | None,
+) -> str | None:
+    """Return bounded Claude-updater evidence, never a generic failure classification."""
+    observation = result.observation
+    if not isinstance(result.returncode, int) or result.returncode == 0 or observation is None:
+        return None
+    if observation.interrupted or observation.elapsed_seconds > 30 or response_file_text or session_id:
+        return None
+    # Any parseable Claude JSON event is progress, even if it is not a terminal result.
+    for line in result.stdout.splitlines():
+        try:
+            if isinstance(json.loads(line), dict):
+                return None
+        except json.JSONDecodeError:
+            pass
+    if _has_updater_diagnostic(result.stdout):
+        return "Claude Code updater diagnostic"
+    # A user-supplied absolute override is only eligible with an explicit
+    # updater diagnostic.  A managed bare command may additionally prove the
+    # race through an identity change while it was running.
+    if os.path.isabs(command):
+        return None
+    if _identity_changed(observation.before, observation.after, spawn_wall=observation.spawn_wall_time, exit_wall=observation.spawn_wall_time + observation.elapsed_seconds):
+        return "Claude executable changed during invocation"
+    return None
+
+
 class ClaudeBackend:
     name: AgentName = "claude"
     display_name = "Claude"
@@ -112,6 +169,7 @@ class ClaudeBackend:
         role: str | None = None,
         label: str | None = None,
         timeout_seconds: float | None = None,
+        attempt_suffix: str | None = None,
     ) -> AgentResult:
         response_path = public_response_path(config, "claude")
         args = [config.claude_cmd, "--print", "--output-format", "json", *config.claude_args]
@@ -129,7 +187,7 @@ class ClaudeBackend:
             input_text = prompt_with_response_instruction
         else:
             args.append(prompt_with_response_instruction)
-        log_path = agent_log_path(config, "claude", run_id=run_id, label=label)
+        log_path = agent_log_path(config, "claude", run_id=run_id, label=label, attempt_suffix=attempt_suffix)
         log(config, f"Starting Claude in {config.claude_dir}; log: {log_path}; response: {response_path}")
         result = runner.run_with_log(
             args,
@@ -160,6 +218,10 @@ class ClaudeBackend:
             # Ground truth from Claude's own output; falls back to config.claude_model
             # at signature time when detection is unavailable (e.g. non-JSON output).
             model_used=model_detected,
+            command_result=result,
+            self_update_reason=classify_self_update_interruption(
+                result, command=config.claude_cmd, response_file_text=response_file_text, session_id=new_session_id,
+            ),
         )
 
 

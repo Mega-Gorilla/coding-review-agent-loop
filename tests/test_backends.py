@@ -9,9 +9,11 @@ import pytest
 
 from coding_review_agent_loop.agents.claude import (
     BACKEND as CLAUDE_BACKEND,
+    classify_self_update_interruption,
     _normalize_claude_usage,
     _parse_claude_output,
 )
+from coding_review_agent_loop.runner import CommandResult, ExecutableIdentity, ExecutionObservation
 from coding_review_agent_loop.agents.codex import (
     BACKEND as CODEX_BACKEND,
     _extract_codex_usage,
@@ -74,6 +76,26 @@ def test_parse_claude_output_falls_back_on_plain_text():
     assert usage is None
     assert raw_usage is None
     assert model is None
+
+
+def test_claude_self_update_classification_requires_bounded_evidence():
+    identity = ExecutableIdentity("/bin/claude", "/bin/claude", (1, 1, 1), (1, 1, 1))
+    changed = ExecutableIdentity("/bin/claude", "/bin/claude", (1, 2, 2_000_000_000), (1, 2, 2_000_000_000))
+    observation = ExecutionObservation(2, 10, 11, 1, identity, changed, False)
+    failed = CommandResult(["claude"], Path.cwd(), "", "", 1, observation)
+    assert classify_self_update_interruption(
+        failed, command="claude", response_file_text=None, session_id=None
+    ) == "Claude executable changed during invocation"
+    ordinary = CommandResult(["claude"], Path.cwd(), "ordinary failure", "", 1,
+                             ExecutionObservation(2, 10, 11, 1, identity, identity, False))
+    assert classify_self_update_interruption(
+        ordinary, command="claude", response_file_text=None, session_id=None
+    ) is None
+    diagnostic = CommandResult(["claude"], Path.cwd(), "Loading...\nInstalling Claude Code v2.1.226", "", 1,
+                               ExecutionObservation(2, 10, 11, 1, identity, identity, False))
+    assert classify_self_update_interruption(
+        diagnostic, command="claude", response_file_text=None, session_id=None
+    ) == "Claude Code updater diagnostic"
 
 
 def test_parse_claude_output_falls_back_on_non_string_result():

@@ -714,8 +714,9 @@ Execution model:
   from comments, no thread pool is constructed at all.
 - Log files are isolated per turn: debater logs end in
   `-<agent>-discuss-r<N>.log` and analyzer logs in
-  `-<agent>-discuss-analyzer-r<N>.log`; response files already use a
-  per-invocation UUID.
+  `-<agent>-discuss-analyzer-r<N>.log`. Claude logs additionally include an
+  attempt suffix such as `-attempt1` or `-self-update-attempt2`; response
+  files already use a per-invocation UUID.
 - Parallel mode requires a distinct workdir per debater and rejects the run
   otherwise — deliberately not bypassed by `--allow-shared-dir`, because
   concurrent git/tool activity in a single worktree can corrupt it. The
@@ -1692,7 +1693,7 @@ with `/tmp` cleanup. The CLI prints heartbeat messages with the log path while
 agents run:
 
 ```text
-[agent-loop 12:00:31] Claude still running (30s); log: /path/to/.agent-loop-logs/20260425-120001-claude.log
+[agent-loop 12:00:31] Claude still running (30s); log: /path/to/.agent-loop-logs/20260425-120001-claude-attempt1.log
 ```
 
 Use `tail -f` on the displayed path to see live output. Logs are diagnostic

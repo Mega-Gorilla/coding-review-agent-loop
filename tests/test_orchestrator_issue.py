@@ -194,7 +194,7 @@ def test_issue_loop_creates_pr_then_alternates_until_codex_approval(tmp_path):
     assert ["codex", "exec"] in command_names
     assert len(runner.comments) == 5
     assert runner.comments[-1].startswith("**Review verdict:** Approved\n\nLGTM.")
-    assert list((tmp_path / "logs").glob("*-claude.log"))
+    assert list((tmp_path / "logs").glob("*-claude-attempt1.log"))
     assert list((tmp_path / "logs").glob("*-codex.log"))
     assert (tmp_path / "logs" / ".gitignore").read_text(encoding="utf-8") == "*\n!.gitignore\n"
 

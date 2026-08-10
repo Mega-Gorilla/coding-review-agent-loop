@@ -8,7 +8,7 @@ import tempfile
 import uuid
 from typing import TYPE_CHECKING, Literal, Protocol, cast
 
-from ..runner import Runner
+from ..runner import CommandResult, Runner
 from ..usage import UsageMetadata
 
 if TYPE_CHECKING:
@@ -45,6 +45,8 @@ class AgentResult:
     # signature (#332); None when the backend could not determine it. The
     # antigravity fallback chain (#333) sets this to the model that answered.
     model_used: str | None = None
+    command_result: CommandResult | None = None
+    self_update_reason: str | None = None
 
 
 class AgentBackend(Protocol):
@@ -66,6 +68,7 @@ class AgentBackend(Protocol):
         role: str | None = None,
         label: str | None = None,
         timeout_seconds: float | None = None,
+        attempt_suffix: str | None = None,
     ) -> AgentResult: ...
 
 

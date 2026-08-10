@@ -28,11 +28,13 @@ def agent_log_path(
     *,
     run_id: str | None = None,
     label: str | None = None,
+    attempt_suffix: str | None = None,
 ) -> Path:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     prefix = f"{run_id}-" if run_id else ""
     suffix = f"-{label}" if label else ""
-    return config.log_dir / f"{prefix}{stamp}-{agent}{suffix}.log"
+    attempt = f"-{attempt_suffix}" if attempt_suffix else ""
+    return config.log_dir / f"{prefix}{stamp}-{agent}{suffix}{attempt}.log"
 
 
 def run_usage_summary_path(config: AgentLoopConfig, run_id: str) -> Path:

@@ -205,6 +205,7 @@ class GeminiBackend:
         role: str | None = None,
         label: str | None = None,
         timeout_seconds: float | None = None,
+        attempt_suffix: str | None = None,
     ) -> AgentResult:
         # Gemini CLI only allows file writes inside the trusted workspace (or
         # its own private temp dir, whose path we do not know ahead of time).
@@ -216,7 +217,7 @@ class GeminiBackend:
             "gemini",
             root=_gemini_public_response_root(config.gemini_dir),
         )
-        log_path = agent_log_path(config, "gemini", run_id=run_id, label=label)
+        log_path = agent_log_path(config, "gemini", run_id=run_id, label=label, attempt_suffix=attempt_suffix)
         log(config, f"Starting Gemini in {config.gemini_dir}; log: {log_path}; response: {response_path}")
         if date.today() >= GEMINI_CONSUMER_CUTOFF - timedelta(days=_GEMINI_CUTOFF_WARN_AHEAD_DAYS):
             log(config, f"Gemini CLI advisory: {_GEMINI_MIGRATION_GUIDANCE}")

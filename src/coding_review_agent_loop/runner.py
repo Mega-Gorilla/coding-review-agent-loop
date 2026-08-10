@@ -19,12 +19,32 @@ from .errors import AgentLoopError
 
 
 @dataclass(frozen=True)
+class ExecutableIdentity:
+    path: str | None
+    target: str | None
+    entry_identity: tuple[int, int, int] | None
+    target_identity: tuple[int, int, int] | None
+
+
+@dataclass(frozen=True)
+class ExecutionObservation:
+    spawn_wall_time: float
+    spawn_monotonic: float
+    exit_monotonic: float
+    elapsed_seconds: float
+    before: ExecutableIdentity
+    after: ExecutableIdentity
+    interrupted: bool
+
+
+@dataclass(frozen=True)
 class CommandResult:
     args: list[str]
     cwd: Path
     stdout: str
     stderr: str
     returncode: int | None
+    observation: ExecutionObservation | None = None
 
 
 # Matches ANSI/VT100 control sequences (CSI, OSC, charset selection) that a
@@ -44,6 +64,25 @@ def strip_ansi(text: str) -> str:
 def tail_text(text: str, *, max_lines: int = 80) -> str:
     lines = text.splitlines()
     return "\n".join(lines[-max_lines:])
+
+
+def executable_identity(command: str) -> ExecutableIdentity:
+    """Capture an attempt-local identity for a bare command without caching it."""
+    path = shutil.which(command) if not os.path.isabs(command) else command
+    if path is None:
+        return ExecutableIdentity(None, None, None, None)
+    target = os.path.realpath(path)
+    def identity(stat_result: os.stat_result) -> tuple[int, int, int]:
+        return (stat_result.st_dev, stat_result.st_ino, stat_result.st_mtime_ns)
+    try:
+        entry = identity(os.lstat(path))
+    except OSError:
+        entry = None
+    try:
+        resolved = identity(os.stat(path))
+    except OSError:
+        resolved = None
+    return ExecutableIdentity(path, target, entry, resolved)
 
 
 def ensure_log_dir_ignored(log_dir: Path) -> None:
@@ -184,6 +223,23 @@ class Runner:
 
         raise AssertionError("spawn retry loop exited unexpectedly")
 
+    def wait_for_executable_stability(self, command: str, *, deadline: float | None = None) -> bool:
+        """Observe two matching command identities a second apart, for at most six seconds."""
+        if self._interrupted:
+            return False
+        end = min(deadline, time.monotonic() + 6) if deadline is not None else time.monotonic() + 6
+        previous: ExecutableIdentity | None = None
+        while time.monotonic() < end and not self._interrupted:
+            current = executable_identity(command)
+            if current.path and current.entry_identity and current.target_identity and current == previous:
+                return True
+            previous = current
+            remaining = end - time.monotonic()
+            if remaining <= 0:
+                break
+            time.sleep(min(1.0, remaining))
+        return False
+
     def run(
         self,
         args: Sequence[str],
@@ -301,6 +357,9 @@ class Runner:
                     cmd,
                     spawn,
                 )
+                spawn_wall_time = time.time()
+                spawn_monotonic = time.monotonic()
+                before_identity = executable_identity(cmd[0])
                 self._register_active_process(proc)
                 try:
                     while True:
@@ -337,7 +396,11 @@ class Runner:
 
         full_output = log_path.read_text(encoding="utf-8")
         output = full_output[len(header):] if full_output.startswith(header) else full_output
-        result = CommandResult(cmd, cwd, output, "", returncode)
+        exited = time.monotonic()
+        result = CommandResult(cmd, cwd, output, "", returncode, ExecutionObservation(
+            spawn_wall_time, spawn_monotonic,
+            exited, exited - spawn_monotonic, before_identity, executable_identity(cmd[0]), self._interrupted,
+        ))
         if check and returncode != 0:
             raise AgentLoopError(
                 f"Command failed with exit {returncode}: {' '.join(cmd)}\n"
@@ -405,6 +468,9 @@ class Runner:
                     raise
 
             proc = self._spawn_with_retry(cmd, spawn_pty)
+            spawn_wall_time = time.time()
+            spawn_monotonic = time.monotonic()
+            before_identity = executable_identity(cmd[0])
             assert allocated_fds is not None
             master_fd, slave_fd = allocated_fds
             os.close(slave_fd)
@@ -458,7 +524,11 @@ class Runner:
 
         raw = b"".join(chunks).decode("utf-8", errors="replace")
         output = strip_ansi(raw)
-        result = CommandResult(cmd, cwd, output, "", returncode)
+        exited = time.monotonic()
+        result = CommandResult(cmd, cwd, output, "", returncode, ExecutionObservation(
+            spawn_wall_time, spawn_monotonic, exited, exited - spawn_monotonic,
+            before_identity, executable_identity(cmd[0]), self._interrupted,
+        ))
         if check and returncode != 0:
             raise AgentLoopError(
                 f"Command failed with exit {returncode}: {' '.join(cmd)}\n"

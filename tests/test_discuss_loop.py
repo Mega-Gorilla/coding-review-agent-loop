@@ -3236,7 +3236,7 @@ def test_discuss_parallel_artifacts_are_isolated_by_round_and_agent(tmp_path):
     assert len([n for n in log_names if n.endswith("-gemini-discuss-r1.log")]) == 1
     assert len([n for n in log_names if n.endswith("-codex-discuss-r2.log")]) == 1
     assert len([n for n in log_names if n.endswith("-gemini-discuss-r2.log")]) == 1
-    assert len([n for n in log_names if n.endswith("-claude-discuss-analyzer-r1.log")]) == 1
+    assert len([n for n in log_names if n.endswith("-claude-discuss-analyzer-r1-attempt1.log")]) == 1
     assert len(log_names) == len(set(log_names))
     # Usage records from parallel calls are all present with unique call ids.
     summary = read_usage_summary(config.log_dir)
