@@ -660,12 +660,16 @@ def _structured_coder_followup_guidance(
     human_requirements_context: CoderHumanRequirementsPromptContext,
     coder_signature: str,
 ) -> str:
-    example_human_requirement_ids = (
-        list(human_requirements_context.surfaced_requirement_ids[:1])
+    example_human_requirement_dispositions = (
+        [{
+            "requirement_id": human_requirements_context.surfaced_requirement_ids[0],
+            "disposition": "blocked",
+            "evidence": "The requested dependency is unavailable in this environment.",
+        }]
         if human_requirements_context.surfaced_requirement_ids
         else []
     )
-    example_human_requirement_ids_json = json.dumps(example_human_requirement_ids)
+    example_human_requirement_dispositions_json = json.dumps(example_human_requirement_dispositions)
     lines = [
         f"Use this mandatory structured JSON follow-up format so {reviewer_name} and the orchestrator can validate your response deterministically:",
         "",
@@ -680,9 +684,9 @@ def _structured_coder_followup_guidance(
         '  "addressed_item_notes": {"item-1": "Updated the parser and added regression coverage."},',
         '  "remaining_item_notes": {"item-2": "Deferred because it requires a separate UI change."},',
         '  "dispute_evidence": {"item-3": "Checked Google pricing page (https://...): $1.50/1M tokens is correct per the official docs."},',
-        '  "human_requirement_dispositions": [],',
+        f'  "human_requirement_dispositions": {example_human_requirement_dispositions_json},',
         '  "human_requirements": {',
-        f'    "addressed_ids": {example_human_requirement_ids_json},',
+        '    "addressed_ids": [],',
         '    "checked_discussion_directly": false',
         "  },",
         '  "tests_run": ["python -m pytest tests/test_agent_loop.py -k followup"]',
@@ -699,11 +703,11 @@ def _structured_coder_followup_guidance(
     if human_requirements_context.surfaced_requirement_ids:
         surfaced = ", ".join(f"`{item}`" for item in human_requirements_context.surfaced_requirement_ids)
         lines.append(
-            "In structured replies, set `human_requirements.addressed_ids` to exactly the surfaced signed human requirement IDs you addressed in this prompt: "
+            "In structured replies, `human_requirement_dispositions` must cover exactly these surfaced signed labels: "
             f"{surfaced}. Only exact surfaced labels such as `Requirement 1` are valid."
         )
         lines.append(
-            "Set `human_requirement_dispositions` to exactly one object per surfaced label, using the exact `requirement_id`, disposition `addressed`, `blocked`, or `not-applicable`, and non-blank evidence. This ledger is separate from reviewer item classifications and the legacy `human_requirements` acknowledgement."
+            "Set `human_requirement_dispositions` to exactly one object per surfaced label, using the exact `requirement_id`, disposition `addressed`, `blocked`, or `not-applicable`, and non-blank evidence. Put only `addressed` dispositions in `human_requirements.addressed_ids`; omit `blocked` and `not-applicable` dispositions. A `blocked` disposition requires `state: blocking`, while `not-applicable` may be used with `state: approved`."
         )
     elif human_requirements_context.requires_direct_discussion_ack:
         lines.append(

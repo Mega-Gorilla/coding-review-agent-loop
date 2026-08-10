@@ -2444,6 +2444,38 @@ def test_validate_structured_coder_followup_rejects_disputed_item_without_eviden
         validate_structured_coder_followup(payload)
 
 
+def test_validate_structured_coder_followup_rejects_approved_blocked_requirement():
+    payload = json.dumps({
+        "schema_version": 1, "kind": "coder_followup", "state": "approved",
+        "summary": "Cannot complete the requirement.", "addressed_items": [], "remaining_items": [],
+        "human_requirement_dispositions": [{
+            "requirement_id": "Requirement 1", "disposition": "blocked", "evidence": "The dependency is unavailable."
+        }],
+        "human_requirements": {"addressed_ids": [], "checked_discussion_directly": False},
+    }) + "\n<!-- AGENT_STATE: approved -->\n-- OpenAI Codex"
+
+    with pytest.raises(AgentLoopError, match="must be `blocking`"):
+        validate_structured_coder_followup(payload)
+
+
+def test_validate_structured_human_requirements_acknowledgement_uses_disposition_ledger():
+    from coding_review_agent_loop.protocol import HumanRequirementDisposition
+
+    dispositions = (
+        HumanRequirementDisposition("Requirement 1", "blocked", "Dependency is unavailable."),
+        HumanRequirementDisposition("Requirement 2", "addressed", "Implemented the requested change."),
+    )
+    validate_structured_human_requirements_acknowledgement(
+        ("Requirement 2",), dispositions=dispositions, checked_discussion_directly=False,
+        surfaced_requirement_ids=("Requirement 1", "Requirement 2"), requires_direct_discussion_ack=False,
+    )
+    with pytest.raises(AgentLoopError, match="may contain only requirements with an `addressed` disposition"):
+        validate_structured_human_requirements_acknowledgement(
+            ("Requirement 1", "Requirement 2"), dispositions=dispositions, checked_discussion_directly=False,
+            surfaced_requirement_ids=("Requirement 1", "Requirement 2"), requires_direct_discussion_ack=False,
+        )
+
+
 @pytest.mark.parametrize(
     ("addressed_ids", "checked_discussion_directly", "surfaced_ids", "requires_direct_discussion_ack", "message"),
     [

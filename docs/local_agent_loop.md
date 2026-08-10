@@ -1490,7 +1490,12 @@ response must classify every carried reviewer item exactly once:
 `human_requirement_dispositions` is an auditable ledger: include exactly one
 entry for each surfaced signed requirement, with disposition `addressed`,
 `blocked`, or `not-applicable` and non-blank evidence. It must be empty when
-no signed requirements were surfaced.
+no signed requirements were surfaced. In structured coder follow-ups,
+`human_requirements.addressed_ids` contains exactly requirements whose
+disposition is `addressed`; omit `blocked` and `not-applicable` requirements.
+A blocked disposition requires `state: "blocking"`, while not-applicable may
+appear in an approved response. Legacy markdown acknowledgements still list
+every surfaced requirement.
 
 A plan revision uses:
 

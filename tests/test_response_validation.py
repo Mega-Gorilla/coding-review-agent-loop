@@ -99,6 +99,57 @@ def test_validate_coder_followup_response_accepts_structured_item_partition():
     assert parsed.addressed_items == ("item-1",)
     assert parsed.remaining_items == ("item-2",)
 
+
+@pytest.mark.parametrize(
+    ("state", "disposition"),
+    [("blocking", "blocked"), ("approved", "not-applicable")],
+)
+def test_validate_coder_followup_response_uses_disposition_aware_requirement_ledger(state, disposition):
+    response = structured_coder_followup(
+        state=state,
+        addressed_items=["item-1"],
+        human_requirement_ids=[],
+        human_requirement_dispositions=[{
+            "requirement_id": "Requirement 1", "disposition": disposition,
+            "evidence": "The dependency is unavailable." if disposition == "blocked" else "Requirement does not apply.",
+        }],
+    )
+    parsed = _validate_coder_followup_response(
+        response,
+        unresolved_items=(UnresolvedReviewItem(
+            item_id="item-1", reviewer="OpenAI Codex", source_round=1,
+            text="Add a regression test.", status="blocking",
+        ),),
+        human_requirements=(HumanReviewRequirement(
+            source_type="PR comment", author="reviewer", created_at="2026-05-18T10:00:00Z",
+            url="https://github.com/OWNER/REPO/pull/77#issuecomment-1", body="Please use the absolute URL.",
+        ),),
+    )
+    assert parsed.human_requirements.addressed_ids == ()
+
+
+def test_validate_coder_followup_response_rejects_mismatched_requirement_ledger():
+    response = structured_coder_followup(
+        addressed_items=["item-1"],
+        human_requirement_ids=[],
+        human_requirement_dispositions=[{
+            "requirement_id": "Requirement 1", "disposition": "addressed",
+            "evidence": "Implemented the requested change.",
+        }],
+    )
+    with pytest.raises(AgentLoopError, match="must contain every requirement with an `addressed` disposition"):
+        _validate_coder_followup_response(
+            response,
+            unresolved_items=(UnresolvedReviewItem(
+                item_id="item-1", reviewer="OpenAI Codex", source_round=1,
+                text="Add a regression test.", status="blocking",
+            ),),
+            human_requirements=(HumanReviewRequirement(
+                source_type="PR comment", author="reviewer", created_at="2026-05-18T10:00:00Z",
+                url="https://github.com/OWNER/REPO/pull/77#issuecomment-1", body="Please use the absolute URL.",
+            ),),
+        )
+
 def test_validate_coder_followup_response_rejects_issue_acceptance_criteria_as_human_requirement():
     response = structured_coder_followup(
         state="blocking",

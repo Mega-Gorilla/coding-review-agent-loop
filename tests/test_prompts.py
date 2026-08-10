@@ -3,6 +3,10 @@ import pytest
 from agent_loop_helpers import *  # noqa: F403
 from coding_review_agent_loop.github import PullRequestCheck, PullRequestChecks
 from coding_review_agent_loop.prompts import build_task_clarification_prompt, format_pr_checks
+from coding_review_agent_loop.protocol import (
+    validate_structured_coder_followup,
+    validate_structured_human_requirements_acknowledgement,
+)
 
 _EXPECTED_UNRESOLVED_ITEMS_GUIDANCE = """Prior unresolved items are present. Disposition every listed
 item in the JSON `prior_item_dispositions` array — do not add a separate prose section
@@ -1402,6 +1406,31 @@ def test_non_plan_prompts_request_human_requirement_dispositions_not_plan_dispos
     assert '"human_requirement_dispositions"' in prompts[1]
     for prompt in prompts[2:]:
         assert '"human_requirement_dispositions"' not in prompt
+
+
+def test_coder_followup_guidance_renders_valid_blocked_requirement_example(tmp_path):
+    config = make_config(tmp_path, reviewer=("codex",))
+    requirements = (HumanReviewRequirement(
+        source_type="PR comment", author="reviewer", created_at="2026-05-18T10:00:00Z",
+        url="https://github.com/OWNER/REPO/pull/77#issuecomment-1", body="Please use the absolute URL.",
+    ),)
+    prompt = build_followup_prompt(77, 1, "Fix the URL.", config, human_requirements=requirements)
+    example_start = prompt.index('{\n  "schema_version": 1,\n  "kind": "coder_followup"')
+    decoder = json.JSONDecoder()
+    payload, _ = decoder.raw_decode(prompt[example_start:])
+    example = json.dumps(payload) + "\n<!-- AGENT_STATE: blocking -->\n-- OpenAI Codex"
+    parsed = validate_structured_coder_followup(example)
+
+    assert parsed.human_requirements.addressed_ids == ()
+    assert parsed.human_requirement_dispositions[0].disposition == "blocked"
+    assert "only `addressed` dispositions" in prompt
+    validate_structured_human_requirements_acknowledgement(
+        parsed.human_requirements.addressed_ids,
+        dispositions=parsed.human_requirement_dispositions,
+        checked_discussion_directly=False,
+        surfaced_requirement_ids=("Requirement 1",),
+        requires_direct_discussion_ack=False,
+    )
 
 
 def test_plan_review_prompt_surfaces_signed_issue_requirements_as_approval_critical(tmp_path):
