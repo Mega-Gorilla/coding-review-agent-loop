@@ -846,8 +846,11 @@ What each mechanism produces and where the run stops:
   first phase is `human-action` or `manual-close`, it stops after creating the
   child issues without implementing anything. Resume the remaining phases with
   `agent-loop issue <child>`, not by rerunning the parent.
-- **`--materialize-split-issues`**: files one linked, generic child issue per
-  remaining discuss `split` proposal or plan `deferred_stages` entry. It is
+- **`--materialize-split-issues`**: files one linked child issue only for an
+  approved plan's explicit `child_stages` entries (or legacy discuss `split`
+  proposals). Use `external_dependencies` for existing `#N`, issue URL, or
+  `owner/repo#N` references; `deferred_work` and `plan_actions` are recorded
+  only. Legacy `deferred_stages` are record-only and are never auto-filed.
   idempotent (tracked by the parent's `AGENT_DISCUSS_SPLIT` marker), capped at
   8 children per parent, and files nothing from free-form prose narrowing
   alone — only from the two structured signals above.

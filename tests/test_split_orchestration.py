@@ -14,8 +14,11 @@ from coding_review_agent_loop.issue_pr_handoff import format_issue_pr_handoff_co
 from coding_review_agent_loop.orchestrator import (
     PostedRoundMetadata,
     _attach_round_metadata,
+    _log_typed_plan_stage_dispositions,
     _plan_subject,
 )
+from coding_review_agent_loop.comment_rendering import render_typed_plan_stages_section
+from coding_review_agent_loop.protocol import DeferredStage, TypedPlanStages
 from coding_review_agent_loop.split_materialization import (
     MaterializedSplitChild,
     SplitMaterializationMetadata,
@@ -62,14 +65,49 @@ def _existing_split_children_comment() -> dict:
     }
 
 
-def test_plan_first_no_prior_split_materializes_deferred_stages_before_implementation(tmp_path):
+def test_log_typed_plan_stage_dispositions_from_structured_payload(tmp_path, capsys):
+    plan = structured_plan_state(
+        child_stages=[{"title": "Implementation", "summary": "Create this."}],
+        external_dependencies=[{"title": "#481", "summary": "Already exists."}],
+        deferred_work=[{"title": "Stage 4", "summary": "Future work."}],
+        plan_actions=[{"title": "Post approval", "summary": "Tracker action."}],
+        deferred_stages=[{"title": "Legacy stage", "summary": "Recorded only."}],
+    )
+
+    _log_typed_plan_stage_dispositions(plan, config=make_config(tmp_path, quiet=False))
+
+    stderr = capsys.readouterr().err
+    assert "linked dependency: #481." in stderr
+    assert "recorded-only deferred work: Stage 4." in stderr
+    assert "recorded-only plan action: Post approval." in stderr
+    assert "recorded-only legacy deferred stage: Legacy stage." in stderr
+
+
+def test_log_typed_plan_stage_dispositions_from_marker(tmp_path, capsys):
+    marker = render_typed_plan_stages_section(
+        TypedPlanStages(
+            external_dependencies=(DeferredStage("#481", "Already exists."),),
+            deferred_work=(DeferredStage("Stage 4", "Future work."),),
+            plan_actions=(DeferredStage("Post approval", "Tracker action."),),
+        )
+    )
+
+    _log_typed_plan_stage_dispositions(marker or "", config=make_config(tmp_path, quiet=False))
+
+    stderr = capsys.readouterr().err
+    assert "linked dependency: #481." in stderr
+    assert "recorded-only deferred work: Stage 4." in stderr
+    assert "recorded-only plan action: Post approval." in stderr
+
+
+def test_plan_first_materializes_explicit_child_stages_before_implementation(tmp_path):
     runner = FakeRunner(
         pr_payload={"body": "Fixes #56"},
         claude_outputs=[
             structured_plan_state(
                 state="blocking",
                 summary="Implement the core parser change.",
-                deferred_stages=[{"title": "Auth flow", "summary": "Split follow-up out."}],
+                child_stages=[{"title": "Auth flow", "summary": "Split follow-up out."}],
             ),
             "Implemented approved plan.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
         ],
@@ -100,7 +138,37 @@ def test_plan_first_no_prior_split_materializes_deferred_stages_before_implement
     assert "Fixes #56" in runner.pr_payload["body"]
 
 
-def test_plan_first_deferred_stage_title_with_colon_round_trips_through_canonical_markdown(tmp_path):
+def test_470_legacy_deferred_stages_are_recorded_without_placeholder_children(tmp_path):
+    """Regression for #470: overloaded legacy entries must never be filed."""
+    runner = FakeRunner(
+        pr_payload={"body": "Fixes #470"},
+        claude_outputs=[
+            structured_plan_state(
+                state="blocking",
+                summary="Implement the approved scope.",
+                deferred_stages=[
+                    {"title": "Post-approval child issue materialization", "summary": "Tracker action."},
+                    {"title": "#481", "summary": "Existing external gate."},
+                    {"title": "Stage 4", "summary": "Future work."},
+                ],
+            ),
+            "Implemented approved plan.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            structured_plan_review(state="approved"),
+            structured_pr_review(state="approved", summary="LGTM."),
+        ],
+    )
+
+    assert run_issue_loop(
+        runner, issue_number=470, config=make_config(tmp_path, materialize_split_issues=True),
+        plan_first=True, implement_after_approval=True,
+    ) == 0
+
+    assert runner.issues == []
+
+
+def test_plan_first_child_stage_title_with_colon_round_trips_through_canonical_markdown(tmp_path):
     """A revised plan's `deferred_stages` are carried in `current_plan` as the
     canonical revision markdown (not the raw structured JSON), which renders
     each stage as a human-readable `- {title}: {summary}` bullet. A title that
@@ -113,7 +181,7 @@ def test_plan_first_deferred_stage_title_with_colon_round_trips_through_canonica
             structured_plan_state(state="blocking", summary="Initial plan."),
             structured_plan_revision(
                 summary="Implement the core parser change.",
-                deferred_stages=[
+                child_stages=[
                     {"title": "Stage 2: API follow-up", "summary": "Split out the API work."}
                 ],
             ),
@@ -155,7 +223,7 @@ def test_plan_first_no_prior_split_warns_when_materialization_disabled(tmp_path)
             structured_plan_state(
                 state="blocking",
                 summary="Implement the core parser change.",
-                deferred_stages=[{"title": "Auth flow", "summary": "Split follow-up out."}],
+                child_stages=[{"title": "Auth flow", "summary": "Split follow-up out."}],
             ),
             "Implemented approved plan.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
         ],

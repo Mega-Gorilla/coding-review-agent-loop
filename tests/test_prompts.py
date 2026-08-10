@@ -238,7 +238,7 @@ def test_issue_plan_prompt_requires_complete_structured_plan_state_contract(tmp_
     assert '"state": "blocking"' in prompt
     assert '"summary": "<non-empty concise implementation summary>"' in prompt
     assert '"plan_steps": ["<non-empty step>"]' in prompt
-    assert "optional `deferred_stages`" in prompt
+    assert "typed `child_stages`, `external_dependencies`, `deferred_work`," in prompt
     assert "generic `implementation_plan`" in prompt
     assert "after the JSON object and before the AGENT_PLAN_STATE footer" in prompt
 

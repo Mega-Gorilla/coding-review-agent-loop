@@ -247,6 +247,35 @@ class DeferredStage:
 
 
 @dataclass(frozen=True)
+class ChildStage:
+    """A bounded implementation stage that may be filed as a child issue."""
+
+    title: str
+    summary: str
+
+
+@dataclass(frozen=True)
+class TypedPlanStages:
+    """The four non-overlapping scope categories used by approved plans (#585)."""
+
+    child_stages: tuple[ChildStage, ...] = ()
+    external_dependencies: tuple[DeferredStage, ...] = ()
+    deferred_work: tuple[DeferredStage, ...] = ()
+    plan_actions: tuple[DeferredStage, ...] = ()
+
+
+# Shared classification rules for typed plan validation and materialization.
+ISSUE_REFERENCE_RE = re.compile(
+    r"(?:\B#[1-9]\d*\b|github\.com/[^/\s]+/[^/\s]+/issues/[1-9]\d*\b|[\w.-]+/[\w.-]+#[1-9]\d*\b)",
+    re.I,
+)
+TRACKER_ACTION_TITLE_RE = re.compile(
+    r"^(?:post|after)[ -]?approval.*(?:\b(?:creat|fil|materializ).*\bchild issue|\bchild issue.*\bmaterializ)",
+    re.I,
+)
+
+
+@dataclass(frozen=True)
 class StructuredPlanRevision:
     schema_version: int
     kind: str
@@ -255,6 +284,7 @@ class StructuredPlanRevision:
     prior_plan_item_dispositions: tuple[ReviewItemDisposition, ...]
     plan_steps: tuple[str, ...]
     deferred_stages: tuple[DeferredStage, ...] = ()
+    typed_stages: TypedPlanStages = TypedPlanStages()
     human_requirement_dispositions: tuple[HumanRequirementDisposition, ...] = ()
 
 
@@ -266,6 +296,7 @@ class StructuredPlanState:
     summary: str
     plan_steps: tuple[str, ...]
     deferred_stages: tuple[DeferredStage, ...] = ()
+    typed_stages: TypedPlanStages = TypedPlanStages()
     human_requirement_dispositions: tuple[HumanRequirementDisposition, ...] = ()
 
 
@@ -943,6 +974,77 @@ def _expect_deferred_stage_list(
             )
         )
     return tuple(stages)
+
+
+def _expect_typed_plan_stages(payload: dict[str, object], *, context: str) -> TypedPlanStages:
+    """Parse #585's explicit plan categories and retain old payloads safely.
+
+    Legacy ``deferred_stages`` are deliberately *not* promoted to children:
+    old plans may contain dependencies and tracker actions.
+    """
+    categories = ("child_stages", "external_dependencies", "deferred_work", "plan_actions")
+    present = [name for name in categories if name in payload]
+    _expect_deferred_stage_list(payload, "deferred_stages", context=f"{context}.deferred_stages")
+    if not present:
+        return TypedPlanStages()
+
+    def parse_child_stages() -> tuple[ChildStage, ...]:
+        value = payload.get("child_stages", [])
+        if not isinstance(value, list):
+            raise AgentLoopError(f"{context}.child_stages must be a JSON array.")
+        result: list[ChildStage] = []
+        for index, item in enumerate(value):
+            item_context = f"{context}.child_stages at index {index}"
+            obj = _expect_object(item, context=item_context)
+            _expect_exact_keys(obj, context=item_context, required={"title", "summary"})
+            title = _expect_non_empty_string(obj["title"], context=f"{item_context}.title")
+            summary = _expect_non_empty_string(obj["summary"], context=f"{item_context}.summary")
+            if ISSUE_REFERENCE_RE.search(title + "\n" + summary):
+                raise AgentLoopError(
+                    f"{item_context} references an existing issue; "
+                    "use external_dependencies."
+                )
+            if TRACKER_ACTION_TITLE_RE.match(" ".join(title.split())):
+                raise AgentLoopError(
+                    f"{item_context} is a tracker action; use plan_actions."
+                )
+            result.append(ChildStage(title, summary))
+        return tuple(result)
+
+    def recorded_stages(name: str) -> tuple[DeferredStage, ...]:
+        value = payload.get(name, [])
+        if not isinstance(value, list):
+            raise AgentLoopError(f"{context}.{name} must be a JSON array.")
+        result: list[DeferredStage] = []
+        for index, item in enumerate(value):
+            item_context = f"{context}.{name} at index {index}"
+            obj = _expect_object(item, context=item_context)
+            _expect_exact_keys(obj, context=item_context, required={"title", "summary"})
+            title = _expect_non_empty_string(obj["title"], context=f"{item_context}.title")
+            summary = _expect_non_empty_string(obj["summary"], context=f"{item_context}.summary")
+            result.append(DeferredStage(title, summary))
+        return tuple(result)
+
+    child_stages = parse_child_stages()
+    dependencies = recorded_stages("external_dependencies")
+    deferred = recorded_stages("deferred_work")
+    actions = recorded_stages("plan_actions")
+    seen: dict[str, str] = {}
+    for category, entries in (
+        ("child_stages", child_stages),
+        ("external_dependencies", dependencies),
+        ("deferred_work", deferred),
+        ("plan_actions", actions),
+    ):
+        for entry in entries:
+            key = " ".join(entry.title.casefold().split())
+            if key in seen:
+                raise AgentLoopError(
+                    f"{context} has a duplicate title in {seen[key]} and {category}: "
+                    f"{entry.title!r}."
+                )
+            seen[key] = category
+    return TypedPlanStages(child_stages, dependencies, deferred, actions)
 
 
 def _expect_state(value: object, *, context: str) -> str:
@@ -1830,7 +1932,14 @@ def validate_structured_plan_revision(text: str) -> StructuredPlanRevision | Non
             "prior_plan_item_dispositions",
             "plan_steps",
         },
-        optional={"deferred_stages", "human_requirement_dispositions"},
+        optional={
+            "deferred_stages",
+            "child_stages",
+            "external_dependencies",
+            "deferred_work",
+            "plan_actions",
+            "human_requirement_dispositions",
+        },
     )
     state = _expect_non_empty_string(payload["state"], context="plan_revision.state")
     if state != "blocking":
@@ -1864,6 +1973,7 @@ def validate_structured_plan_revision(text: str) -> StructuredPlanRevision | Non
         prior_plan_item_dispositions=dispositions,
         plan_steps=plan_steps,
         deferred_stages=deferred_stages,
+        typed_stages=_expect_typed_plan_stages(payload, context="plan_revision"),
         human_requirement_dispositions=human_requirement_dispositions,
     )
 
@@ -1880,7 +1990,14 @@ def validate_structured_plan_state(text: str) -> StructuredPlanState | None:
         payload,
         context="plan_state",
         required={"schema_version", "kind", "state", "summary", "plan_steps"},
-        optional={"deferred_stages", "human_requirement_dispositions"},
+        optional={
+            "deferred_stages",
+            "child_stages",
+            "external_dependencies",
+            "deferred_work",
+            "plan_actions",
+            "human_requirement_dispositions",
+        },
     )
     state = _expect_state(payload["state"], context="plan_state.state")
     if state != "blocking":
@@ -1899,6 +2016,7 @@ def validate_structured_plan_state(text: str) -> StructuredPlanState | None:
         deferred_stages=_expect_deferred_stage_list(
             payload, "deferred_stages", context="plan_state.deferred_stages"
         ),
+        typed_stages=_expect_typed_plan_stages(payload, context="plan_state"),
         human_requirement_dispositions=_expect_human_requirement_dispositions(
             payload.get("human_requirement_dispositions", []),
             context="plan_state.human_requirement_dispositions",

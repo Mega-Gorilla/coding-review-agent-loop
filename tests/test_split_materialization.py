@@ -21,7 +21,7 @@ from coding_review_agent_loop.split_materialization import (
     split_stage_proposal_from_deferred_stage,
     split_stage_proposal_from_text,
 )
-from coding_review_agent_loop.protocol import DeferredStage
+from coding_review_agent_loop.protocol import ChildStage, DeferredStage
 from agent_loop_helpers import FakeRunner, make_config
 
 
@@ -276,6 +276,94 @@ def test_materialize_split_proposals_dry_run_previews_search_and_create(tmp_path
     # persists application-level state outside of GitHub CLI echo commands.
     assert runner.search_issues_calls == ['"[#56 stage]" in:title']
     assert len(runner.issues) == 1
+
+
+def test_materialize_typed_child_adopts_existing_canonical_issue_instead_of_duplicate(tmp_path):
+    runner = FakeRunner(
+        search_issues_payload=[
+            [],
+            [
+                {
+                    "number": 480,
+                    "title": "3A implementation",
+                    "url": "https://github.com/OWNER/REPO/issues/480",
+                    "body": "Canonical child from the tracker. Part of #479.",
+                }
+            ],
+        ]
+    )
+
+    metadata = materialize_split_proposals(
+        runner,
+        config=make_config(tmp_path),
+        parent_issue=479,
+        subject="approved-plan",
+        proposals=[split_stage_proposal_from_deferred_stage(ChildStage("3A implementation", "New work."))],
+    )
+
+    assert metadata is not None
+    assert runner.issues == []
+    assert metadata.children[0].number == 480
+    assert metadata.children[0].origin == "adopted"
+
+
+def test_materialize_typed_child_does_not_adopt_unrelated_title_match(tmp_path):
+    runner = FakeRunner(
+        issue_urls=["https://github.com/OWNER/REPO/issues/481"],
+        search_issues_payload=[
+            [],
+            [
+                {
+                    "number": 480,
+                    "title": "Stage 4",
+                    "url": "https://github.com/OWNER/REPO/issues/480",
+                    "body": "Unrelated work.",
+                }
+            ],
+        ],
+    )
+
+    metadata = materialize_split_proposals(
+        runner,
+        config=make_config(tmp_path),
+        parent_issue=479,
+        subject="approved-plan",
+        proposals=[split_stage_proposal_from_deferred_stage(ChildStage("Stage 4", "New work."))],
+    )
+
+    assert metadata is not None
+    assert runner.issues[0]["title"] == "[#479 stage] Stage 4"
+    assert metadata.children[0].number == 481
+    assert metadata.children[0].origin == "created"
+
+
+def test_materialize_discuss_proposal_skips_canonical_title_search(tmp_path):
+    runner = FakeRunner(issue_urls=["https://github.com/OWNER/REPO/issues/481"])
+
+    materialize_split_proposals(
+        runner,
+        config=make_config(tmp_path),
+        parent_issue=479,
+        subject="discussion",
+        proposals=[split_stage_proposal_from_text('Stage "4"\n\nNew work.')],
+    )
+
+    assert runner.search_issues_calls == ['"[#479 stage]" in:title']
+
+
+def test_discuss_split_proposal_can_reference_parent_issue_without_rejection(tmp_path):
+    runner = FakeRunner(issue_urls=["https://github.com/OWNER/REPO/issues/101"])
+
+    metadata = materialize_split_proposals(
+        runner,
+        config=make_config(tmp_path),
+        parent_issue=56,
+        subject="discuss",
+        proposals=[split_stage_proposal_from_text("Split the auth flow out of #56\n\nDetailed rationale.")],
+    )
+
+    assert metadata is not None
+    assert runner.issues[0]["title"] == "[#56 stage] Split the auth flow out of #56"
 
 
 def test_find_existing_split_materialization_rejects_invalid_marker():
