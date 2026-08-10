@@ -622,8 +622,8 @@ class FakeRunner(Runner):
                 stdout, returncode = output
             output = stdout
             if isinstance(output, str) and not explicit_stdout:
-                output = self._normalize_legacy_agent_output(output, "\n".join(cmd))
-            self._maybe_write_public_response_file(cmd)
+                output = self._normalize_legacy_agent_output(output, input_text or "\n".join(cmd))
+            self._maybe_write_public_response_file(cmd, prompt=input_text)
             self._maybe_advance_git_head_for_agent_pr(output)
             self._maybe_advance_pr_head_for_coder_followup(cmd)
             self._mark_agent_command_seen()

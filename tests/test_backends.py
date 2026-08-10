@@ -20,6 +20,7 @@ from coding_review_agent_loop.agents.codex import (
 from coding_review_agent_loop.agents.gemini import (
     BACKEND as GEMINI_BACKEND,
     PUBLIC_RESPONSE_MARKER,
+    _OVERSIZED_PROMPT_DIRECTIVE,
     _normalize_gemini_usage,
     _parse_gemini_payload,
 )
@@ -447,6 +448,77 @@ def test_gemini_backend_prefers_response_file_over_message_text(tmp_path):
     assert result.message_text == "stdout message text"
     assert result.text == "response file text"
     assert result.session_id == "gemini-session-1"
+
+
+def test_gemini_backend_sends_oversized_decorated_prompt_on_stdin(tmp_path, monkeypatch):
+    import coding_review_agent_loop.agents.gemini as gemini_module
+
+    monkeypatch.setattr(gemini_module, "STDIN_PROMPT_THRESHOLD_BYTES", 100)
+    raw_prompt = "review Ω " * 30
+    runner = FakeRunner(
+        gemini_outputs=[json.dumps({"response": "stdout message"})],
+        public_response_outputs=["response file text"],
+    )
+    config = make_config(
+        tmp_path,
+        gemini_args=("--yolo", "--skip-trust", "--output-format", "json"),
+        gemini_model="gemini-test",
+    )
+
+    result = GEMINI_BACKEND.run(runner, config, raw_prompt, session_id="resume-1", run_id="run-1")
+
+    cmd = runner.commands[-1][0]
+    assert cmd[:2] == ["gemini", "--prompt"]
+    assert cmd[2] == _OVERSIZED_PROMPT_DIRECTIVE
+    assert all(raw_prompt not in arg for arg in cmd)
+    assert runner.last_input_text is not None and raw_prompt in runner.last_input_text
+    assert all(flag in cmd for flag in ("--yolo", "--skip-trust", "--output-format", "--model", "--resume"))
+    assert "gemini-test" in cmd and "resume-1" in cmd
+    assert result.text == "response file text"
+
+
+def test_gemini_backend_measures_fully_decorated_prompt_in_utf8_bytes(tmp_path, monkeypatch):
+    import coding_review_agent_loop.agents.gemini as gemini_module
+
+    raw_prompt = "é" * 20
+    config = make_config(tmp_path)
+    response_path = gemini_module.public_response_path(
+        config, "gemini", root=gemini_module._gemini_public_response_root(config.gemini_dir)
+    )
+    rendered = gemini_module._with_public_response_marker_instruction(
+        gemini_module.with_public_response_file_instruction(raw_prompt, response_path)
+    )
+    # The raw multibyte text makes the UTF-8 payload 20 bytes larger than its
+    # character count, so a character-based threshold check would take argv.
+    monkeypatch.setattr(gemini_module, "STDIN_PROMPT_THRESHOLD_BYTES", len(rendered))
+    runner = FakeRunner(gemini_outputs=["ok"])
+
+    GEMINI_BACKEND.run(runner, config, raw_prompt, run_id="run-1")
+
+    cmd = runner.commands[-1][0]
+    assert cmd[2] == _OVERSIZED_PROMPT_DIRECTIVE
+    assert runner.last_input_text is not None and raw_prompt in runner.last_input_text
+
+
+def test_gemini_backend_uses_prompt_argument_at_exact_threshold(tmp_path, monkeypatch):
+    import coding_review_agent_loop.agents.gemini as gemini_module
+
+    config = make_config(tmp_path)
+    runner = FakeRunner(gemini_outputs=["ok"])
+    # Determine the decorated byte size so equality exercises the small path.
+    response_path = gemini_module.public_response_path(
+        config, "gemini", root=gemini_module._gemini_public_response_root(config.gemini_dir)
+    )
+    rendered = gemini_module._with_public_response_marker_instruction(
+        gemini_module.with_public_response_file_instruction("short", response_path)
+    )
+    monkeypatch.setattr(gemini_module, "STDIN_PROMPT_THRESHOLD_BYTES", len(rendered.encode("utf-8")))
+
+    GEMINI_BACKEND.run(runner, config, "short", run_id="run-1")
+
+    assert runner.last_input_text is None
+    assert runner.commands[-1][0][2] != _OVERSIZED_PROMPT_DIRECTIVE
+    assert len(runner.commands[-1][0][2].encode("utf-8")) == len(rendered.encode("utf-8"))
 
 
 def test_codex_backend_prefers_response_file_over_last_message_and_stdout(tmp_path):

@@ -3,6 +3,7 @@ from agent_loop_helpers import *  # noqa: F403
 
 from coding_review_agent_loop.repair import (
     _REPAIR_PROMPT,
+    _OVERSIZED_REPAIR_PROMPT_DIRECTIVE,
     _build_repair_prompt,
     attempt_envelope_normalization,
     attempt_repair,
@@ -433,6 +434,24 @@ def test_attempt_repair_calls_cli_and_returns_text():
     assert "--prompt" in cmd
     prompt_idx = cmd.index("--prompt")
     assert "malformed review" in cmd[prompt_idx + 1]
+    assert call_args.kwargs["input"] is None
+
+
+def test_attempt_repair_sends_oversized_prompt_to_stdin(monkeypatch):
+    import coding_review_agent_loop.repair as repair_module
+
+    monkeypatch.setattr(repair_module, "STDIN_PROMPT_THRESHOLD_BYTES", 100)
+    proc = MagicMock(returncode=0, stdout="{}")
+    raw = "oversized malformed response " * 20
+
+    with patch("coding_review_agent_loop.repair.subprocess.run", return_value=proc) as run:
+        attempt_repair(raw, "gemini")
+
+    cmd = run.call_args.args[0]
+    assert cmd[cmd.index("--prompt") + 1] == _OVERSIZED_REPAIR_PROMPT_DIRECTIVE
+    assert all(raw not in arg for arg in cmd)
+    assert raw in run.call_args.kwargs["input"]
+    assert "--skip-trust" in cmd and "gemini-3.1-flash-lite" in cmd
 
 def test_attempt_repair_includes_expected_kind_instruction():
     repaired = (
@@ -872,6 +891,35 @@ def test_execute_repair_uses_configured_legacy_gemini_override(tmp_path):
     assert repaired == valid
     assert attempts[0].backend == "gemini"
     assert "gemini-enterprise-flash" in run.call_args.args[0]
+    assert run.call_args.kwargs["input"] is None
+
+
+def test_execute_repair_sends_oversized_gemini_prompt_to_stdin(tmp_path, monkeypatch):
+    import coding_review_agent_loop.repair as repair_module
+
+    monkeypatch.setattr(repair_module, "STDIN_PROMPT_THRESHOLD_BYTES", 100)
+    valid = structured_pr_review(state="approved", reviewer="Google Gemini")
+    proc = MagicMock(returncode=0, stdout=valid, stderr="")
+    config = make_config(tmp_path, repair_backend="gemini")
+    raw = "large malformed response " * 20
+
+    with patch("coding_review_agent_loop.repair.subprocess.run", return_value=proc) as run:
+        repaired, _, attempts = execute_repair(
+            raw,
+            runner=FakeRunner(),
+            config=config,
+            run_id="run-oversized",
+            usage_context=None,
+            validate=lambda text: parse_structured_pr_review(text, reviewer="Google Gemini"),
+            expected_kind="pr_review",
+        )
+
+    cmd = run.call_args.args[0]
+    assert repaired == valid and attempts[0].outcome == "succeeded"
+    assert cmd[cmd.index("--prompt") + 1] == _OVERSIZED_REPAIR_PROMPT_DIRECTIVE
+    assert all(raw not in arg for arg in cmd)
+    assert raw in run.call_args.kwargs["input"]
+    assert "--skip-trust" in cmd
 
 
 def test_antigravity_repair_validates_once_and_falls_back_to_catalog_chain(tmp_path, monkeypatch):
