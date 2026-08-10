@@ -480,11 +480,20 @@ def test_gemini_backend_sends_oversized_decorated_prompt_on_stdin(tmp_path, monk
 def test_gemini_backend_measures_fully_decorated_prompt_in_utf8_bytes(tmp_path, monkeypatch):
     import coding_review_agent_loop.agents.gemini as gemini_module
 
-    raw_prompt = "é" * 20  # 40 UTF-8 bytes, below the 50-byte threshold.
-    monkeypatch.setattr(gemini_module, "STDIN_PROMPT_THRESHOLD_BYTES", 50)
+    raw_prompt = "é" * 20
+    config = make_config(tmp_path)
+    response_path = gemini_module.public_response_path(
+        config, "gemini", root=gemini_module._gemini_public_response_root(config.gemini_dir)
+    )
+    rendered = gemini_module._with_public_response_marker_instruction(
+        gemini_module.with_public_response_file_instruction(raw_prompt, response_path)
+    )
+    # The raw multibyte text makes the UTF-8 payload 20 bytes larger than its
+    # character count, so a character-based threshold check would take argv.
+    monkeypatch.setattr(gemini_module, "STDIN_PROMPT_THRESHOLD_BYTES", len(rendered))
     runner = FakeRunner(gemini_outputs=["ok"])
 
-    GEMINI_BACKEND.run(runner, make_config(tmp_path), raw_prompt, run_id="run-1")
+    GEMINI_BACKEND.run(runner, config, raw_prompt, run_id="run-1")
 
     cmd = runner.commands[-1][0]
     assert cmd[2] == _OVERSIZED_PROMPT_DIRECTIVE

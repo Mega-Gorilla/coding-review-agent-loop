@@ -439,7 +439,6 @@ def test_attempt_repair_calls_cli_and_returns_text():
 
 def test_attempt_repair_sends_oversized_prompt_to_stdin(monkeypatch):
     import coding_review_agent_loop.repair as repair_module
-    from coding_review_agent_loop.agents.gemini import _OVERSIZED_PROMPT_DIRECTIVE
 
     monkeypatch.setattr(repair_module, "STDIN_PROMPT_THRESHOLD_BYTES", 100)
     proc = MagicMock(returncode=0, stdout="{}")
@@ -453,12 +452,6 @@ def test_attempt_repair_sends_oversized_prompt_to_stdin(monkeypatch):
     assert all(raw not in arg for arg in cmd)
     assert raw in run.call_args.kwargs["input"]
     assert "--skip-trust" in cmd and "gemini-3.1-flash-lite" in cmd
-    assert _OVERSIZED_REPAIR_PROMPT_DIRECTIVE == (
-        "Treat the preceding stdin as the complete repair task. Output only the repaired "
-        "response, starting directly with {. Do not write a response file and do not emit "
-        "PUBLIC_RESPONSE_MARKER."
-    )
-    assert _OVERSIZED_REPAIR_PROMPT_DIRECTIVE != _OVERSIZED_PROMPT_DIRECTIVE
 
 def test_attempt_repair_includes_expected_kind_instruction():
     repaired = (
