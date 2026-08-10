@@ -2160,7 +2160,10 @@ def _run_validated_agent(
     # re-parsing the message.
     terminal_public_response: str | None = None
     completion_recovery_attempted = False
-    updater_replay_used = False
+    # Keep the detection guard separate from the replay marker: a failed
+    # stability check must not make the next ordinary retry look like a replay.
+    updater_replay_considered = False
+    updater_replay_pending = False
     ordinary_retries_used = 0
     self_update_deadline: float | None = None
     self_update_stability_error: str | None = None
@@ -2173,9 +2176,12 @@ def _run_validated_agent(
             else config
         )
         invocation_kwargs: dict[str, object] = {}
+        is_self_update_replay = updater_replay_pending
         if agent == "claude":
             invocation_kwargs["attempt_suffix"] = (
-                "self-update-attempt2" if updater_replay_used else "attempt1"
+                "self-update-attempt2"
+                if is_self_update_replay
+                else f"attempt{ordinary_retries_used + 1}"
             )
         result = run_agent_result(
             runner,
@@ -2191,7 +2197,8 @@ def _run_validated_agent(
         )
         # The bounded deadline belongs only to the interrupted invocation and
         # its dedicated replay. A later ordinary retry has its normal budget.
-        if updater_replay_used:
+        if is_self_update_replay:
+            updater_replay_pending = False
             next_timeout_seconds = timeout_seconds
         last_result = result
         if result.log_path is not None:
@@ -2260,10 +2267,10 @@ def _run_validated_agent(
         if (
             agent == "claude"
             and result.self_update_reason is not None
-            and not updater_replay_used
+            and not updater_replay_considered
             and result.command_result is not None
         ):
-            updater_replay_used = True
+            updater_replay_considered = True
             observation = result.command_result.observation
             self_update_deadline = (
                 observation.spawn_monotonic + timeout_seconds
@@ -2288,6 +2295,7 @@ def _run_validated_agent(
                 # Preserve any ordinary transient retry allowance: a failed
                 # stability observation does not make provider errors final.
             else:
+                updater_replay_pending = True
                 if usage_record is not None:
                     usage_record.outcome = "self_update_interruption"
                     usage_record.log_path = str(result.log_path) if result.log_path else None
@@ -2866,6 +2874,7 @@ def _run_validated_agent(
 
     if self_update_stability_error is not None:
         last_error = f"{self_update_stability_error}; final failure: {last_error}"
+        last_failure_category = "self-update-interruption"
     diagnostics = _failed_run_diagnostics(
         runner=runner,
         config=config,

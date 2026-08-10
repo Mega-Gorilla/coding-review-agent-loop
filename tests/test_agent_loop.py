@@ -3455,12 +3455,16 @@ def test_claude_self_update_replay_recovers_valid_response_with_remaining_timeou
         def __init__(self):
             super().__init__(claude_outputs=[
                 ("Loading...\nInstalling Claude Code v2.1.226", 1),
+                ("overloaded_error", 1),
                 (structured_pr_review(state="approved", summary="Recovered.", reviewer="Anthropic Claude"), 0),
             ])
             self.timeouts = []
+            self.claude_log_paths = []
 
         def run_with_log(self, *args, timeout_seconds=None, **kwargs):
             self.timeouts.append(timeout_seconds)
+            if args[0][:1] == ["claude"]:
+                self.claude_log_paths.append(kwargs["log_path"])
             result = super().run_with_log(*args, timeout_seconds=timeout_seconds, **kwargs)
             if result.args[:1] == ["claude"]:
                 return CommandResult(
@@ -3474,7 +3478,7 @@ def test_claude_self_update_replay_recovers_valid_response_with_remaining_timeou
             return True
 
     runner = ObservedClaudeRunner()
-    config = make_config(tmp_path, reviewer="claude", agent_max_retries=0)
+    config = make_config(tmp_path, reviewer="claude", agent_max_retries=1)
     response = _run_validated_agent(
         runner,
         agent="claude",
@@ -3488,9 +3492,13 @@ def test_claude_self_update_replay_recovers_valid_response_with_remaining_timeou
     )
 
     assert response.marker_value.state == "approved"
-    assert len([cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]) == 2
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]) == 3
     assert runner.timeouts[0] == 12
     assert 0 < runner.timeouts[1] < 12
+    assert runner.timeouts[2] == 12
+    assert runner.claude_log_paths[0].name.endswith("-attempt1.log")
+    assert runner.claude_log_paths[1].name.endswith("-self-update-attempt2.log")
+    assert runner.claude_log_paths[2].name.endswith("-attempt2.log")
 
 
 def test_claude_self_update_stability_failure_preserves_ordinary_retry_budget(tmp_path):
@@ -3499,7 +3507,13 @@ def test_claude_self_update_stability_failure_preserves_ordinary_retry_budget(tm
     observation = ExecutionObservation(1, time.monotonic(), time.monotonic(), 1, identity, identity, False)
 
     class UnstableClaudeRunner(FakeRunner):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.claude_log_paths = []
+
         def run_with_log(self, *args, **kwargs):
+            if args[0][:1] == ["claude"]:
+                self.claude_log_paths.append(kwargs["log_path"])
             result = super().run_with_log(*args, **kwargs)
             if result.args[:1] == ["claude"]:
                 return CommandResult(
@@ -3528,6 +3542,49 @@ def test_claude_self_update_stability_failure_preserves_ordinary_retry_budget(tm
 
     assert response.marker_value.state == "approved"
     assert len([cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]) == 2
+    assert [path.name.rsplit("-", 1)[-1] for path in runner.claude_log_paths] == [
+        "attempt1.log",
+        "attempt2.log",
+    ]
+
+
+def test_claude_self_update_stability_failure_sets_final_category(tmp_path):
+    """An exhausted failed stability check remains explicitly diagnosable."""
+    identity = ExecutableIdentity("claude", "claude", (1, 1, 1), (1, 1, 1))
+    observation = ExecutionObservation(1, time.monotonic(), time.monotonic(), 1, identity, identity, False)
+
+    class UnstableClaudeRunner(FakeRunner):
+        def run_with_log(self, *args, **kwargs):
+            result = super().run_with_log(*args, **kwargs)
+            if result.args[:1] == ["claude"]:
+                return CommandResult(
+                    result.args, result.cwd, result.stdout, result.stderr, result.returncode, observation
+                )
+            return result
+
+        def wait_for_executable_stability(self, command, *, deadline=None):
+            return False
+
+    runner = UnstableClaudeRunner(claude_outputs=[
+        ("fatal: auto-update in progress\\noverloaded_error", 1),
+        ("ordinary failure", 1),
+    ])
+    config = make_config(tmp_path, reviewer="claude", agent_max_retries=1)
+
+    with pytest.raises(AgentInvocationError) as error:
+        _run_validated_agent(
+            runner,
+            agent="claude",
+            config=config,
+            prompt="Review the PR.",
+            marker_description="<!-- AGENT_STATE: approved|blocking -->",
+            validate=lambda text: _validate_review_response(
+                text, reviewer="Anthropic Claude", unresolved_items=()
+            ),
+        )
+
+    assert error.value.failure_category == "self-update-interruption"
+    assert "wait for the Claude Code self-update to finish" in str(error.value)
 
 
 # ---------------------------------------------------------------------------
