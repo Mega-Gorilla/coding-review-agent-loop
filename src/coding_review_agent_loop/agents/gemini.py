@@ -11,6 +11,7 @@ from .base import (
     AgentName,
     AgentResult,
     AgentTextSource,
+    STDIN_PROMPT_THRESHOLD_BYTES,
     public_response_path,
     read_public_response_file,
     with_public_response_file_instruction,
@@ -50,6 +51,15 @@ _GEMINI_RETIREMENT_SIGNATURES = (
     "unauthorized",
     "no longer",
     "retir",
+)
+
+# Gemini's documented headless mode is selected by --prompt.  For large tasks,
+# stdin carries the complete prompt and this short trailing prompt tells Gemini
+# how to treat that preceding input.
+_OVERSIZED_PROMPT_DIRECTIVE = (
+    "Treat the preceding stdin as the complete primary task and carry it out without "
+    "summarizing or replacing it. Follow its public-response-file destination and "
+    "PUBLIC_RESPONSE_MARKER instructions exactly."
 )
 
 
@@ -210,12 +220,14 @@ class GeminiBackend:
         log(config, f"Starting Gemini in {config.gemini_dir}; log: {log_path}; response: {response_path}")
         if date.today() >= GEMINI_CONSUMER_CUTOFF - timedelta(days=_GEMINI_CUTOFF_WARN_AHEAD_DAYS):
             log(config, f"Gemini CLI advisory: {_GEMINI_MIGRATION_GUIDANCE}")
+        rendered_prompt = _with_public_response_marker_instruction(
+            with_public_response_file_instruction(prompt, response_path)
+        )
+        oversized_prompt = len(rendered_prompt.encode("utf-8")) > STDIN_PROMPT_THRESHOLD_BYTES
         args = [
             config.gemini_cmd,
             "--prompt",
-            _with_public_response_marker_instruction(
-                with_public_response_file_instruction(prompt, response_path)
-            ),
+            _OVERSIZED_PROMPT_DIRECTIVE if oversized_prompt else rendered_prompt,
             *config.gemini_args,
         ]
         # Pin the model when declared (#332); conflict validation guarantees this is
@@ -233,6 +245,7 @@ class GeminiBackend:
             check=False,
             env={"AGENT_LOOP_WORKDIR": str(config.gemini_dir.resolve())},
             timeout_seconds=timeout_seconds,
+            input_text=rendered_prompt if oversized_prompt else None,
         )
         log(config, f"Gemini finished; log: {log_path}")
         retired_failure = result.returncode != 0 and _gemini_retirement_signal(result.stdout or "")

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Literal
 
 from .agents.antigravity import AntigravityBackend
+from .agents.base import STDIN_PROMPT_THRESHOLD_BYTES
 from .agents.gemini import _parse_gemini_payload
 from .logging import agent_log_path
 from .runner import strip_ansi
@@ -36,6 +37,12 @@ if TYPE_CHECKING:
     from .runner import Runner
 
 _SIGNATURE_LINE_RE = re.compile(r"(?m)^--\s+\S[^\n]*")
+
+_OVERSIZED_REPAIR_PROMPT_DIRECTIVE = (
+    "Treat the preceding stdin as the complete repair task. Output only the repaired "
+    "response, starting directly with {. Do not write a response file and do not emit "
+    "PUBLIC_RESPONSE_MARKER."
+)
 
 
 def strip_unknown_prior_item_dispositions(
@@ -1173,6 +1180,7 @@ def execute_repair(
                 diagnostic_source = result.raw_output
             else:
                 log_path = agent_log_path(config, "gemini-repair", run_id=run_id)
+                oversized_prompt = len(prompt.encode("utf-8")) > STDIN_PROMPT_THRESHOLD_BYTES
                 proc = subprocess.run(
                     [
                         config.gemini_cmd,
@@ -1180,11 +1188,12 @@ def execute_repair(
                         model,
                         "--skip-trust",
                         "--prompt",
-                        prompt,
+                        _OVERSIZED_REPAIR_PROMPT_DIRECTIVE if oversized_prompt else prompt,
                     ],
                     capture_output=True,
                     text=True,
                     timeout=config.repair_timeout_seconds,
+                    input=prompt if oversized_prompt else None,
                 )
                 returncode = proc.returncode
                 parsed, _, _, _, _ = _parse_gemini_payload(proc.stdout.strip())
@@ -1466,11 +1475,20 @@ def attempt_repair(
         same_round_context=same_round_context,
     )
     try:
+        oversized_prompt = len(prompt.encode("utf-8")) > STDIN_PROMPT_THRESHOLD_BYTES
         result = subprocess.run(
-            [gemini_cmd, "--model", _REPAIR_MODEL, "--skip-trust", "--prompt", prompt],
+            [
+                gemini_cmd,
+                "--model",
+                _REPAIR_MODEL,
+                "--skip-trust",
+                "--prompt",
+                _OVERSIZED_REPAIR_PROMPT_DIRECTIVE if oversized_prompt else prompt,
+            ],
             capture_output=True,
             text=True,
             timeout=120,
+            input=prompt if oversized_prompt else None,
         )
     except Exception as exc:
         _logger.debug("repair pass CLI invocation failed: %s", exc)
