@@ -1123,7 +1123,25 @@ phrase ends at a negation word or at the next execution verb. A negated
 execution phrase (`Did not run curl https://...`, `ran the suite against the
 local stub and never against https://...`) and unattached URL-like prose
 (deployment notes, session-cookie mentions) are accepted, and
-this narrower prose latitude does not extend to command syntax. If an explicit
+this narrower prose latitude does not extend to command syntax.
+
+The one exception, in command syntax as well as prose, is a URL whose host is
+a loopback address: `localhost`, an IPv4 address in `127.0.0.0/8`, or the IPv6
+loopback `::1` (for example `http://localhost:8765`, `http://127.0.0.1:8765`,
+`http://127.42.0.9:8765`, `http://[::1]:8765`). Coders commonly need to stand
+up a local server and drive an E2E client such as Playwright or Node against
+it inside the assigned checkout; a loopback target reported as a test command
+is accepted while every other host -- including non-loopback private/LAN
+addresses such as `0.0.0.0` or `192.168.x.x` -- is still rejected. This
+exemption is host-classification only, not a blanket exemption for the
+clause: a loopback target reported alongside a live remote target in the same
+command (`... && curl https://live.example`) still fails on the live target.
+Authority syntax that a browser or Node client could parse differently than
+the loop's own classifier -- for example a backslash inside the URL, which
+WHATWG URL parsers treat as a path separator and could resolve to a different
+host than a strict URL parse reports -- is never treated as loopback, even if
+it superficially contains `localhost` or a loopback IP; it is rejected as an
+unverifiable live target instead. If an explicit
 test location is outside the assigned checkout, or a live remote target is
 detected, the loop fails with an `AgentLoopError` naming the offending
 command/URL and assigned checkout. When that failure happens after a PR was
