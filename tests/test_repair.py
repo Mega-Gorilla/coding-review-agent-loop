@@ -1660,10 +1660,8 @@ def test_repair_prompt_coder_followup_examples_include_current_requirement_schem
     assert '"human_requirement_dispositions"' in format_c
     assert '"disposition": "blocked"' in format_c
     assert '"addressed_ids": []' in format_c
-    payload, _ = json.JSONDecoder().raw_decode(format_c.lstrip())
-    parsed = validate_structured_coder_followup(
-        json.dumps(payload) + "\n<!-- AGENT_STATE: blocking -->\n-- Coder Name"
-    )
+    format_c_example = format_c.split("This is a blocking example", 1)[0].strip()
+    parsed = validate_structured_coder_followup(format_c_example)
     assert parsed.state == "blocking"
     assert parsed.human_requirement_dispositions[0].disposition == "blocked"
     assert '"state": "approved"' in format_c
