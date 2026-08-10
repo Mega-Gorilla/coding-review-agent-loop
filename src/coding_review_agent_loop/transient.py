@@ -8,6 +8,7 @@ whether to retry an agent invocation without importing the full orchestrator.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 
 TRANSIENT_AGENT_OUTPUT_RE = re.compile(
     r"Invalid stream|empty response|malformed tool call|"
@@ -37,6 +38,53 @@ def is_transient_agent_output(text: str) -> bool:
     return bool(TRANSIENT_AGENT_OUTPUT_RE.search(text)) and not bool(
         NON_RETRYABLE_AGENT_OUTPUT_RE.search(text)
     )
+
+
+@dataclass(frozen=True)
+class AntigravityCapacityClassification:
+    """Provider-scoped capacity result used to decide model fallback."""
+
+    is_capacity: bool
+    diagnostic: str = ""
+
+
+_ANTIGRAVITY_ERROR_LINE_RE = re.compile(r"(?im)^\s*(?:error|fatal)\s*[:\[]")
+_ANTIGRAVITY_ERROR_JSON_RE = re.compile(
+    r'(?is)^\s*\{.{0,2000}?"(?:error|code|status|message)"\s*:',
+)
+
+
+def classify_antigravity_capacity(
+    text: str,
+    *,
+    returncode: int | None,
+    empty_response: bool,
+    signatures: tuple[str, ...],
+) -> AntigravityCapacityClassification:
+    """Recognize framed Antigravity provider-capacity diagnostics.
+
+    Capacity words in a normal review must not trigger fallback: this classifier
+    only considers a failed/empty invocation and an error-shaped standalone
+    diagnostic (or compact JSON error payload).  Authentication and billing
+    retain their non-retryable precedence.
+    """
+    if (returncode in (None, 0) and not empty_response) or not text.strip():
+        return AntigravityCapacityClassification(False)
+    if NON_RETRYABLE_AGENT_OUTPUT_RE.search(text):
+        return AntigravityCapacityClassification(False)
+    # A provider normally prints its failure at either end; retaining a bounded
+    # tail also avoids a quoted issue report in a long agent transcript.
+    stripped = text.strip()
+    diagnostic = stripped if len(stripped) <= 2400 else f"{stripped[:1200]}\n{stripped[-1200:]}"
+    framed = bool(
+        _ANTIGRAVITY_ERROR_LINE_RE.search(diagnostic)
+        or _ANTIGRAVITY_ERROR_JSON_RE.search(diagnostic)
+    )
+    if not framed:
+        return AntigravityCapacityClassification(False)
+    if any(signature.lower() in diagnostic.lower() for signature in signatures):
+        return AntigravityCapacityClassification(True, diagnostic)
+    return AntigravityCapacityClassification(False)
 
 
 # Phrases an agent uses when it has started required work (tests, builds) in

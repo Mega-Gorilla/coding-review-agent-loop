@@ -89,6 +89,10 @@ the two model options are mutually exclusive. Customize fallback detection with
 call passes `--print-timeout` from `--antigravity-print-timeout-seconds`
 (default `600`, i.e. ten minutes, matching the `agent-loop` CLI), overriding
 `agy`'s own five-minute print-mode default so long turns are not cut short.
+Provider-framed capacity failures retry the active model before fallback; the
+`--max-retries` allowance is shared across the chain, capping calls at
+`models + retries`. Custom quota signatures control eligibility, while settings,
+model, timeout, and schema failures remain deterministic.
 These options are available on every skill command that can invoke an
 external agent.
 

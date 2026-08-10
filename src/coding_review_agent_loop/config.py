@@ -25,9 +25,15 @@ from .workdirs import active_workdir, agent_workdir
 DEFAULT_ANTIGRAVITY_QUOTA_SIGNATURES: tuple[str, ...] = (
     "quota",
     "rate limit",
+    "too many requests",
     "resource exhausted",
     "RESOURCE_EXHAUSTED",
     "429",
+    "high traffic",
+    "try again in a minute",
+    "overload",
+    "no capacity",
+    "temporarily at capacity",
 )
 
 # Default Antigravity model fallback chain, applied in __post_init__ when neither a

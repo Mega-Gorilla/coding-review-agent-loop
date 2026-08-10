@@ -23,7 +23,7 @@ emits no token usage (usage falls back to the estimated path).
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 import tempfile
 from typing import TYPE_CHECKING
@@ -44,6 +44,34 @@ from ..runner import Runner, strip_ansi
 
 if TYPE_CHECKING:
     from ..config import AgentLoopConfig
+
+
+@dataclass
+class AntigravityAttemptState:
+    """Shared retry-before-fallback policy for normal Antigravity invocations."""
+
+    models: tuple[str, ...]
+    retries_remaining: int
+    model_index: int = 0
+    attempts: int = 0
+
+    @classmethod
+    def from_config(cls, config: "AgentLoopConfig", retries: int) -> "AntigravityAttemptState":
+        return cls(config.antigravity_models, retries)
+
+    def singleton_config(self, config: "AgentLoopConfig") -> "AgentLoopConfig":
+        return replace(config, antigravity_model=None, antigravity_models=(self.models[self.model_index],))
+
+    def next_after_failure(self, *, retryable: bool, provider_capacity: bool) -> str:
+        """Return retry, fallback, or stop; retries are chain-wide."""
+        self.attempts += 1
+        if retryable and self.retries_remaining:
+            self.retries_remaining -= 1
+            return "retry"
+        if provider_capacity and self.model_index + 1 < len(self.models):
+            self.model_index += 1
+            return "fallback"
+        return "stop"
 
 
 def _git_lock_path(workdir: Path) -> Path:
@@ -206,8 +234,11 @@ class AntigravityBackend:
         log_path_override: Path | None = None,
     ) -> AgentResult:
         import json, fcntl  # Unix-only (fcntl); imported here so the module loads on Windows
-        for i, model in enumerate(config.antigravity_models):
+        # Model traversal belongs to AntigravityAttemptState, owned by the
+        # caller.  This backend deliberately executes exactly one model.
+        for model in config.antigravity_models[:1]:
             response_path = public_response_path(config, "antigravity")
+            response_path.unlink(missing_ok=True)
             prompt_text = _with_public_response_marker_instruction(
                 with_public_response_file_instruction(prompt, response_path)
             )
@@ -398,13 +429,6 @@ class AntigravityBackend:
                 fcntl.flock(settings_lock, fcntl.LOCK_UN)
                 settings_lock.close()
             log(config, f"Antigravity ({model}) finished; log: {log_path}")
-
-            if result.returncode != 0:
-                stdout_lower = result.stdout.lower()
-                if any(sig.lower() in stdout_lower for sig in config.antigravity_quota_signatures):
-                    if i + 1 < len(config.antigravity_models):
-                        log(config, f"Antigravity ({model}) hit quota exhaustion, falling back to next model.")
-                        continue
 
             # Prefer the public response file the prompt asks the agent to write; else
             # keep only what follows the public-response marker in stdout; else stdout.

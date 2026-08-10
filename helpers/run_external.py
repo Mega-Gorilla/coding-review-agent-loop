@@ -260,7 +260,7 @@ def main() -> None:
     workdir = Path(args.workdir)
 
     # Import backends lazily to avoid heavy import in dry-run path
-    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+    from coding_review_agent_loop.agents.antigravity import AntigravityAttemptState, AntigravityBackend
     from coding_review_agent_loop.agents.codex import CodexBackend
     from coding_review_agent_loop.agents.gemini import GeminiBackend
     from coding_review_agent_loop.config import (
@@ -272,7 +272,7 @@ def main() -> None:
         sync_checkout_to_pr,
     )
     from coding_review_agent_loop.github import PullRequestMetadata
-    from coding_review_agent_loop.transient import is_transient_agent_output
+    from coding_review_agent_loop.transient import classify_antigravity_capacity, is_transient_agent_output
     from coding_review_agent_loop.usage import estimate_usage
 
     agent_name: AgentName = args.agent
@@ -374,17 +374,33 @@ def main() -> None:
     else:
         backend = GeminiBackend()
 
-    # Retry transient agent failures (429 / overloaded / timeout / capacity).
+    # Retry transient agent failures. Antigravity shares its retry allowance
+    # across the ordered model chain and only capacity diagnostics may advance it.
     # The primary failure path is a *returned* AgentResult with a non-zero
     # returncode whose raw_output (merged stdout+stderr) carries the signal;
     # a raised exception is the secondary path (its message embeds the captured
     # output tail for AgentLoopError from run_with_log).
-    max_attempts = args.max_retries + 1
+    antigravity_attempts = (
+        AntigravityAttemptState.from_config(config, args.max_retries)
+        if agent_name == "antigravity"
+        else None
+    )
+    max_attempts = (
+        len(config.antigravity_models) + args.max_retries
+        if antigravity_attempts is not None
+        else args.max_retries + 1
+    )
     backoff = args.retry_backoff_seconds
     result = None
     for attempt in range(1, max_attempts + 1):
+        candidate = None
         try:
-            candidate = backend.run(runner, config, prompt)
+            candidate = backend.run(
+                runner,
+                antigravity_attempts.singleton_config(config)
+                if antigravity_attempts is not None else config,
+                prompt,
+            )
         except Exception as exc:  # noqa: BLE001
             failure_text = str(exc)
         else:
@@ -395,7 +411,20 @@ def main() -> None:
                 break
 
         transient = is_transient_agent_output(failure_text or "")
-        if attempt < max_attempts and transient:
+        capacity = classify_antigravity_capacity(
+            failure_text or "",
+            returncode=(candidate.returncode if candidate is not None else 1),
+            empty_response=bool(candidate is not None and candidate.returncode == 0 and not candidate.text.strip()),
+            signatures=config.antigravity_quota_signatures,
+        ) if agent_name == "antigravity" else None
+        if capacity is not None and capacity.is_capacity:
+            transient = True
+        transition = (
+            antigravity_attempts.next_after_failure(
+                retryable=transient, provider_capacity=bool(capacity and capacity.is_capacity)
+            ) if antigravity_attempts is not None else ("retry" if transient and attempt < max_attempts else "stop")
+        )
+        if transition == "retry":
             delay = backoff[min(attempt - 1, len(backoff) - 1)] if backoff else 1
             print(
                 f"run_external: transient failure (attempt {attempt}/{max_attempts}), "
@@ -403,6 +432,9 @@ def main() -> None:
                 file=sys.stderr,
             )
             time.sleep(delay)
+            continue
+        if transition == "fallback":
+            print("run_external: provider capacity; trying next Antigravity model", file=sys.stderr)
             continue
         reason = "retries exhausted" if transient else "non-transient failure"
         print(

@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace as dataclasses_replace
 from pathlib import Path
 
 from .agents.base import AgentName, AgentResult
+from .agents.antigravity import AntigravityAttemptState
 from .agents.registry import agent_display_name, agent_signature, get_backend, run_agent_result
 from .config import (
     AgentLoopConfig,
@@ -196,6 +197,7 @@ from .salvage import (
 from .transient import (
     NON_RETRYABLE_AGENT_OUTPUT_RE,
     TRANSIENT_AGENT_OUTPUT_RE,
+    classify_antigravity_capacity,
     is_transient_agent_output,
     looks_like_backgrounded_completion,
 )
@@ -2076,7 +2078,17 @@ def _run_validated_agent(
         marker_description=marker_description,
     )
     log_paths: list[object] = []
-    max_attempts = config.agent_max_retries + 1
+    antigravity_attempts = (
+        AntigravityAttemptState.from_config(config, config.agent_max_retries)
+        if agent == "antigravity" and not use_repair
+        else None
+    )
+    # Each fallback retains an initial attempt; retry allowance is shared.
+    max_attempts = (
+        len(config.antigravity_models) + config.agent_max_retries
+        if antigravity_attempts is not None
+        else config.agent_max_retries + 1
+    )
     last_error = f"{agent_name} produced no output."
     last_result: AgentResult | None = None
     last_classification_text = ""
@@ -2090,10 +2102,15 @@ def _run_validated_agent(
     completion_recovery_attempted = False
 
     for attempt in range(1, max_attempts + 1):
+        attempt_config = (
+            antigravity_attempts.singleton_config(config)
+            if antigravity_attempts is not None
+            else config
+        )
         result = run_agent_result(
             runner,
             agent=agent,
-            config=config,
+            config=attempt_config,
             prompt=prompt,
             session_id=session_id,
             run_id=usage_context.run_id if usage_context is not None else None,
@@ -2117,6 +2134,7 @@ def _run_validated_agent(
             )
 
         should_retry = False
+        provider_capacity = False
         if result.returncode is None:
             # Timed out (returncode=None from Runner.run_with_log). Detected
             # before transient classification: a kill deadline is not a
@@ -2133,12 +2151,32 @@ def _run_validated_agent(
             last_classification_text = classification_text
             should_retry = _is_transient_agent_output(classification_text)
             last_failure_category = _failure_category(classification_text)
+            capacity = classify_antigravity_capacity(
+                classification_text,
+                returncode=result.returncode,
+                empty_response=False,
+                signatures=config.antigravity_quota_signatures,
+            ) if agent == "antigravity" else None
+            provider_capacity = bool(capacity and capacity.is_capacity)
+            if provider_capacity:
+                should_retry = True
+                last_failure_category = "transient"
         elif not text.strip():
             last_error = "agent response was empty"
             classification_text = _agent_failure_classification_text(result, phase="empty")
             last_classification_text = classification_text
             should_retry = _is_transient_agent_output(classification_text)
             last_failure_category = _failure_category(classification_text)
+            capacity = classify_antigravity_capacity(
+                classification_text,
+                returncode=result.returncode,
+                empty_response=True,
+                signatures=config.antigravity_quota_signatures,
+            ) if agent == "antigravity" else None
+            provider_capacity = bool(capacity and capacity.is_capacity)
+            if provider_capacity:
+                should_retry = True
+                last_failure_category = "transient"
         else:
             response_file_pre_status = (
                 _response_file_structured_status(result.response_file_text)
@@ -2626,7 +2664,14 @@ def _run_validated_agent(
                     )
                     message += diagnostics.format_for_error()
                     raise QuotaResetExceededError(message)
-            if attempt < max_attempts:
+            transition = (
+                antigravity_attempts.next_after_failure(
+                    retryable=should_retry, provider_capacity=provider_capacity
+                )
+                if antigravity_attempts is not None
+                else ("retry" if attempt < max_attempts else "stop")
+            )
+            if transition == "retry":
                 delay = _retry_delay(config, attempt)
                 category = last_failure_category
                 log(
@@ -2635,6 +2680,14 @@ def _run_validated_agent(
                     f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})",
                 )
                 runner.run(("sleep", str(delay)), cwd=active_workdir(config))
+                continue
+            if transition == "fallback":
+                log(
+                    config,
+                    f"{agent_name}: provider capacity exhausted for "
+                    f"{result.model_used}; trying {antigravity_attempts.models[antigravity_attempts.model_index]} "
+                    "without additional delay",
+                )
                 continue
         break
 
