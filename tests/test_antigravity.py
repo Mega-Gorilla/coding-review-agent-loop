@@ -85,31 +85,22 @@ def test_antigravity_backend_places_large_prompt_in_injected_gemini_md(tmp_path)
     assert captured and prompt in captured[0]
     assert not (agy_dir / "GEMINI.md").exists()
 
-def test_antigravity_backend_fallback_chain_on_quota_signal(tmp_path):
-    from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+def test_antigravity_attempt_state_retries_then_falls_back(tmp_path):
+    from coding_review_agent_loop.agents.antigravity import AntigravityAttemptState
     agy_dir = tmp_path / "antigravity"
     agy_dir.mkdir(parents=True, exist_ok=True)
-    runner = FakeRunner(
-        antigravity_outputs=[
-            ("quota exceeded please try again", 1),
-            ("quota exceeded again", 1),
-            ("ok fallback answered", 0)
-        ]
-    )
     config = make_config(
         tmp_path,
         antigravity_dir=agy_dir,
         antigravity_models=("ModelA", "ModelB", "ModelC"),
         antigravity_quota_signatures=("quota",)
     )
-    result = AntigravityBackend().run(runner, config, "Review", run_id="r1")
-    
-    assert runner.commands[-3][0][runner.commands[-3][0].index("--model") + 1] == "ModelA"
-    assert runner.commands[-2][0][runner.commands[-2][0].index("--model") + 1] == "ModelB"
-    assert runner.commands[-1][0][runner.commands[-1][0].index("--model") + 1] == "ModelC"
-    
-    assert result.text == "ok fallback answered"
-    assert result.model_used == "ModelC"
+    state = AntigravityAttemptState.from_config(config, retries=2)
+    models = []
+    for expected in ("retry", "retry", "fallback", "fallback", "stop"):
+        models.append(state.singleton_config(config).antigravity_models)
+        assert state.next_after_failure(retryable=True, provider_capacity=True) == expected
+    assert models == [("ModelA",), ("ModelA",), ("ModelA",), ("ModelB",), ("ModelC",)]
 
 def test_antigravity_backend_stops_on_other_errors(tmp_path):
     from coding_review_agent_loop.agents.antigravity import AntigravityBackend
@@ -133,30 +124,26 @@ def test_antigravity_backend_stops_on_other_errors(tmp_path):
     assert result.returncode == 1
     assert result.model_used == "ModelA"
 
-def test_antigravity_backend_ignores_partial_response_file_on_fallback(tmp_path):
+def test_antigravity_backend_ignores_stale_partial_response_file(tmp_path):
     from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+    from coding_review_agent_loop.agents.base import public_response_path
     agy_dir = tmp_path / "antigravity"
     agy_dir.mkdir(parents=True, exist_ok=True)
-    runner = FakeRunner(
-        antigravity_outputs=[
-            ("quota error", 1),
-            ("success", 0)
-        ],
-        public_response_outputs=[
-            "partial failed response",
-            "successful response"
-        ]
-    )
+    runner = FakeRunner(antigravity_outputs=[("success", 0)], public_response_outputs=["successful response"])
     config = make_config(
         tmp_path,
         antigravity_dir=agy_dir,
-        antigravity_models=("ModelA", "ModelB"),
+        antigravity_models=("ModelA",),
         antigravity_quota_signatures=("quota",)
     )
+    stale_path = public_response_path(config, "antigravity")
+    stale_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_path.write_text("stale partial response", encoding="utf-8")
     result = AntigravityBackend().run(runner, config, "Review", run_id="r1")
     
     assert result.text == "successful response"
-    assert result.model_used == "ModelB"
+    assert result.model_used == "ModelA"
+    assert result.text != "stale partial response"
 
 def test_antigravity_backend_writes_gemini_md_single_shot_instruction(tmp_path):
     from coding_review_agent_loop.agents.antigravity import AntigravityBackend
@@ -447,7 +434,11 @@ def test_config_from_args_antigravity_defaults(tmp_path):
         "Gemini 3.1 Pro (High)",
     )
     assert config.antigravity_print_timeout_seconds == 600
-    assert config.antigravity_quota_signatures == ("quota", "rate limit", "resource exhausted", "RESOURCE_EXHAUSTED", "429")
+    assert config.antigravity_quota_signatures == (
+        "quota", "rate limit", "too many requests", "resource exhausted",
+        "RESOURCE_EXHAUSTED", "429", "high traffic", "try again in a minute",
+        "overload", "no capacity", "temporarily at capacity",
+    )
     assert config.antigravity_args == ("--dangerously-skip-permissions",)
     assert config.antigravity_dir == default_agent_workdir("OWNER/REPO", "antigravity").resolve()
     # antigravity is the coder -> primary/log dir lives under its checkout.

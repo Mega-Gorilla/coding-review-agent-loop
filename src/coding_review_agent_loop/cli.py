@@ -209,13 +209,13 @@ def build_parser() -> argparse.ArgumentParser:
             "--antigravity-models",
             nargs="+",
             default=None,
-            help="Ordered chain of Antigravity models to try on quota exhaustion. Mutually exclusive with --antigravity-model.",
+            help="Ordered Antigravity fallback chain after provider capacity retries. Mutually exclusive with --antigravity-model.",
         )
         subparser.add_argument(
             "--antigravity-quota-signatures",
             nargs="+",
             default=list(DEFAULT_ANTIGRAVITY_QUOTA_SIGNATURES),
-            help="Output substrings that trigger model fallback (default: quota, rate limit, etc).",
+            help="Provider error substrings that permit Antigravity fallback (default: quota, high traffic, etc).",
         )
         subparser.add_argument(
             "--codex-model",
@@ -389,7 +389,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--agent-max-retries",
             type=int,
             default=2,
-            help="Maximum retries for narrow transient agent/model failures (default: 2).",
+            help="Maximum transient retries; shared across the Antigravity fallback chain (default: 2).",
         )
         subparser.add_argument(
             "--agent-retry-backoff-seconds",

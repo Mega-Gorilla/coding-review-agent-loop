@@ -30,6 +30,44 @@ def test_non_retryable_overrides_transient_signal() -> None:
     assert not transient.is_transient_agent_output("got 429 but the api key is unauthorized")
 
 
+def test_antigravity_capacity_requires_framed_provider_failure() -> None:
+    signatures = ("high traffic", "try again in a minute", "429", "overload", "no capacity")
+    for text in (
+        "Error: Our servers are experiencing high traffic right now, please try again in a minute.",
+        "Fatal: 429 Too Many Requests; temporarily at capacity",
+        '{"error": {"code": "RESOURCE_EXHAUSTED", "message": "overload: no capacity"}}',
+    ):
+        assert transient.classify_antigravity_capacity(
+            text, returncode=1, empty_response=False, signatures=signatures
+        ).is_capacity
+    assert transient.classify_antigravity_capacity(
+        "Reading the diff to draft the review...\n"
+        "Error: Our servers are experiencing high traffic right now, please try again in a minute.",
+        returncode=1,
+        empty_response=False,
+        signatures=signatures,
+    ).is_capacity
+    assert not transient.classify_antigravity_capacity(
+        "The review quotes: Error: Our servers are experiencing high traffic right now, please try again in a minute.",
+        returncode=1,
+        empty_response=False,
+        signatures=signatures,
+    ).is_capacity
+    assert not transient.classify_antigravity_capacity(
+        "The review quotes the provider failure below:\n"
+        "> Error: Our servers are experiencing high traffic right now, please try again in a minute.",
+        returncode=1,
+        empty_response=False,
+        signatures=signatures,
+    ).is_capacity
+    assert not transient.classify_antigravity_capacity(
+        "Error: high traffic but invalid API key", returncode=1, empty_response=False, signatures=signatures
+    ).is_capacity
+    assert transient.classify_antigravity_capacity(
+        "quota exceeded please try again", returncode=1, empty_response=False, signatures=("quota",)
+    ).is_capacity
+
+
 def test_orchestrator_alias_preserves_identity() -> None:
     # orchestrator keeps the old private name as an alias to the moved implementation.
     assert orchestrator._is_transient_agent_output is transient.is_transient_agent_output

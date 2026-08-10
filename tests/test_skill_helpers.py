@@ -1287,6 +1287,7 @@ class TestRunExternalRetries:
             def run(self, runner, config, prompt):
                 i = calls["n"]
                 calls["n"] += 1
+                calls.setdefault("models", []).append(config.antigravity_models)
                 outcome = outcomes[min(i, len(outcomes) - 1)]
                 if isinstance(outcome, Exception):
                     raise outcome
@@ -1294,6 +1295,7 @@ class TestRunExternalRetries:
 
         monkeypatch.setattr("coding_review_agent_loop.agents.codex.CodexBackend", FakeBackend)
         monkeypatch.setattr("coding_review_agent_loop.agents.gemini.GeminiBackend", FakeBackend)
+        monkeypatch.setattr("coding_review_agent_loop.agents.antigravity.AntigravityBackend", FakeBackend)
         sleeps: list[int] = []
         monkeypatch.setattr(rex.time, "sleep", lambda s: sleeps.append(s))
 
@@ -1372,6 +1374,28 @@ class TestRunExternalRetries:
         )
         assert exit_code == 1
         assert "Invalid stream" in Path(output_path).read_text(encoding="utf-8")
+
+    def test_antigravity_capacity_retries_then_uses_next_model(self, monkeypatch) -> None:
+        from coding_review_agent_loop.agents.base import AgentResult
+
+        outcomes = [
+            AgentResult(text="", raw_output="Error: high traffic, try again in a minute", returncode=1),
+            AgentResult(text="", raw_output="quota exceeded please try again", returncode=1),
+            AgentResult(text="final review body", returncode=0),
+        ]
+        calls, sleeps, output_path, exit_code = self._invoke(
+            monkeypatch, "antigravity", outcomes, max_retries=1
+        )
+
+        assert exit_code == 0
+        assert calls["n"] == 3
+        assert calls["models"] == [
+            ("Gemini 3.6 Flash (High)",),
+            ("Gemini 3.6 Flash (High)",),
+            ("Gemini 3.5 Flash (High)",),
+        ]
+        assert sleeps == [1]
+        assert Path(output_path).read_text(encoding="utf-8") == "final review body"
 
     def test_writes_minimal_response_evidence_sidecar(self, monkeypatch, tmp_path) -> None:
         import helpers.run_external as rex
@@ -3915,13 +3939,13 @@ class TestAntigravitySkill:
             (
                 (),
                 ("Gemini 3.6 Flash (High)", "Gemini 3.5 Flash (High)", "Gemini 3.1 Pro (High)"),
-                ("quota", "rate limit", "resource exhausted", "RESOURCE_EXHAUSTED", "429"),
+                ("quota", "rate limit", "too many requests", "resource exhausted", "RESOURCE_EXHAUSTED", "429", "high traffic", "try again in a minute", "overload", "no capacity", "temporarily at capacity"),
             ),
-            (("--model", "Model X"), ("Model X",), ("quota", "rate limit", "resource exhausted", "RESOURCE_EXHAUSTED", "429")),
+            (("--model", "Model X"), ("Model X",), ("quota", "rate limit", "too many requests", "resource exhausted", "RESOURCE_EXHAUSTED", "429", "high traffic", "try again in a minute", "overload", "no capacity", "temporarily at capacity")),
             (
                 ("--antigravity-models", "Model A", "Model B"),
                 ("Model A", "Model B"),
-                ("quota", "rate limit", "resource exhausted", "RESOURCE_EXHAUSTED", "429"),
+                ("quota", "rate limit", "too many requests", "resource exhausted", "RESOURCE_EXHAUSTED", "429", "high traffic", "try again in a minute", "overload", "no capacity", "temporarily at capacity"),
             ),
             (
                 ("--antigravity-quota-signatures", "Quota Hit", "429"),
@@ -3969,7 +3993,9 @@ class TestAntigravitySkill:
 
         config = captured["config"]
         assert config.reviewer == ("antigravity",)
-        assert config.antigravity_models == expected_models
+        # run_external gives the backend one model at a time; its retry loop
+        # owns traversal of the complete configured chain.
+        assert config.antigravity_models == (expected_models[0],)
         assert config.antigravity_quota_signatures == expected_signatures
 
     @pytest.mark.parametrize(

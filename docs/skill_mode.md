@@ -101,6 +101,12 @@ implementation, decomposition, phased implementation, and PR-fix commands.
 Antigravity turns are single-shot (no cross-round session resume) and report
 estimated token usage.
 
+Provider high-traffic and capacity failures retry the active model before
+the ordered fallback chain advances. `--max-retries` is shared across the chain,
+which caps a run at `models + retries` calls; custom quota signatures decide which
+diagnostics qualify. Invalid settings, unsupported models, timeouts, and malformed
+responses do not retry or fall back.
+
 ## Approved-plan execution helpers
 
 Skill mode also exposes the external-coder execution helpers used after a plan

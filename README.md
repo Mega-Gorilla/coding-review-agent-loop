@@ -119,11 +119,18 @@ agent-loop task "Fix the flaky test" --repo OWNER/REPO --coder antigravity --rev
 
 Pick the model with `--antigravity-model "<name>"` (as listed by `agy models`),
 or supply an ordered fallback chain with `--antigravity-models "<name>" ["<name>" ...]`
-(tried in order on quota exhaustion; default `Gemini 3.6 Flash (High)` →
+(tried in order after provider-framed capacity exhaustion; default `Gemini 3.6 Flash (High)` →
 `Gemini 3.5 Flash (High)` → `Gemini 3.1 Pro (High)`). When a `gemini` invocation fails with an
 auth/quota error near or after the cutoff, the tool surfaces this migration
 guidance. Notes: Antigravity turns are single-shot (no cross-round session
 resume) and report estimated token usage (`agy` emits no token counts).
+
+Provider capacity diagnostics for high-traffic, rate-limit, resource-exhausted, overload, and
+no-capacity errors retry the active model before advancing through this chain.
+`--agent-max-retries` is shared across the chain, so a run makes at most
+`models + retries` calls. Custom `--antigravity-quota-signatures` replace the
+defaults and control fallback eligibility. Invalid settings, unsupported models,
+timeouts, and schema-invalid responses remain deterministic and do not fall back.
 
 Each `agy --print` invocation is run with `--print-timeout` set from
 `--antigravity-print-timeout-seconds` (default 600, i.e. ten minutes), which
