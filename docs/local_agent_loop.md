@@ -1544,9 +1544,13 @@ treats signed requirements as resolved; otherwise the synthetic item is carried
 into the next round even if the visible review says approved.
 
 The loop validates required markers before posting agent output to GitHub. If
-an agent exits or returns only diagnostics, empty output, or normal prose
-without the required marker, the loop fails locally with `AgentLoopError` and
-the attempt log path instead of posting that raw output as a review.
+an agent exits unsuccessfully or returns only diagnostics, it first checks the
+uniquely assigned public response file for that invocation. A non-empty
+artifact that passes the normal schema and role validation is accepted and
+posted even after a timeout or nonzero exit. Stdout remains diagnostics only
+and is never salvaged as a public response. Empty, stale, malformed, and
+wrong-role artifacts continue through the normal retry/failure path; accepted
+failed exits record their outcome and return code in resume metadata.
 
 Coder prompts for a direct issue implementation explicitly forbid launching
 required tests or other completion work (builds, commits, pushes, PR creation)
@@ -1562,12 +1566,14 @@ terminal marker. Its result is validated exactly like a normal implementation
 response: a valid PR, a no-PR `AGENT_STATE: blocking`, or `AGENT_CLARIFY` is
 accepted and posted like any other outcome. If the resume turn instead
 declares `AGENT_UNAVAILABLE` itself, or if the resume command fails or still
-does not produce a valid terminal response, the loop renders (or reuses the
-agent's own verbatim) protocol-valid `AGENT_UNAVAILABLE` text, persists it to
-that attempt's own response file, and posts it to the GitHub issue before
-failing locally with `AgentLoopError` and the usual salvage artifacts — there
-is never more than one resume attempt, regardless of what the agent's own
-response says about retrying. A genuine, non-recovery no-PR
+does not produce a valid terminal response, the loop first applies the same
+per-invocation response-file rule. A valid artifact is accepted with the
+failed-exit diagnostic preserved in resume metadata; otherwise the loop renders
+(or reuses the agent's own verbatim) protocol-valid `AGENT_UNAVAILABLE` text,
+persists it to that attempt's own response file, and posts it to the GitHub
+issue before failing locally with `AgentLoopError` and the usual salvage
+artifacts — there is never more than one resume attempt, regardless of what
+the agent's own response says about retrying. A genuine, non-recovery no-PR
 `AGENT_STATE: blocking` or `AGENT_CLARIFY` result is likewise posted to the
 issue, matching how a successful PR-creating implementation is already posted.
 

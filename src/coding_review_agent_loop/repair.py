@@ -1002,7 +1002,7 @@ _REPAIR_MODEL = "gemini-3.1-flash-lite"
 _SUPPORTED_EXPECTED_KINDS = {"plan_state", "pr_review", "plan_review", "coder_followup", "plan_revision", "discuss_review", "discuss_answer", "discuss_agenda", "discuss_semantic_comparison", "discuss_answer_confirmation"}
 RepairOutcome = Literal[
     "succeeded", "nonzero_exit", "empty_output", "timeout", "spawn_error", "invalid_output",
-    "unavailable_model",
+    "unavailable_model", "accepted_nonzero_exit", "accepted_timeout",
 ]
 
 
@@ -1257,19 +1257,39 @@ def execute_repair(
                 log_path=str(log_path) if log_path is not None else None,
                 fallback_planned=fallback_planned,
             )
-        if outcome == "succeeded":
+        # Antigravity's isolated repair result already prioritizes the
+        # invocation's response-file artifact.  A valid artifact is useful
+        # even if its CLI timed out or exited nonzero.
+        if output and (
+            outcome == "succeeded"
+            or (
+                config.repair_backend == "antigravity"
+                and outcome in {"nonzero_exit", "timeout"}
+                and result.text_source == "response_file"
+            )
+        ):
             try:
                 validation_result = validate(output)
             except Exception as exc:
-                attempt.outcome = "invalid_output"
-                attempt.diagnostic = _sanitize_diagnostic(str(exc), config=config)
+                if outcome == "succeeded":
+                    attempt.outcome = "invalid_output"
+                validation_diagnostic = _sanitize_diagnostic(str(exc), config=config)
+                attempt.diagnostic = "\n".join(
+                    part for part in (attempt.diagnostic, validation_diagnostic) if part
+                )
                 if usage_record is not None:
-                    usage_record.outcome = "invalid_output"
+                    usage_record.outcome = attempt.outcome
             else:
+                if outcome != "succeeded":
+                    attempt.outcome = (
+                        "accepted_timeout" if outcome == "timeout"
+                        else "accepted_nonzero_exit"
+                    )
                 attempt.validation_result = validation_result
                 attempt.fallback_planned = False
                 if usage_record is not None:
                     usage_record.validation_status = "validated"
+                    usage_record.outcome = attempt.outcome
                     usage_record.fallback_planned = False
                 attempts.append(attempt)
                 return output, validation_result, attempts

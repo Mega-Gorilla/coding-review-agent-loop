@@ -644,6 +644,30 @@ def test_issue_loop_structured_plan_state_public_comment_renders_markdown_and_pr
     assert metadata.canonical_plan == raw_structured_plan
     assert metadata.raw_structured_coder_response == raw_structured_plan
 
+
+def test_plan_review_accepts_valid_response_file_after_nonzero_exit(tmp_path):
+    artifact = structured_plan_review(
+        state="approved", summary="The plan is sound.", reviewer="Anthropic Claude"
+    )
+    runner = FakeRunner(
+        codex_outputs=[structured_plan_state(summary="Plan the issue fix.")],
+        claude_outputs=[("Error: timeout waiting for response", 1)],
+        public_response_outputs=["", artifact],
+    )
+    config = make_config(tmp_path, coder="codex", reviewer="claude", agent_max_retries=0)
+
+    assert run_issue_loop(runner, issue_number=56, config=config, plan_first=True) == 0
+
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]) == 1
+    metadata = next(
+        _decode_round_metadata(match.group("payload"))
+        for comment in runner.issue_comments
+        if (match := re.search(r"<!--\s*AGENT_LOOP_META:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->", comment["body"]))
+        and _decode_round_metadata(match.group("payload")).role == "reviewer"
+    )
+    assert metadata.acquisition_outcome == "accepted_nonzero_exit"
+    assert metadata.acquisition_returncode == 1
+
 def test_issue_loop_plan_first_rejects_marker_only_plan_before_posting_or_reviewer_dispatch(tmp_path):
     markdown_plan = "Initial markdown plan.\n<!-- AGENT_PLAN_STATE: approved -->\n-- Anthropic Claude"
     runner = FakeRunner(
@@ -3032,7 +3056,9 @@ def test_plan_revision_quota_failure_reports_response_file_without_recording(tmp
                 blocking_plan_issues=["Missing a regression test."],
             )
         ],
-        public_response_outputs=["", "", valid_revision],
+        # A failed exit may only be salvaged when its current-attempt artifact
+        # passes the normal revision validator.
+        public_response_outputs=["", "", "partial revision"],
     )
     config = make_config(tmp_path, agent_max_retries=0)
 

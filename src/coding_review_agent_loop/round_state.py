@@ -49,6 +49,10 @@ class PostedRoundMetadata:
     compact_prior_summaries: tuple[str, ...] = ()
     usage: dict | None = None
     model_used: str | None = None
+    # How the response was acquired.  Legacy metadata represents ordinary
+    # zero-exit success.
+    acquisition_outcome: str = "success"
+    acquisition_returncode: int | None = None
     consensus_kind: str | None = None
     is_final: bool = False
     agenda: tuple[str, ...] = ()
@@ -176,6 +180,8 @@ def _encode_round_metadata(metadata: PostedRoundMetadata) -> str:
         "compact_prior_summaries": list(metadata.compact_prior_summaries),
         "usage": metadata.usage,
         "model_used": metadata.model_used,
+        "acquisition_outcome": metadata.acquisition_outcome,
+        "acquisition_returncode": metadata.acquisition_returncode,
         "consensus_kind": metadata.consensus_kind,
         "is_final": metadata.is_final,
         "agenda": list(metadata.agenda),
@@ -220,6 +226,11 @@ def _decode_round_metadata_mapping(payload: Mapping[str, object]) -> PostedRound
             ),
             usage=payload.get("usage") if isinstance(payload.get("usage"), dict) else None,
             model_used=str(payload["model_used"]) if payload.get("model_used") is not None else None,
+            acquisition_outcome=str(payload.get("acquisition_outcome", "success")),
+            acquisition_returncode=(
+                int(payload["acquisition_returncode"])
+                if payload.get("acquisition_returncode") is not None else None
+            ),
             consensus_kind=str(payload["consensus_kind"]) if payload.get("consensus_kind") is not None else None,
             is_final=bool(payload.get("is_final", False)),
             agenda=tuple(str(item) for item in payload.get("agenda", [])),

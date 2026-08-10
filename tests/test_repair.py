@@ -13,7 +13,7 @@ from coding_review_agent_loop.protocol import (
     validate_structured_discuss_answer,
     validate_structured_plan_state,
 )
-from coding_review_agent_loop.orchestrator import _structured_response_candidates
+from coding_review_agent_loop.orchestrator import _new_usage_context, _structured_response_candidates
 
 
 def _initial_plan_with_human_requirements() -> str:
@@ -837,11 +837,35 @@ def test_execute_repair_records_antigravity_failure_outcomes(
         config=make_config(tmp_path),
         run_id="run-3",
         usage_context=None,
-        validate=lambda text: text,
+        validate=lambda text: (_ for _ in ()).throw(AgentLoopError("malformed repair")),
         expected_kind="pr_review",
     )
     assert repaired is None
     assert attempts[0].outcome == expected
+
+@pytest.mark.parametrize("returncode", [1, None])
+def test_execute_repair_accepts_valid_antigravity_artifact_after_nonzero_exit(
+    tmp_path, monkeypatch, returncode
+):
+    from coding_review_agent_loop.agents import antigravity as agy_mod
+
+    monkeypatch.setattr(agy_mod, "_antigravity_settings_path", lambda: tmp_path / "settings.json")
+    valid = "valid repaired response"
+    usage = _new_usage_context(make_config(tmp_path))
+    repaired, marker, attempts = execute_repair(
+        "malformed", runner=FakeRunner(antigravity_outputs=[("CLI timeout", returncode)], public_response_outputs=[valid]),
+        config=make_config(tmp_path), run_id="run-3", usage_context=usage,
+        validate=lambda text: text if text == valid else (_ for _ in ()).throw(AgentLoopError("bad")),
+        expected_kind="pr_review",
+    )
+    assert (repaired, marker) == (valid, valid)
+    assert attempts[0].outcome == (
+        "accepted_timeout" if returncode is None else "accepted_nonzero_exit"
+    )
+    assert attempts[0].fallback_planned is False
+    assert usage.records[0].validation_status == "validated"
+    assert usage.records[0].returncode == returncode
+
 
 def test_execute_repair_records_spawn_error_with_log_path(tmp_path, monkeypatch):
     from coding_review_agent_loop.agents import antigravity as agy_mod
@@ -969,7 +993,9 @@ def test_antigravity_repair_attempts_directly_when_catalog_fails(tmp_path, monke
     config = make_config(tmp_path, repair_models=("ModelA",), antigravity_models=("ModelB",))
     _, _, attempts = execute_repair(
         "malformed", runner=runner, config=config, run_id="catalog-failure",
-        usage_context=None, validate=lambda text: text, expected_kind="pr_review",
+        usage_context=None,
+        validate=lambda text: (_ for _ in ()).throw(AgentLoopError("invalid repair")),
+        expected_kind="pr_review",
     )
 
     assert [attempt.model for attempt in attempts] == ["ModelA", "ModelB"]
