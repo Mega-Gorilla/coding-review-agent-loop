@@ -1024,7 +1024,11 @@ def structured_plan_revision(
         payload["deferred_stages"] = deferred_stages
     if child_stages is not None:
         payload["child_stages"] = child_stages
-    for name, value in (("external_dependencies", external_dependencies), ("deferred_work", deferred_work), ("plan_actions", plan_actions)):
+    for name, value in (
+        ("external_dependencies", external_dependencies),
+        ("deferred_work", deferred_work),
+        ("plan_actions", plan_actions),
+    ):
         if value is not None:
             payload[name] = value
     return (
@@ -1060,7 +1064,11 @@ def structured_plan_state(
         payload["deferred_stages"] = deferred_stages
     if child_stages is not None:
         payload["child_stages"] = child_stages
-    for name, value in (("external_dependencies", external_dependencies), ("deferred_work", deferred_work), ("plan_actions", plan_actions)):
+    for name, value in (
+        ("external_dependencies", external_dependencies),
+        ("deferred_work", deferred_work),
+        ("plan_actions", plan_actions),
+    ):
         if value is not None:
             payload[name] = value
     return (

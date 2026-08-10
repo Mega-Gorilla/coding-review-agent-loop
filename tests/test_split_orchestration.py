@@ -14,8 +14,11 @@ from coding_review_agent_loop.issue_pr_handoff import format_issue_pr_handoff_co
 from coding_review_agent_loop.orchestrator import (
     PostedRoundMetadata,
     _attach_round_metadata,
+    _log_typed_plan_stage_dispositions,
     _plan_subject,
 )
+from coding_review_agent_loop.comment_rendering import render_typed_plan_stages_section
+from coding_review_agent_loop.protocol import DeferredStage, TypedPlanStages
 from coding_review_agent_loop.split_materialization import (
     MaterializedSplitChild,
     SplitMaterializationMetadata,
@@ -60,6 +63,41 @@ def _existing_split_children_comment() -> dict:
         "createdAt": "2026-05-23T00:00:00Z",
         "body": format_split_materialization_summary(parent_issue=56, metadata=metadata),
     }
+
+
+def test_log_typed_plan_stage_dispositions_from_structured_payload(tmp_path, capsys):
+    plan = structured_plan_state(
+        child_stages=[{"title": "Implementation", "summary": "Create this."}],
+        external_dependencies=[{"title": "#481", "summary": "Already exists."}],
+        deferred_work=[{"title": "Stage 4", "summary": "Future work."}],
+        plan_actions=[{"title": "Post approval", "summary": "Tracker action."}],
+        deferred_stages=[{"title": "Legacy stage", "summary": "Recorded only."}],
+    )
+
+    _log_typed_plan_stage_dispositions(plan, config=make_config(tmp_path, quiet=False))
+
+    stderr = capsys.readouterr().err
+    assert "linked dependency: #481." in stderr
+    assert "recorded-only deferred work: Stage 4." in stderr
+    assert "recorded-only plan action: Post approval." in stderr
+    assert "recorded-only legacy deferred stage: Legacy stage." in stderr
+
+
+def test_log_typed_plan_stage_dispositions_from_marker(tmp_path, capsys):
+    marker = render_typed_plan_stages_section(
+        TypedPlanStages(
+            external_dependencies=(DeferredStage("#481", "Already exists."),),
+            deferred_work=(DeferredStage("Stage 4", "Future work."),),
+            plan_actions=(DeferredStage("Post approval", "Tracker action."),),
+        )
+    )
+
+    _log_typed_plan_stage_dispositions(marker or "", config=make_config(tmp_path, quiet=False))
+
+    stderr = capsys.readouterr().err
+    assert "linked dependency: #481." in stderr
+    assert "recorded-only deferred work: Stage 4." in stderr
+    assert "recorded-only plan action: Post approval." in stderr
 
 
 def test_plan_first_materializes_explicit_child_stages_before_implementation(tmp_path):

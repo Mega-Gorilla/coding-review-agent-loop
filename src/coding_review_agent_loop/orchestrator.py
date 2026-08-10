@@ -3396,6 +3396,8 @@ def _log_typed_plan_stage_dispositions(current_plan: str, *, config: AgentLoopCo
     except AgentLoopError:
         structured = None
     if structured is not None:
+        for entry in structured.deferred_stages:
+            log(config, f"Plan scope: recorded-only legacy deferred stage: {entry.title}.")
         categories = (
             ("linked dependency", structured.typed_stages.external_dependencies),
             ("recorded-only deferred work", structured.typed_stages.deferred_work),
@@ -3405,6 +3407,8 @@ def _log_typed_plan_stage_dispositions(current_plan: str, *, config: AgentLoopCo
             for entry in entries:
                 log(config, f"Plan scope: {disposition}: {entry.title}.")
         return
+    for entry in _extract_current_deferred_stages(current_plan):
+        log(config, f"Plan scope: recorded-only legacy deferred stage: {entry.title}.")
     marker = re.search(
         r"<!--\s*AGENT_TYPED_PLAN_STAGES:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->",
         current_plan,

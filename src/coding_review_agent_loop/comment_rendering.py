@@ -298,9 +298,18 @@ def render_typed_plan_stages_section(stages: TypedPlanStages) -> str | None:
             {"title": item.title, "summary": item.summary}
             for item in stages.child_stages
         ],
-        "external_dependencies": [{"title": item.title, "summary": item.summary} for item in stages.external_dependencies],
-        "deferred_work": [{"title": item.title, "summary": item.summary} for item in stages.deferred_work],
-        "plan_actions": [{"title": item.title, "summary": item.summary} for item in stages.plan_actions],
+        "external_dependencies": [
+            {"title": item.title, "summary": item.summary}
+            for item in stages.external_dependencies
+        ],
+        "deferred_work": [
+            {"title": item.title, "summary": item.summary}
+            for item in stages.deferred_work
+        ],
+        "plan_actions": [
+            {"title": item.title, "summary": item.summary}
+            for item in stages.plan_actions
+        ],
     }
     lines.append(f"<!-- AGENT_TYPED_PLAN_STAGES: {_encode_json_payload(payload)} -->")
     return "\n".join(lines)

@@ -988,7 +988,7 @@ def _expect_typed_plan_stages(payload: dict[str, object], *, context: str) -> Ty
     if not present:
         return TypedPlanStages()
 
-    def child_stages() -> tuple[ChildStage, ...]:
+    def parse_child_stages() -> tuple[ChildStage, ...]:
         value = payload.get("child_stages", [])
         if not isinstance(value, list):
             raise AgentLoopError(f"{context}.child_stages must be a JSON array.")
@@ -1000,9 +1000,14 @@ def _expect_typed_plan_stages(payload: dict[str, object], *, context: str) -> Ty
             title = _expect_non_empty_string(obj["title"], context=f"{item_context}.title")
             summary = _expect_non_empty_string(obj["summary"], context=f"{item_context}.summary")
             if ISSUE_REFERENCE_RE.search(title + "\n" + summary):
-                raise AgentLoopError(f"{item_context} references an existing issue; use external_dependencies.")
+                raise AgentLoopError(
+                    f"{item_context} references an existing issue; "
+                    "use external_dependencies."
+                )
             if TRACKER_ACTION_TITLE_RE.match(" ".join(title.split())):
-                raise AgentLoopError(f"{item_context} is a tracker action; use plan_actions.")
+                raise AgentLoopError(
+                    f"{item_context} is a tracker action; use plan_actions."
+                )
             result.append(ChildStage(title, summary))
         return tuple(result)
 
@@ -1020,7 +1025,7 @@ def _expect_typed_plan_stages(payload: dict[str, object], *, context: str) -> Ty
             result.append(DeferredStage(title, summary))
         return tuple(result)
 
-    child_stages = child_stages()
+    child_stages = parse_child_stages()
     dependencies = recorded_stages("external_dependencies")
     deferred = recorded_stages("deferred_work")
     actions = recorded_stages("plan_actions")
@@ -1927,7 +1932,14 @@ def validate_structured_plan_revision(text: str) -> StructuredPlanRevision | Non
             "prior_plan_item_dispositions",
             "plan_steps",
         },
-        optional={"deferred_stages", "child_stages", "external_dependencies", "deferred_work", "plan_actions", "human_requirement_dispositions"},
+        optional={
+            "deferred_stages",
+            "child_stages",
+            "external_dependencies",
+            "deferred_work",
+            "plan_actions",
+            "human_requirement_dispositions",
+        },
     )
     state = _expect_non_empty_string(payload["state"], context="plan_revision.state")
     if state != "blocking":
@@ -1978,7 +1990,14 @@ def validate_structured_plan_state(text: str) -> StructuredPlanState | None:
         payload,
         context="plan_state",
         required={"schema_version", "kind", "state", "summary", "plan_steps"},
-        optional={"deferred_stages", "child_stages", "external_dependencies", "deferred_work", "plan_actions", "human_requirement_dispositions"},
+        optional={
+            "deferred_stages",
+            "child_stages",
+            "external_dependencies",
+            "deferred_work",
+            "plan_actions",
+            "human_requirement_dispositions",
+        },
     )
     state = _expect_state(payload["state"], context="plan_state.state")
     if state != "blocking":

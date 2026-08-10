@@ -125,6 +125,18 @@ def _strip_child_title_prefix(title: str, parent_issue: int) -> str:
     return title[len(prefix):] if title.startswith(prefix) else title
 
 
+def _title_search(title: str) -> str:
+    """Quote a title safely for GitHub's issue-search syntax."""
+    return '"' + title.replace('"', r'\"') + '" in:title'
+
+
+def _references_parent_issue(body: str | None, parent_issue: int) -> bool:
+    """Whether a canonical child explicitly identifies its parent issue."""
+    if not body:
+        return False
+    return bool(re.search(rf"(?<![\w/])#{parent_issue}(?!\d)", body))
+
+
 def _sibling_lines(children: Sequence[MaterializedSplitChild]) -> list[str]:
     if not children:
         return ["- None yet."]
@@ -313,19 +325,25 @@ def _adopt_from_search(
             key = _stage_key(_strip_child_title_prefix(found.title, parent_issue))
         if key in remaining_keys and key not in by_key:
             by_key[key] = found
-    # Also adopt a canonical child that was created by another workflow and
-    # therefore lacks our parent marker/prefix. This deterministic normalized
-    # title check prevents the #479-style duplicate placeholders.
+    # A typed child can be canonicalized by another workflow and lack our
+    # marker/prefix. Only adopt an *open*, parent-linked candidate: generic
+    # titles and closed duplicate placeholders must never become handoff
+    # targets. Discuss proposals are free-form, so they do not use this
+    # cross-workflow fallback.
     for proposal in remaining:
-        if proposal.key in by_key:
+        if proposal.key in by_key or not proposal.typed_child:
             continue
         for found in search_issues(
             runner,
             config=config,
-            search=f'"{proposal.title}" in:title',
-            state="all",
+            search=_title_search(proposal.title),
+            state="open",
         ):
-            if found.title and _stage_key(found.title) == proposal.key:
+            if (
+                found.title
+                and _stage_key(found.title) == proposal.key
+                and _references_parent_issue(found.body, parent_issue)
+            ):
                 by_key[proposal.key] = found
                 break
     return by_key
