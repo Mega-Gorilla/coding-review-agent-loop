@@ -47,7 +47,17 @@ def test_antigravity_capacity_requires_framed_provider_failure() -> None:
         signatures=signatures,
     ).is_capacity
     assert not transient.classify_antigravity_capacity(
+        "The review quotes the provider failure below:\n"
+        "Error: Our servers are experiencing high traffic right now, please try again in a minute.",
+        returncode=1,
+        empty_response=False,
+        signatures=signatures,
+    ).is_capacity
+    assert not transient.classify_antigravity_capacity(
         "Error: high traffic but invalid API key", returncode=1, empty_response=False, signatures=signatures
+    ).is_capacity
+    assert transient.classify_antigravity_capacity(
+        "quota exceeded please try again", returncode=1, empty_response=False, signatures=("quota",)
     ).is_capacity
 
 

@@ -48,10 +48,11 @@ class AntigravityCapacityClassification:
     diagnostic: str = ""
 
 
-_ANTIGRAVITY_ERROR_LINE_RE = re.compile(r"(?im)^\s*(?:error|fatal)\s*[:\[]")
+_ANTIGRAVITY_ERROR_LINE_RE = re.compile(r"(?i)^\s*(?:error|fatal)\s*[:\[]")
 _ANTIGRAVITY_ERROR_JSON_RE = re.compile(
-    r'(?is)^\s*\{.{0,2000}?"(?:error|code|status|message)"\s*:',
+    r'^\s*\{.{0,2000}?"(?:error|code|status|message)"\s*:', re.I
 )
+_QUOTED_REVIEW_CONTEXT_RE = re.compile(r"\b(?:review|quote[sd]?|example|report)\b", re.I)
 
 
 def classify_antigravity_capacity(
@@ -63,26 +64,37 @@ def classify_antigravity_capacity(
 ) -> AntigravityCapacityClassification:
     """Recognize framed Antigravity provider-capacity diagnostics.
 
-    Capacity words in a normal review must not trigger fallback: this classifier
-    only considers a failed/empty invocation and an error-shaped standalone
-    diagnostic (or compact JSON error payload).  Authentication and billing
-    retain their non-retryable precedence.
+    Only failed or empty invocations are eligible. A signature on a provider
+    error line (or its adjacent detail line), a compact JSON error line, or an
+    unframed standalone provider diagnostic qualifies. Quoted review content
+    is excluded, and authentication/billing retain non-retryable precedence.
     """
     if (returncode in (None, 0) and not empty_response) or not text.strip():
         return AntigravityCapacityClassification(False)
     if NON_RETRYABLE_AGENT_OUTPUT_RE.search(text):
         return AntigravityCapacityClassification(False)
     # A provider normally prints its failure at either end; retaining a bounded
-    # tail also avoids a quoted issue report in a long agent transcript.
+    # tail avoids accepting a capacity phrase from an unrelated long transcript.
     stripped = text.strip()
     diagnostic = stripped if len(stripped) <= 2400 else f"{stripped[:1200]}\n{stripped[-1200:]}"
-    framed = bool(
-        _ANTIGRAVITY_ERROR_LINE_RE.search(diagnostic)
-        or _ANTIGRAVITY_ERROR_JSON_RE.search(diagnostic)
-    )
-    if not framed:
-        return AntigravityCapacityClassification(False)
-    if any(signature.lower() in diagnostic.lower() for signature in signatures):
+    lines = [line.strip() for line in diagnostic.splitlines() if line.strip()]
+    lowered_signatures = tuple(signature.lower() for signature in signatures)
+
+    def has_signature(value: str) -> bool:
+        return any(signature in value.lower() for signature in lowered_signatures)
+
+    for index, line in enumerate(lines):
+        if _ANTIGRAVITY_ERROR_LINE_RE.match(line) or _ANTIGRAVITY_ERROR_JSON_RE.match(line):
+            adjacent = "\n".join(lines[max(0, index - 1): index + 2])
+            preceding = lines[index - 1] if index else ""
+            if has_signature(adjacent) and not _QUOTED_REVIEW_CONTEXT_RE.search(preceding):
+                return AntigravityCapacityClassification(True, diagnostic)
+
+    # Older agy versions emitted bare provider diagnostics (for example,
+    # "quota exceeded please try again") on a non-zero exit. Preserve that
+    # fallback trigger, while refusing transcript text that identifies itself
+    # as a quoted review/example rather than the provider's own diagnostic.
+    if has_signature(diagnostic) and not _QUOTED_REVIEW_CONTEXT_RE.search(diagnostic):
         return AntigravityCapacityClassification(True, diagnostic)
     return AntigravityCapacityClassification(False)
 

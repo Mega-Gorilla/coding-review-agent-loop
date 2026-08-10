@@ -101,7 +101,7 @@ implementation, decomposition, phased implementation, and PR-fix commands.
 Antigravity turns are single-shot (no cross-round session resume) and report
 estimated token usage.
 
-Provider-framed high-traffic and capacity failures retry the active model before
+Provider high-traffic and capacity failures retry the active model before
 the ordered fallback chain advances. `--max-retries` is shared across the chain,
 which caps a run at `models + retries` calls; custom quota signatures decide which
 diagnostics qualify. Invalid settings, unsupported models, timeouts, and malformed

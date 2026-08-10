@@ -3977,6 +3977,66 @@ def test_base_response_file_instruction_includes_must_write_before_turn_ends(tmp
 # ── Tests: issue #400 – toolPermission: "strict" injection for reviewer ────────
 
 
+def test_antigravity_reviewer_capacity_retry_falls_back_with_repair_enabled(tmp_path):
+    """Reviewer repair paths share Antigravity's retry budget across models."""
+    from coding_review_agent_loop.agents.base import AgentResult
+    from unittest.mock import patch
+
+    config = make_config(
+        tmp_path,
+        reviewer="antigravity",
+        agent_max_retries=1,
+        antigravity_models=("ModelA", "ModelB"),
+    )
+    results = iter((
+        AgentResult(
+            text="",
+            raw_output="Error: Our servers are experiencing high traffic right now, please try again in a minute.",
+            returncode=1,
+            model_used="ModelA",
+        ),
+        AgentResult(text="", raw_output="quota exceeded please try again", returncode=1, model_used="ModelA"),
+        AgentResult(text="valid review", returncode=0, model_used="ModelB"),
+    ))
+    models: list[tuple[str, ...]] = []
+
+    def mock_run(_runner, *, config, **_kwargs):
+        models.append(config.antigravity_models)
+        return next(results)
+
+    with patch("coding_review_agent_loop.orchestrator.run_agent_result", mock_run):
+        response = _run_validated_agent(
+            FakeRunner(), agent="antigravity", config=config, prompt="Review.",
+            marker_description="test", validate=lambda text: text, use_repair=True, role="reviewer",
+        )
+
+    assert response.text == "valid review"
+    assert response.model_used == "ModelB"
+    assert models == [("ModelA",), ("ModelA",), ("ModelB",)]
+
+
+def test_antigravity_capacity_exhaustion_is_reported_transient(tmp_path):
+    """A real orchestration retry path keeps capacity exhaustion transient."""
+    from coding_review_agent_loop.agents.base import AgentResult
+    from coding_review_agent_loop.errors import AgentInvocationError
+    from unittest.mock import patch
+
+    config = make_config(tmp_path, reviewer="antigravity", agent_max_retries=1, antigravity_models=("ModelA",))
+    result = AgentResult(
+        text="",
+        raw_output="Error: Our servers are experiencing high traffic right now, please try again in a minute.",
+        returncode=1,
+        model_used="ModelA",
+    )
+
+    with patch("coding_review_agent_loop.orchestrator.run_agent_result", return_value=result):
+        with pytest.raises(AgentInvocationError, match="transient"):
+            _run_validated_agent(
+                FakeRunner(), agent="antigravity", config=config, prompt="Review.",
+                marker_description="test", validate=lambda text: text, use_repair=True, role="reviewer",
+            )
+
+
 def test_reviewer_and_coder_call_sites_pass_correct_role(tmp_path):
     """_run_validated_agent propagates role= to run_agent_result correctly."""
     from unittest.mock import patch

@@ -2080,7 +2080,7 @@ def _run_validated_agent(
     log_paths: list[object] = []
     antigravity_attempts = (
         AntigravityAttemptState.from_config(config, config.agent_max_retries)
-        if agent == "antigravity" and not use_repair
+        if agent == "antigravity"
         else None
     )
     # Each fallback retains an initial attempt; retry allowance is shared.

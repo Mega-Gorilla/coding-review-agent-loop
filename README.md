@@ -125,7 +125,7 @@ auth/quota error near or after the cutoff, the tool surfaces this migration
 guidance. Notes: Antigravity turns are single-shot (no cross-round session
 resume) and report estimated token usage (`agy` emits no token counts).
 
-Provider-framed high-traffic, rate-limit, resource-exhausted, overload, and
+Provider capacity diagnostics for high-traffic, rate-limit, resource-exhausted, overload, and
 no-capacity errors retry the active model before advancing through this chain.
 `--agent-max-retries` is shared across the chain, so a run makes at most
 `models + retries` calls. Custom `--antigravity-quota-signatures` replace the

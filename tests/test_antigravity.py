@@ -126,6 +126,7 @@ def test_antigravity_backend_stops_on_other_errors(tmp_path):
 
 def test_antigravity_backend_ignores_stale_partial_response_file(tmp_path):
     from coding_review_agent_loop.agents.antigravity import AntigravityBackend
+    from coding_review_agent_loop.agents.base import public_response_path
     agy_dir = tmp_path / "antigravity"
     agy_dir.mkdir(parents=True, exist_ok=True)
     runner = FakeRunner(antigravity_outputs=[("success", 0)], public_response_outputs=["successful response"])
@@ -135,10 +136,14 @@ def test_antigravity_backend_ignores_stale_partial_response_file(tmp_path):
         antigravity_models=("ModelA",),
         antigravity_quota_signatures=("quota",)
     )
+    stale_path = public_response_path(config, "antigravity")
+    stale_path.parent.mkdir(parents=True, exist_ok=True)
+    stale_path.write_text("stale partial response", encoding="utf-8")
     result = AntigravityBackend().run(runner, config, "Review", run_id="r1")
     
     assert result.text == "successful response"
     assert result.model_used == "ModelA"
+    assert result.text != "stale partial response"
 
 def test_antigravity_backend_writes_gemini_md_single_shot_instruction(tmp_path):
     from coding_review_agent_loop.agents.antigravity import AntigravityBackend
