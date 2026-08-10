@@ -17,7 +17,10 @@ from .protocol import DiscussEvidenceClaim
 TEST_SECTION_RE = re.compile(r"(?im)^\s*tests(?:\s+run)?\s*:\s*(?P<body>.*)$")
 WINDOWS_PATH_RE = re.compile(r"(?<![\w.-])[A-Za-z]:\\[^\s`'\"|;&)<>]+")
 URL_SCHEME_RE = re.compile(r"(?i)https?://")
-URL_VALUE_RE = re.compile(r"(?i)https?://[^\s'\"`;&|()<>]+")
+# Stops at a comma and refuses to consume into a subsequent http(s) scheme, so
+# a concatenated/delimited string such as "http://127.0.0.1/foo,http://evil.com"
+# yields two separate URL values instead of one that only reveals its first host.
+URL_VALUE_RE = re.compile(r"(?i)https?://(?:(?!https?://)[^\s'\"`;&|()<>,])+")
 BACKTICK_SPAN_RE = re.compile(r"`([^`]*)`")
 VAR_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 INTERPRETER_BASENAME_RE = re.compile(r"^(python|pypy)\d*(\.\d+)?$")
@@ -151,6 +154,14 @@ def _url_values(token: str) -> tuple[str, ...]:
 
 
 def _is_loopback_url(url: str) -> bool:
+    # WHATWG URL consumers (Node, browsers, and browser-driven E2E clients)
+    # treat a backslash as a path separator for special schemes like
+    # http(s), so "http://live.example\@localhost" resolves to live.example
+    # there even though `urlsplit` reports "localhost" as the hostname.
+    # Refuse to classify authority syntax that could disagree between
+    # parsers instead of trusting `urlsplit` alone.
+    if "\\" in url:
+        return False
     try:
         host = urlsplit(url).hostname
     except ValueError:
@@ -764,7 +775,17 @@ def _validate_single_command(command: str, *, assigned: Path, origin: Origin) ->
 
     for clause in clauses:
         for target in _url_targets_in_clause(clause):
-            for url in _url_values(target):
+            values = _url_values(target)
+            if not values and _is_url_token(target):
+                # A bare/incomplete scheme like "http://" has no extractable
+                # host for `_url_values` to yield, but it is still URL-shaped
+                # command syntax; treat it as unverifiable rather than
+                # silently skipping validation for it.
+                raise AgentLoopError(
+                    "Coder reported tests run against a live remote target: "
+                    f"{target!r} in command {command!r}. Assigned checkout: {assigned}"
+                )
+            for url in values:
                 if _is_loopback_url(url):
                     continue
                 raise AgentLoopError(

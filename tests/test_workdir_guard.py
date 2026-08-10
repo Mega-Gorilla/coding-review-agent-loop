@@ -397,6 +397,27 @@ def test_loopback_target_does_not_hide_remote_target_in_same_command(tmp_path):
         validate_test_commands_within_workdir((command,), assigned_workdir=_assigned(tmp_path))
 
 
+def test_rejects_backslash_ambiguous_loopback_authority(tmp_path):
+    # WHATWG URL consumers (Node, browsers) treat `\` as a path separator for
+    # http(s) and would resolve this to live.example, not localhost, even
+    # though a strict URL parse reports "localhost" as the hostname.
+    command = "E2E_BASE='http://live.example\\@localhost' node tests/test_e2e.js"
+    with pytest.raises(AgentLoopError, match="live remote target"):
+        validate_test_commands_within_workdir((command,), assigned_workdir=_assigned(tmp_path))
+
+
+def test_rejects_live_target_concatenated_with_loopback_url(tmp_path):
+    command = "E2E_BASE=http://127.0.0.1:8765/foo,http://evil.com node tests/test_e2e.js"
+    with pytest.raises(AgentLoopError, match=re.escape("http://evil.com")):
+        validate_test_commands_within_workdir((command,), assigned_workdir=_assigned(tmp_path))
+
+
+def test_rejects_incomplete_url_scheme_token(tmp_path):
+    command = "curl http:// tests/test_e2e.js"
+    with pytest.raises(AgentLoopError, match="live remote target"):
+        validate_test_commands_within_workdir((command,), assigned_workdir=_assigned(tmp_path))
+
+
 REJECTED_NARRATIVE_URLS = [
     "Tests: hit https://live.example/health",
     "Tests: curled https://live.example/health",
