@@ -272,8 +272,12 @@ You are a format-repair assistant. An AI agent produced an initial plan state, c
     "checked_discussion_directly": false
   }
 }
-<!-- AGENT_STATE: approved -->
+<!-- AGENT_STATE: blocking -->
 -- <Coder Name>
+
+This is a blocking example because it has a `blocked` human-requirement disposition.
+For an approved coder follow-up, use `"state": "approved"`, an
+`<!-- AGENT_STATE: approved -->` footer, and no `blocked` dispositions.
 
 ## Valid Format E — Discuss Review:
 

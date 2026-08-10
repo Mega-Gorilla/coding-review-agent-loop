@@ -11,6 +11,7 @@ from coding_review_agent_loop.repair import (
 )
 from coding_review_agent_loop.protocol import (
     validate_structured_discuss_answer,
+    validate_structured_coder_followup,
     validate_structured_plan_state,
 )
 from coding_review_agent_loop.orchestrator import _new_usage_context, _structured_response_candidates
@@ -1659,6 +1660,14 @@ def test_repair_prompt_coder_followup_examples_include_current_requirement_schem
     assert '"human_requirement_dispositions"' in format_c
     assert '"disposition": "blocked"' in format_c
     assert '"addressed_ids": []' in format_c
+    payload, _ = json.JSONDecoder().raw_decode(format_c.lstrip())
+    parsed = validate_structured_coder_followup(
+        json.dumps(payload) + "\n<!-- AGENT_STATE: blocking -->\n-- Coder Name"
+    )
+    assert parsed.state == "blocking"
+    assert parsed.human_requirement_dispositions[0].disposition == "blocked"
+    assert '"state": "approved"' in format_c
+    assert "<!-- AGENT_STATE: approved -->" in format_c
     example_3 = _REPAIR_PROMPT.split("## WORKED EXAMPLE 3", 1)[1].split("## WORKED EXAMPLE 4", 1)[0]
     example_5 = _REPAIR_PROMPT.split("## WORKED EXAMPLE 5", 1)[1].split("## WORKED EXAMPLE 6", 1)[0]
     assert example_3.count('"human_requirement_dispositions"') == 2
