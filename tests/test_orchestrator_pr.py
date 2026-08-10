@@ -4906,17 +4906,20 @@ def test_gemini_review_loop_prefers_public_response_file_over_stdout(tmp_path):
     assert str(config.gemini_dir / ".git" / "agent-loop" / "responses" / "gemini") in gemini_call[2]
     assert runner.comments == ["**Review verdict:** Approved\n\nLGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Google Gemini"]
 
-def test_claude_review_loop_prefers_public_response_file_over_stdout(tmp_path):
+def test_claude_review_loop_accepts_valid_response_file_after_nonzero_exit(tmp_path):
     runner = FakeRunner(
         claude_outputs=[
-            json.dumps(
-                {
-                    "result": (
+            (
+                json.dumps(
+                    {
+                        "result": (
                         "I will inspect the PR diff.\n"
                         "Tool output chatter should not be posted.\n"
                     ),
-                    "session_id": "claude-session-1",
-                }
+                        "session_id": "claude-session-1",
+                    }
+                ),
+                1,
             ),
         ],
         public_response_outputs=[
@@ -4931,6 +4934,12 @@ def test_claude_review_loop_prefers_public_response_file_over_stdout(tmp_path):
     assert "PUBLIC RESPONSE FILE:" in claude_call[-1]
     assert "/coding-review-agent-loop/responses/OWNER-REPO/claude/" in claude_call[-1]
     assert runner.comments == ["**Review verdict:** Approved\n\nLGTM from response file.\n<!-- AGENT_STATE: approved -->\n-- Anthropic Claude"]
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]) == 1
+    metadata_match = re.search(r"<!--\s*AGENT_LOOP_META:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->", runner.pr_payload["comments"][0]["body"])
+    assert metadata_match is not None
+    metadata = _decode_round_metadata(metadata_match.group("payload"))
+    assert metadata.acquisition_outcome == "accepted_nonzero_exit"
+    assert metadata.acquisition_returncode == 1
 
 def test_claude_review_loop_runs_tests_and_merge_only_after_approval(tmp_path):
     runner = FakeRunner(

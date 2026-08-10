@@ -4162,6 +4162,47 @@ def test_posted_round_metadata_model_used_none_round_trip():
     assert decoded.model_used is None
 
 
+def test_posted_round_metadata_acquisition_fields_round_trip_and_legacy_default():
+    metadata = PostedRoundMetadata(
+        flow="plan", role="reviewer", agent="Claude", round_number=1,
+        subject="abc", acquisition_outcome="accepted_nonzero_exit",
+        acquisition_returncode=1,
+    )
+    decoded = _decode_round_metadata(_encode_round_metadata(metadata))
+    assert decoded.acquisition_outcome == "accepted_nonzero_exit"
+    assert decoded.acquisition_returncode == 1
+
+    legacy_payload = {
+        "flow": "plan", "role": "reviewer", "agent": "Claude",
+        "round_number": 1, "subject": "abc",
+    }
+    legacy = _decode_round_metadata(base64.urlsafe_b64encode(
+        json.dumps(legacy_payload).encode("utf-8")
+    ).decode("ascii"))
+    assert legacy.acquisition_outcome == "success"
+    assert legacy.acquisition_returncode is None
+
+
+@pytest.mark.parametrize("artifact", ["", "not a structured review", "wrong reviewer response"])
+def test_failed_exit_rejects_empty_malformed_or_wrong_role_response_artifact(tmp_path, artifact):
+    runner = FakeRunner(
+        gemini_outputs=[("command failed", 1)], public_response_outputs=[artifact]
+    )
+    config = make_config(tmp_path, reviewer="gemini", agent_max_retries=0)
+
+    def validate(text):
+        if text == "valid review":
+            return text
+        raise AgentLoopError("review does not match the expected reviewer role")
+
+    with pytest.raises(AgentInvocationError):
+        _run_validated_agent(
+            runner, agent="gemini", config=config, prompt="Review the PR.",
+            marker_description="<!-- AGENT_STATE: approved|blocking -->", validate=validate,
+        )
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:1] == ["gemini"]]) == 1
+
+
 def test_posted_round_metadata_model_used_backward_compat():
     payload = {
         "flow": "plan",

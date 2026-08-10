@@ -1863,10 +1863,12 @@ def _attempt_claude_completion_recovery(
     Entirely self-contained and attempt-local: every variable here is scoped
     to this one recovery call, never the caller's original (failed) attempt.
     The caller's original ``AgentResult`` is not even passed in, so isolation
-    is structural rather than merely asserted. Three outcomes:
+    is structural rather than merely asserted. Four outcomes:
 
     - a valid PR/blocking/clarify per ``validate()`` -> success, returned as
       a normal ``ValidatedAgentResponse`` subject to ordinary PR validation;
+      this includes a current invocation response-file artifact that validates
+      after a timeout or nonzero exit, with its acquisition diagnostic retained;
     - the resume turn itself declares a protocol-valid ``AGENT_UNAVAILABLE``
       -> terminal, posted/persisted verbatim, never passed to ``validate()``,
       and always terminal regardless of its own ``retryable`` flag (the
@@ -2190,7 +2192,10 @@ def _run_validated_agent(
         # response; stdout is diagnostics only and must never be salvaged.
         artifact = result.response_file_text
         artifact_unavailable = None
-        if artifact:
+        # Preserve the normal zero-exit path below, including its marker
+        # recovery diagnostic. Failed exits alone may be salvaged from the
+        # per-invocation response-file artifact.
+        if artifact and result.returncode != 0:
             try:
                 artifact_unavailable = parse_agent_unavailable(artifact)
             except AgentLoopError:
@@ -4269,6 +4274,8 @@ def _run_plan_first_loop(
             if resumed_record is not None:
                 review_output = resumed_record.metadata.canonical_reviewer_response or resumed_record.body
                 review_model_used = resumed_record.metadata.model_used
+                review_acquisition_outcome = resumed_record.metadata.acquisition_outcome
+                review_acquisition_returncode = resumed_record.metadata.acquisition_returncode
                 structured_review = parse_structured_plan_review(
                     review_output,
                     reviewer=reviewer_name,
@@ -4305,6 +4312,8 @@ def _run_plan_first_loop(
                 assert review_response is not None
                 review_output = review_response.text
                 review_model_used = review_response.model_used
+                review_acquisition_outcome = review_response.acquisition_outcome
+                review_acquisition_returncode = review_response.acquisition_returncode
                 reviewer_session_ids[reviewer] = review_response.session_id
                 parsed_review = review_response.marker_value
                 assert isinstance(parsed_review, ParsedPlanReview)
@@ -4355,6 +4364,8 @@ def _run_plan_first_loop(
                 )
                 review_output = review_response.text
                 review_model_used = review_response.model_used
+                review_acquisition_outcome = review_response.acquisition_outcome
+                review_acquisition_returncode = review_response.acquisition_returncode
                 reviewer_session_ids[reviewer] = review_response.session_id
                 parsed_review = review_response.marker_value
                 assert isinstance(parsed_review, ParsedPlanReview)
@@ -4444,6 +4455,8 @@ def _run_plan_first_loop(
                     _post_plan_reviewer_comment(
                         reviewer_name, parsed_review, review_output=review_output,
                         model_used=review_model_used,
+                        acquisition_outcome=review_acquisition_outcome,
+                        acquisition_returncode=review_acquisition_returncode,
                         new_items=tuple(reviewer_new_unresolved_items),
                     )
             else:
@@ -5671,11 +5684,11 @@ def run_pr_loop(
                 reviewer_name: str,
                 parsed: ParsedReview,
                 *,
-            review_output: str,
-            model_used: str | None,
-            acquisition_outcome: str = "success",
-            acquisition_returncode: int | None = None,
-            new_items: tuple[UnresolvedReviewItem, ...] = (),
+                review_output: str,
+                model_used: str | None,
+                acquisition_outcome: str = "success",
+                acquisition_returncode: int | None = None,
+                new_items: tuple[UnresolvedReviewItem, ...] = (),
                 phase: str = "authoritative",
             ) -> None:
                 """Post one PR review using the same rendering and durable record."""
@@ -5895,6 +5908,8 @@ def run_pr_loop(
                 if resumed_record is not None:
                     review_output = resumed_record.metadata.canonical_reviewer_response or resumed_record.body
                     review_model_used = resumed_record.metadata.model_used
+                    review_acquisition_outcome = resumed_record.metadata.acquisition_outcome
+                    review_acquisition_returncode = resumed_record.metadata.acquisition_returncode
                     reparsed_review = parse_review(review_output, reviewer=reviewer_name)
                     parsed_review = ParsedReview(
                         state=resumed_record.metadata.state or parse_agent_state(review_output),
@@ -5922,6 +5937,8 @@ def run_pr_loop(
                     carried_approval_record = prior_approval
                     review_output = prior_approval.body
                     review_model_used = prior_approval.metadata.model_used
+                    review_acquisition_outcome = prior_approval.metadata.acquisition_outcome
+                    review_acquisition_returncode = prior_approval.metadata.acquisition_returncode
                     reparsed_review = parse_review(review_output, reviewer=reviewer_name)
                     parsed_review = ParsedReview(
                         state="approved",
@@ -5964,6 +5981,8 @@ def run_pr_loop(
                     reviewer_pr_checks = shared_reviewer_pr_checks
                     review_output = review_response.text
                     review_model_used = review_response.model_used
+                    review_acquisition_outcome = review_response.acquisition_outcome
+                    review_acquisition_returncode = review_response.acquisition_returncode
                     reviewer_session_ids[reviewer] = review_response.session_id
                     parsed_review = review_response.marker_value
                     assert isinstance(parsed_review, ParsedReview)
@@ -6064,6 +6083,8 @@ def run_pr_loop(
                     assert review_response is not None
                     review_output = review_response.text
                     review_model_used = review_response.model_used
+                    review_acquisition_outcome = review_response.acquisition_outcome
+                    review_acquisition_returncode = review_response.acquisition_returncode
                     reviewer_session_ids[reviewer] = review_response.session_id
                     parsed_review = review_response.marker_value
                     assert isinstance(parsed_review, ParsedReview)
@@ -6218,6 +6239,8 @@ def run_pr_loop(
                             _post_pr_reviewer_comment(
                                 reviewer_name, parsed_review, review_output=review_output,
                                 model_used=review_model_used,
+                                acquisition_outcome=review_acquisition_outcome,
+                                acquisition_returncode=review_acquisition_returncode,
                                 new_items=tuple(reviewer_new_unresolved_items),
                             )
                     else:
@@ -6246,6 +6269,8 @@ def run_pr_loop(
                         _post_pr_reviewer_comment(
                             reviewer_name, parsed_review, review_output=review_output,
                             model_used=review_model_used,
+                            acquisition_outcome=review_acquisition_outcome,
+                            acquisition_returncode=review_acquisition_returncode,
                             new_items=tuple(reviewer_new_unresolved_items),
                         )
                 else:
@@ -7088,10 +7113,10 @@ def run_pr_loop(
                         subject=str(updated_pr_context.metadata.head_sha or "unknown"),
                         prior_items=tuple(unresolved_items),
                         raw_structured_coder_response=raw_structured_coder_response,
-                    compact_prior_summaries=tuple(pr_compact_prior_summaries),
-                    model_used=coder_response.model_used,
-                    acquisition_outcome=coder_response.acquisition_outcome,
-                    acquisition_returncode=coder_response.acquisition_returncode,
+                        compact_prior_summaries=tuple(pr_compact_prior_summaries),
+                        model_used=coder_response.model_used,
+                        acquisition_outcome=coder_response.acquisition_outcome,
+                        acquisition_returncode=coder_response.acquisition_returncode,
                     ),
                 ),
             )

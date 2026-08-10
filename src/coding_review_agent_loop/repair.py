@@ -1265,6 +1265,7 @@ def execute_repair(
             or (
                 config.repair_backend == "antigravity"
                 and outcome in {"nonzero_exit", "timeout"}
+                and result.text_source == "response_file"
             )
         ):
             try:

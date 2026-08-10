@@ -843,23 +843,28 @@ def test_execute_repair_records_antigravity_failure_outcomes(
     assert repaired is None
     assert attempts[0].outcome == expected
 
-def test_execute_repair_accepts_valid_antigravity_artifact_after_nonzero_exit(tmp_path, monkeypatch):
+@pytest.mark.parametrize("returncode", [1, None])
+def test_execute_repair_accepts_valid_antigravity_artifact_after_nonzero_exit(
+    tmp_path, monkeypatch, returncode
+):
     from coding_review_agent_loop.agents import antigravity as agy_mod
 
     monkeypatch.setattr(agy_mod, "_antigravity_settings_path", lambda: tmp_path / "settings.json")
     valid = "valid repaired response"
     usage = _new_usage_context(make_config(tmp_path))
     repaired, marker, attempts = execute_repair(
-        "malformed", runner=FakeRunner(antigravity_outputs=[("CLI timeout", 1)], public_response_outputs=[valid]),
+        "malformed", runner=FakeRunner(antigravity_outputs=[("CLI timeout", returncode)], public_response_outputs=[valid]),
         config=make_config(tmp_path), run_id="run-3", usage_context=usage,
         validate=lambda text: text if text == valid else (_ for _ in ()).throw(AgentLoopError("bad")),
         expected_kind="pr_review",
     )
     assert (repaired, marker) == (valid, valid)
-    assert attempts[0].outcome == "accepted_nonzero_exit"
+    assert attempts[0].outcome == (
+        "accepted_timeout" if returncode is None else "accepted_nonzero_exit"
+    )
     assert attempts[0].fallback_planned is False
     assert usage.records[0].validation_status == "validated"
-    assert usage.records[0].returncode == 1
+    assert usage.records[0].returncode == returncode
 
 
 def test_execute_repair_records_spawn_error_with_log_path(tmp_path, monkeypatch):
