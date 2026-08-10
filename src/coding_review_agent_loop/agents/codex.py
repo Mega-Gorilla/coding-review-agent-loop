@@ -240,8 +240,9 @@ class CodexBackend:
         role: str | None = None,
         label: str | None = None,
         timeout_seconds: float | None = None,
+        attempt_suffix: str | None = None,
     ) -> AgentResult:
-        log_path = agent_log_path(config, "codex", run_id=run_id, label=label)
+        log_path = agent_log_path(config, "codex", run_id=run_id, label=label, attempt_suffix=attempt_suffix)
         response_path = public_response_path(config, "codex")
         prompt_with_response_file = with_public_response_file_instruction(prompt, response_path)
         input_text = None

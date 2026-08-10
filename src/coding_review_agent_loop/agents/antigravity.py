@@ -231,6 +231,7 @@ class AntigravityBackend:
         role: str | None = None,
         label: str | None = None,
         timeout_seconds: float | None = None,
+        attempt_suffix: str | None = None,
         log_path_override: Path | None = None,
     ) -> AgentResult:
         import json, fcntl  # Unix-only (fcntl); imported here so the module loads on Windows
@@ -261,7 +262,7 @@ class AntigravityBackend:
         # The prompt is the value of --print (must be last), not a positional.
         args += ["--print", _OVERSIZED_PROMPT_DIRECTIVE if oversized_prompt else prompt_text]
         log_path = log_path_override or agent_log_path(
-            config, "antigravity", run_id=run_id, label=label
+            config, "antigravity", run_id=run_id, label=label, attempt_suffix=attempt_suffix
         )
         log(config, f"Starting Antigravity (model: {model}) in {config.antigravity_dir}; log: {log_path}; response: {response_path}")
         # agy reads GEMINI.md from the workdir as high-priority system context before

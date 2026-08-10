@@ -3637,7 +3637,9 @@ def test_runner_retries_preflighted_command_disappearance_and_recovers(
     assert result.returncode == 0
     assert "recovered after preflight" in result.stdout
     assert len(popen_calls) == 3
-    assert which_calls == [command_name, command_name, command_name]
+    # Spawn retry keeps its existing three lookups; the completed invocation
+    # additionally records isolated pre/post executable observations.
+    assert which_calls == [command_name] * 5
     assert runner._resolved_commands[command_name] == str(command)
     assert sleep_calls[:2] == [2, 2]
     assert all(delay == 1 for delay in sleep_calls[2:])
@@ -4124,6 +4126,24 @@ def test_run_agent_result_passes_role_to_backend(tmp_path, monkeypatch):
     config = make_config(tmp_path, reviewer="gemini")
     run_agent_result(FakeRunner(), agent="gemini", config=config, prompt="Test", role="reviewer")
     assert captured["role"] == "reviewer"
+
+
+@pytest.mark.parametrize("use_pty", [False, True])
+def test_runner_records_attempt_local_executable_observation(tmp_path, use_pty):
+    """Both runner paths retain pre/post bare-command evidence for updater policy."""
+    result = Runner().run_with_log(
+        ["python3", "-c", "print('ok')"],
+        cwd=tmp_path,
+        log_path=tmp_path / f"observation-{use_pty}.log",
+        label="observation",
+        progress_interval_seconds=999,
+        use_pty=use_pty,
+    )
+    assert result.returncode == 0
+    assert result.observation is not None
+    assert result.observation.before.path
+    assert result.observation.after.path
+    assert result.observation.elapsed_seconds >= 0
 
 
 # ---------------------------------------------------------------------------

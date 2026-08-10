@@ -93,7 +93,7 @@ class UsageCallRecord:
     model: str | None = None
     outcome: Literal[
         "succeeded", "nonzero_exit", "empty_output", "timeout", "spawn_error", "invalid_output",
-        "unavailable_model", "accepted_nonzero_exit", "accepted_timeout",
+        "unavailable_model", "accepted_nonzero_exit", "accepted_timeout", "self_update_interruption",
     ] | None = None
     log_path: str | None = None
     fallback_planned: bool | None = None
@@ -202,7 +202,7 @@ class RunUsageContext:
         model: str | None = None,
         outcome: Literal[
             "succeeded", "nonzero_exit", "empty_output", "timeout", "spawn_error", "invalid_output",
-            "unavailable_model", "accepted_nonzero_exit", "accepted_timeout",
+            "unavailable_model", "accepted_nonzero_exit", "accepted_timeout", "self_update_interruption",
         ] | None = None,
         log_path: str | None = None,
         fallback_planned: bool | None = None,

@@ -90,14 +90,20 @@ def run_agent_result(
     role: str | None = None,
     label: str | None = None,
     timeout_seconds: float | None = None,
+    attempt_suffix: str | None = None,
 ) -> AgentResult:
-    return get_backend(agent).run(
-        runner,
-        config,
-        prompt,
+    kwargs: dict[str, object] = dict(
         session_id=session_id,
         run_id=run_id,
         role=role,
         label=label,
         timeout_seconds=timeout_seconds,
+    )
+    if attempt_suffix is not None:
+        kwargs["attempt_suffix"] = attempt_suffix
+    return get_backend(agent).run(
+        runner,
+        config,
+        prompt,
+        **kwargs,
     )
