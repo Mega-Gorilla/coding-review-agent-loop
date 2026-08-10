@@ -174,6 +174,31 @@ def test_recovery_transport_failure_nonzero_exit_synthesizes_unavailable(tmp_pat
     assert len(_claude_resume_commands(runner)) == 1
 
 
+@pytest.mark.parametrize("returncode", [1, None])
+def test_recovery_accepts_valid_response_file_after_failed_exit(tmp_path, returncode):
+    valid = "Created PR.\n<!-- AGENT_PR: 99 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude"
+    runner = FakeRunner(
+        claude_outputs=[("Error: timeout waiting for response", returncode)],
+        public_response_outputs=[valid],
+    )
+    usage = _new_usage_context(make_config(tmp_path, coder="claude"))
+    config = make_config(tmp_path, coder="claude")
+    outcome = _attempt_claude_completion_recovery(
+        runner, config=config, completion_recovery=CompletionRecoveryPolicy(issue_number=56),
+        session_id="sess-1", validate=_require_issue_implementation_result,
+        usage_context=usage, run_id="run-1", role=None, label=None, timeout_seconds=30.0,
+    )
+    assert outcome.validated is not None
+    assert outcome.validated.text == valid
+    assert outcome.validated.acquisition_returncode == returncode
+    assert outcome.validated.acquisition_outcome == (
+        "accepted_timeout" if returncode is None else "accepted_nonzero_exit"
+    )
+    assert outcome.terminal_public_response is None
+    assert runner.comments == []
+    assert usage.records[0].validation_status == "validated"
+
+
 def test_recovery_transport_failure_empty_output_synthesizes_unavailable(tmp_path):
     runner = FakeRunner(claude_outputs=[("", 0)])
     config = make_config(tmp_path, coder="claude")

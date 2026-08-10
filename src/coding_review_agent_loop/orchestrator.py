@@ -14,6 +14,7 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace as dataclasses_replace
 from pathlib import Path
+from typing import Literal
 
 from .agents.base import AgentName, AgentResult
 from .agents.antigravity import AntigravityAttemptState
@@ -446,6 +447,8 @@ class ValidatedAgentResponse:
     # Model the agent actually ran, for the dynamic signature (#332). Carried from
     # AgentResult.model_used so the orchestrator render sites can stamp it.
     model_used: str | None = None
+    acquisition_outcome: Literal["success", "accepted_nonzero_exit", "accepted_timeout"] = "success"
+    acquisition_returncode: int | None = None
 
 
 class _AgentUnavailableResponse(AgentLoopError):
@@ -1888,12 +1891,13 @@ def _attempt_claude_completion_recovery(
         label=label,
         timeout_seconds=timeout_seconds,
     )
+    recovery_usage_record = None
     if usage_context is not None:
         recovery_usage = _resolve_usage_metadata(
             config=config, prompt=recovery_prompt, result=recovery_result
         )
         if recovery_usage is not None:
-            usage_context.add_record(
+            recovery_usage_record = usage_context.add_record(
                 agent="claude",
                 session_id=recovery_result.session_id,
                 returncode=recovery_result.returncode,
@@ -1924,6 +1928,54 @@ def _attempt_claude_completion_recovery(
             terminal_public_response=rendered,
         )
 
+    # A response-file artifact is authoritative for this invocation even when
+    # the CLI reports a failed exit.  Do not consult stdout here: it may only
+    # contain diagnostics.  Invalid artifacts intentionally fall through to
+    # the existing terminal transport handling below.
+    recovery_artifact = recovery_result.response_file_text
+    if recovery_artifact:
+        try:
+            unavailable = parse_agent_unavailable(recovery_artifact)
+        except AgentLoopError:
+            unavailable = None
+        if unavailable is not None:
+            _post_completion_recovery_terminal_comment(
+                runner, config=config, completion_recovery=completion_recovery,
+                recovery_result=recovery_result, terminal_text=recovery_artifact,
+            )
+            return _CompletionRecoveryOutcome(
+                validated=None, result=recovery_result,
+                error=("agent explicitly reported it cannot continue after completion "
+                       f"recovery ({unavailable.category}): {unavailable.summary}"),
+                classification_text=recovery_artifact, failure_category="agent-unavailable",
+                terminal_public_response=recovery_artifact,
+            )
+        try:
+            marker_value = validate(recovery_artifact)
+        except AgentLoopError:
+            pass
+        else:
+            accepted_outcome = (
+                "accepted_timeout" if recovery_result.returncode is None
+                else "accepted_nonzero_exit" if recovery_result.returncode != 0 else "success"
+            )
+            if recovery_usage_record is not None:
+                recovery_usage_record.validation_status = "validated"
+                recovery_usage_record.outcome = accepted_outcome
+            if accepted_outcome != "success":
+                log(config, "claude completion-recovery accepted a valid response-file artifact "
+                    f"despite returncode={recovery_result.returncode!r}")
+            return _CompletionRecoveryOutcome(
+                validated=ValidatedAgentResponse(
+                    text=recovery_artifact, session_id=recovery_result.session_id,
+                    marker_value=marker_value, usage=recovery_usage,
+                    model_used=recovery_result.model_used,
+                    acquisition_outcome=accepted_outcome,
+                    acquisition_returncode=recovery_result.returncode,
+                ),
+                result=recovery_result, error="", classification_text="", failure_category="",
+                terminal_public_response=None,
+            )
     if recovery_result.returncode is None:
         limit = f" after {timeout_seconds:g}s" if timeout_seconds is not None else ""
         return _terminal(
@@ -2133,9 +2185,52 @@ def _run_validated_agent(
                 raw_backend_usage=result.raw_usage,
             )
 
+        # A backend always loads the uniquely assigned public response file.
+        # On a timeout/nonzero exit, that artifact can still be a complete
+        # response; stdout is diagnostics only and must never be salvaged.
+        artifact = result.response_file_text
+        artifact_unavailable = None
+        if artifact:
+            try:
+                artifact_unavailable = parse_agent_unavailable(artifact)
+            except AgentLoopError:
+                artifact_unavailable = None
+            if artifact_unavailable is None:
+                try:
+                    artifact_marker_value = validate(artifact)
+                except AgentLoopError:
+                    pass
+                else:
+                    acquisition_outcome = (
+                        "accepted_timeout" if result.returncode is None
+                        else "accepted_nonzero_exit" if result.returncode != 0 else "success"
+                    )
+                    if usage_record is not None:
+                        usage_record.validation_status = "validated"
+                        usage_record.outcome = acquisition_outcome
+                    if acquisition_outcome != "success":
+                        log(
+                            config,
+                            f"{agent_name}: accepted valid response-file artifact despite "
+                            f"returncode={result.returncode!r}",
+                        )
+                    return ValidatedAgentResponse(
+                        text=artifact,
+                        session_id=result.session_id,
+                        marker_value=artifact_marker_value,
+                        usage=usage,
+                        model_used=result.model_used,
+                        acquisition_outcome=acquisition_outcome,
+                        acquisition_returncode=result.returncode,
+                    )
+            else:
+                # Let the existing agent-unavailable policy handle the valid
+                # envelope, even when the command itself failed.
+                text = artifact
+
         should_retry = False
         provider_capacity = False
-        if result.returncode is None:
+        if result.returncode is None and artifact_unavailable is None:
             # Timed out (returncode=None from Runner.run_with_log). Detected
             # before transient classification: a kill deadline is not a
             # provider hiccup, so retrying or repairing would only waste the
@@ -2145,7 +2240,7 @@ def _run_validated_agent(
             last_classification_text = ""
             last_failure_category = "timeout"
             break
-        if result.returncode != 0:
+        if result.returncode != 0 and artifact_unavailable is None:
             last_error = f"agent command exited with {result.returncode}"
             classification_text = _agent_failure_classification_text(result, phase="command")
             last_classification_text = classification_text
@@ -3718,6 +3813,8 @@ def _implement_approved_issue(
                 subject=str(initial_pr_context.metadata.head_sha or "unknown"),
                 prior_items=(),
                 model_used=coder_response.model_used,
+                acquisition_outcome=coder_response.acquisition_outcome,
+                acquisition_returncode=coder_response.acquisition_returncode,
             ),
         ),
     )
@@ -3949,6 +4046,8 @@ def _run_plan_first_loop(
                     raw_structured_coder_response=raw_structured_coder_response,
                     compact_prior_summaries=tuple(compact_prior_summaries),
                     model_used=plan_response.model_used,
+                    acquisition_outcome=plan_response.acquisition_outcome,
+                    acquisition_returncode=plan_response.acquisition_returncode,
                 ),
             ),
         )
@@ -4037,6 +4136,8 @@ def _run_plan_first_loop(
             *,
             review_output: str,
             model_used: str | None,
+            acquisition_outcome: str = "success",
+            acquisition_returncode: int | None = None,
             new_items: tuple[UnresolvedReviewItem, ...] = (),
             phase: str = "authoritative",
         ) -> None:
@@ -4057,6 +4158,8 @@ def _run_plan_first_loop(
                         new_items=new_items, state=parsed.state,
                         compact_prior_summaries=tuple(compact_prior_summaries),
                         model_used=model_used, phase=phase,
+                        acquisition_outcome=acquisition_outcome,
+                        acquisition_returncode=acquisition_returncode,
                         canonical_reviewer_response=(review_output if phase == "publication" else None),
                     ),
                 ),
@@ -4145,7 +4248,10 @@ def _run_plan_first_loop(
                         return
                     _post_plan_reviewer_comment(
                         reviewer_name, parsed, review_output=turn.response.text,
-                        model_used=turn.response.model_used, phase="publication",
+                        model_used=turn.response.model_used,
+                        acquisition_outcome=turn.response.acquisition_outcome,
+                        acquisition_returncode=turn.response.acquisition_returncode,
+                        phase="publication",
                     )
                     early_published_plan_reviewers.add(reviewer)
 
@@ -4965,6 +5071,8 @@ def _run_plan_first_loop(
                     raw_structured_coder_response=raw_structured_coder_response,
                     compact_prior_summaries=tuple(compact_prior_summaries),
                     model_used=plan_response.model_used,
+                    acquisition_outcome=plan_response.acquisition_outcome,
+                    acquisition_returncode=plan_response.acquisition_returncode,
                 ),
             ),
         )
@@ -5143,6 +5251,8 @@ def run_issue_loop(
                     subject=str(initial_pr_metadata.head_sha or "unknown"),
                     prior_items=(),
                     model_used=coder_response.model_used,
+                    acquisition_outcome=coder_response.acquisition_outcome,
+                    acquisition_returncode=coder_response.acquisition_returncode,
                 ),
             ),
         )
@@ -5268,6 +5378,8 @@ def run_task_loop(
                             subject=str(initial_pr_metadata.head_sha or "unknown"),
                             prior_items=(),
                             model_used=coder_response.model_used,
+                            acquisition_outcome=coder_response.acquisition_outcome,
+                            acquisition_returncode=coder_response.acquisition_returncode,
                         ),
                     ),
                 )
@@ -5559,9 +5671,11 @@ def run_pr_loop(
                 reviewer_name: str,
                 parsed: ParsedReview,
                 *,
-                review_output: str,
-                model_used: str | None,
-                new_items: tuple[UnresolvedReviewItem, ...] = (),
+            review_output: str,
+            model_used: str | None,
+            acquisition_outcome: str = "success",
+            acquisition_returncode: int | None = None,
+            new_items: tuple[UnresolvedReviewItem, ...] = (),
                 phase: str = "authoritative",
             ) -> None:
                 """Post one PR review using the same rendering and durable record."""
@@ -5579,6 +5693,8 @@ def run_pr_loop(
                             round_number=round_number, subject=current_pr_subject,
                             prior_items=prior_unresolved_items, dispositions=parsed.dispositions,
                             new_items=new_items, state=parsed.state, model_used=model_used,
+                            acquisition_outcome=acquisition_outcome,
+                            acquisition_returncode=acquisition_returncode,
                             surfaced_reviewer_requirement_ids=surfaced_reviewer_requirement_ids,
                             phase=phase,
                             canonical_reviewer_response=(review_output if phase == "publication" else None),
@@ -5744,7 +5860,10 @@ def run_pr_loop(
                                 return
                             _post_pr_reviewer_comment(
                                 reviewer_name, parsed, review_output=turn.response.text,
-                                model_used=turn.response.model_used, phase="publication",
+                                model_used=turn.response.model_used,
+                                acquisition_outcome=turn.response.acquisition_outcome,
+                                acquisition_returncode=turn.response.acquisition_returncode,
+                                phase="publication",
                             )
                             early_published_pr_reviewers.add(reviewer)
 
@@ -6969,8 +7088,10 @@ def run_pr_loop(
                         subject=str(updated_pr_context.metadata.head_sha or "unknown"),
                         prior_items=tuple(unresolved_items),
                         raw_structured_coder_response=raw_structured_coder_response,
-                        compact_prior_summaries=tuple(pr_compact_prior_summaries),
-                        model_used=coder_response.model_used,
+                    compact_prior_summaries=tuple(pr_compact_prior_summaries),
+                    model_used=coder_response.model_used,
+                    acquisition_outcome=coder_response.acquisition_outcome,
+                    acquisition_returncode=coder_response.acquisition_returncode,
                     ),
                 ),
             )

@@ -79,6 +79,9 @@ def public_response_path(
     *,
     root: Path | None = None,
 ) -> Path:
+    # Every invocation gets a new path.  Backends read only this path after
+    # their command returns, so an artifact from an earlier invocation cannot
+    # be mistaken for the current response.
     base_dir = (
         root
         if root is not None
@@ -123,6 +126,7 @@ writing this file results in a review failure.
 
 
 def read_public_response_file(response_path: Path) -> str | None:
+    # A missing or whitespace-only file is deliberately not an artifact.
     try:
         text = response_path.read_text(encoding="utf-8")
     except FileNotFoundError:

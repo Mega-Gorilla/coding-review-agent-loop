@@ -3032,7 +3032,9 @@ def test_plan_revision_quota_failure_reports_response_file_without_recording(tmp
                 blocking_plan_issues=["Missing a regression test."],
             )
         ],
-        public_response_outputs=["", "", valid_revision],
+        # A failed exit may only be salvaged when its current-attempt artifact
+        # passes the normal revision validator.
+        public_response_outputs=["", "", "partial revision"],
     )
     config = make_config(tmp_path, agent_max_retries=0)
 
