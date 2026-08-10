@@ -4913,9 +4913,9 @@ def test_claude_review_loop_accepts_valid_response_file_after_nonzero_exit(tmp_p
                 json.dumps(
                     {
                         "result": (
-                        "I will inspect the PR diff.\n"
-                        "Tool output chatter should not be posted.\n"
-                    ),
+                            "I will inspect the PR diff.\n"
+                            "Tool output chatter should not be posted.\n"
+                        ),
                         "session_id": "claude-session-1",
                     }
                 ),
