@@ -418,6 +418,17 @@ def test_rejects_incomplete_url_scheme_token(tmp_path):
         validate_test_commands_within_workdir((command,), assigned_workdir=_assigned(tmp_path))
 
 
+def test_rejects_nested_scheme_hiding_behind_loopback_fragment(tmp_path):
+    # The outer "http://" scheme can't supply any characters to its own URL
+    # value because the next chars start a nested "https://" scheme, so a
+    # naive "only judge whatever _url_values found" check would evaluate
+    # just the inner "https://localhost" fragment (loopback) and miss that
+    # the outer target itself is unverifiable.
+    command = "E2E_BASE=http://https://localhost node tests/test_e2e.js"
+    with pytest.raises(AgentLoopError, match="live remote target"):
+        validate_test_commands_within_workdir((command,), assigned_workdir=_assigned(tmp_path))
+
+
 REJECTED_NARRATIVE_URLS = [
     "Tests: hit https://live.example/health",
     "Tests: curled https://live.example/health",

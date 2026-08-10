@@ -153,6 +153,28 @@ def _url_values(token: str) -> tuple[str, ...]:
     )
 
 
+def _has_unmatched_url_scheme(token: str) -> bool:
+    """True if a `https?://` occurrence in ``token`` is not the start of any
+    `URL_VALUE_RE` match.
+
+    This catches both a bare/incomplete scheme with no host at all
+    (`_url_values` yields nothing for it, e.g. a lone "http://") and a
+    scheme immediately followed by a *nested* scheme (e.g.
+    "http://https://localhost"): the outer "http://" can supply zero
+    characters to `URL_VALUE_RE`'s mandatory `+` group because the negative
+    lookahead refuses to let it consume into the nested "https://", so the
+    only match `_url_values` finds is the *inner* URL. Evaluating just that
+    inner fragment for loopback-ness (as opposed to the outer scheme's own,
+    unrelated host) would let a non-loopback outer target hide behind a
+    loopback-looking inner fragment.
+    """
+    text = _strip_wrap(token)
+    matched_starts = {match.start() for match in URL_VALUE_RE.finditer(text)}
+    return any(
+        match.start() not in matched_starts for match in URL_SCHEME_RE.finditer(text)
+    )
+
+
 def _is_loopback_url(url: str) -> bool:
     # WHATWG URL consumers (Node, browsers, and browser-driven E2E clients)
     # treat a backslash as a path separator for special schemes like
@@ -775,17 +797,19 @@ def _validate_single_command(command: str, *, assigned: Path, origin: Origin) ->
 
     for clause in clauses:
         for target in _url_targets_in_clause(clause):
-            values = _url_values(target)
-            if not values and _is_url_token(target):
-                # A bare/incomplete scheme like "http://" has no extractable
-                # host for `_url_values` to yield, but it is still URL-shaped
-                # command syntax; treat it as unverifiable rather than
-                # silently skipping validation for it.
+            if _has_unmatched_url_scheme(target):
+                # A scheme occurrence that produced no (or the wrong)
+                # matched URL value -- a bare "http://" with no host, or an
+                # outer scheme immediately followed by a nested one such as
+                # "http://https://localhost" -- is unverifiable rather than
+                # provably loopback; treat it as a live target instead of
+                # silently skipping it or judging it by an unrelated inner
+                # fragment.
                 raise AgentLoopError(
                     "Coder reported tests run against a live remote target: "
                     f"{target!r} in command {command!r}. Assigned checkout: {assigned}"
                 )
-            for url in values:
+            for url in _url_values(target):
                 if _is_loopback_url(url):
                     continue
                 raise AgentLoopError(
