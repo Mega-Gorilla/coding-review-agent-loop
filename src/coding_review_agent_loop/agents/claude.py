@@ -97,7 +97,7 @@ _UPDATER_DIAGNOSTIC_RE = re.compile(
     r"(?:^(?:error|fatal).*?(?:auto-update|self-update|update failed|update in progress)|"
     r"^(?:Installing|Updating|Updated) Claude Code|"
     r"^(?:error|fatal).*?(?:npm (?:install|update)).*@anthropic-ai/claude-code)",
-    re.IGNORECASE,
+    re.IGNORECASE | re.MULTILINE,
 )
 
 
@@ -136,12 +136,16 @@ def classify_self_update_interruption(
                 return None
         except json.JSONDecodeError:
             pass
-    diagnostic = _has_updater_diagnostic(result.stdout)
+    if _has_updater_diagnostic(result.stdout):
+        return "Claude Code updater diagnostic"
+    # A user-supplied absolute override is only eligible with an explicit
+    # updater diagnostic.  A managed bare command may additionally prove the
+    # race through an identity change while it was running.
     if os.path.isabs(command):
-        return "Claude Code updater diagnostic" if diagnostic else None
+        return None
     if _identity_changed(observation.before, observation.after, spawn_wall=observation.spawn_wall_time, exit_wall=observation.spawn_wall_time + observation.elapsed_seconds):
         return "Claude executable changed during invocation"
-    return "Claude Code updater diagnostic" if diagnostic else None
+    return None
 
 
 class ClaudeBackend:

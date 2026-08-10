@@ -3,6 +3,7 @@ import datetime
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -31,6 +32,7 @@ from coding_review_agent_loop.config import (
 )
 from coding_review_agent_loop.errors import AgentInvocationError, QuotaResetExceededError
 from coding_review_agent_loop.github import IssueComment
+from coding_review_agent_loop.runner import CommandResult, ExecutableIdentity, ExecutionObservation
 from coding_review_agent_loop.orchestrator import (
     PostedRoundMetadata,
     ValidatedAgentResponse,
@@ -3436,6 +3438,98 @@ def test_public_response_file_instruction_mentions_plan_revision_human_ack_excep
 # --- Integration tests via _run_validated_agent ---
 
 
+def test_claude_self_update_replay_recovers_valid_response_with_remaining_timeout(tmp_path):
+    """A spawned updater interruption gets one stable, bounded full replay."""
+    identity = ExecutableIdentity("claude", "claude", (1, 1, 1), (1, 1, 1))
+    observation = ExecutionObservation(
+        spawn_wall_time=1,
+        spawn_monotonic=time.monotonic() - 1,
+        exit_monotonic=time.monotonic(),
+        elapsed_seconds=1,
+        before=identity,
+        after=identity,
+        interrupted=False,
+    )
+
+    class ObservedClaudeRunner(FakeRunner):
+        def __init__(self):
+            super().__init__(claude_outputs=[
+                ("Loading...\nInstalling Claude Code v2.1.226", 1),
+                (structured_pr_review(state="approved", summary="Recovered.", reviewer="Anthropic Claude"), 0),
+            ])
+            self.timeouts = []
+
+        def run_with_log(self, *args, timeout_seconds=None, **kwargs):
+            self.timeouts.append(timeout_seconds)
+            result = super().run_with_log(*args, timeout_seconds=timeout_seconds, **kwargs)
+            if result.args[:1] == ["claude"]:
+                return CommandResult(
+                    result.args, result.cwd, result.stdout, result.stderr, result.returncode, observation
+                )
+            return result
+
+        def wait_for_executable_stability(self, command, *, deadline=None):
+            assert command == "claude"
+            assert deadline is not None
+            return True
+
+    runner = ObservedClaudeRunner()
+    config = make_config(tmp_path, reviewer="claude", agent_max_retries=0)
+    response = _run_validated_agent(
+        runner,
+        agent="claude",
+        config=config,
+        prompt="Review the PR.",
+        marker_description="<!-- AGENT_STATE: approved|blocking -->",
+        validate=lambda text: _validate_review_response(
+            text, reviewer="Anthropic Claude", unresolved_items=()
+        ),
+        timeout_seconds=12,
+    )
+
+    assert response.marker_value.state == "approved"
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]) == 2
+    assert runner.timeouts[0] == 12
+    assert 0 < runner.timeouts[1] < 12
+
+
+def test_claude_self_update_stability_failure_preserves_ordinary_retry_budget(tmp_path):
+    """A transient updater failure still receives the configured ordinary retry."""
+    identity = ExecutableIdentity("claude", "claude", (1, 1, 1), (1, 1, 1))
+    observation = ExecutionObservation(1, time.monotonic(), time.monotonic(), 1, identity, identity, False)
+
+    class UnstableClaudeRunner(FakeRunner):
+        def run_with_log(self, *args, **kwargs):
+            result = super().run_with_log(*args, **kwargs)
+            if result.args[:1] == ["claude"]:
+                return CommandResult(
+                    result.args, result.cwd, result.stdout, result.stderr, result.returncode, observation
+                )
+            return result
+
+        def wait_for_executable_stability(self, command, *, deadline=None):
+            return False
+
+    runner = UnstableClaudeRunner(claude_outputs=[
+        ("fatal: auto-update in progress\noverloaded_error", 1),
+        (structured_pr_review(state="approved", summary="Recovered by ordinary retry.", reviewer="Anthropic Claude"), 0),
+    ])
+    config = make_config(tmp_path, reviewer="claude", agent_max_retries=1)
+    response = _run_validated_agent(
+        runner,
+        agent="claude",
+        config=config,
+        prompt="Review the PR.",
+        marker_description="<!-- AGENT_STATE: approved|blocking -->",
+        validate=lambda text: _validate_review_response(
+            text, reviewer="Anthropic Claude", unresolved_items=()
+        ),
+    )
+
+    assert response.marker_value.state == "approved"
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:1] == ["claude"]]) == 2
+
+
 # ---------------------------------------------------------------------------
 # Antigravity (agy) backend + Gemini retirement guidance (#215)
 # ---------------------------------------------------------------------------
@@ -3467,6 +3561,35 @@ def test_runner_pty_reports_tty_and_strips_ansi(tmp_path):
     assert "GREEN" in result.stdout
     assert "\x1b[" not in result.stdout  # ANSI stripped from captured output
     assert result.returncode == 0
+
+
+@pytest.mark.parametrize("use_pty", [False, True])
+def test_runner_execution_observation_elapsed_begins_at_spawn(tmp_path, use_pty):
+    """Pipe and PTY observations use the same post-spawn elapsed interval."""
+    result = Runner().run_with_log(
+        [sys.executable, "-c", "print('done')"],
+        cwd=tmp_path,
+        log_path=tmp_path / "logs" / f"observation-{use_pty}.log",
+        label="Observation probe",
+        progress_interval_seconds=999,
+        use_pty=use_pty,
+    )
+
+    assert result.observation is not None
+    assert result.observation.elapsed_seconds == (
+        result.observation.exit_monotonic - result.observation.spawn_monotonic
+    )
+
+
+def test_wait_for_executable_stability_accepts_absolute_command_with_matching_identity(monkeypatch, tmp_path):
+    """Explicit updater diagnostics may recover an absolute Claude override."""
+    import coding_review_agent_loop.runner as runner_module
+
+    command = str(tmp_path / "claude")
+    identity = ExecutableIdentity(command, command, (1, 1, 1), (1, 1, 1))
+    monkeypatch.setattr(runner_module, "executable_identity", lambda _command: identity)
+
+    assert Runner().wait_for_executable_stability(command)
 
 
 def test_runner_with_log_passes_large_input_on_stdin(tmp_path):

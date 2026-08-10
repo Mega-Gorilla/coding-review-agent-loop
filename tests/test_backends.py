@@ -91,7 +91,7 @@ def test_claude_self_update_classification_requires_bounded_evidence():
     assert classify_self_update_interruption(
         ordinary, command="claude", response_file_text=None, session_id=None
     ) is None
-    diagnostic = CommandResult(["claude"], Path.cwd(), "fatal: auto-update in progress", "", 1,
+    diagnostic = CommandResult(["claude"], Path.cwd(), "Loading...\nInstalling Claude Code v2.1.226", "", 1,
                                ExecutionObservation(2, 10, 11, 1, identity, identity, False))
     assert classify_self_update_interruption(
         diagnostic, command="claude", response_file_text=None, session_id=None

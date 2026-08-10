@@ -2163,6 +2163,7 @@ def _run_validated_agent(
     updater_replay_used = False
     ordinary_retries_used = 0
     self_update_deadline: float | None = None
+    self_update_stability_error: str | None = None
     next_timeout_seconds = timeout_seconds
 
     for attempt in range(1, max_attempts + 1):
@@ -2277,23 +2278,22 @@ def _run_validated_agent(
                 if self_update_deadline is not None else None
             )
             if not stable or (remaining is not None and remaining <= 0):
-                last_error = (
+                self_update_stability_error = (
                     f"likely Claude self-update interruption ({result.self_update_reason}); "
                     "executable did not stabilize within the invocation deadline"
                 )
-                last_classification_text = result.raw_output
-                last_failure_category = "self-update-interruption"
                 if usage_record is not None:
                     usage_record.outcome = "self_update_interruption"
                     usage_record.log_path = str(result.log_path) if result.log_path else None
-                break
-            if usage_record is not None:
-                usage_record.outcome = "self_update_interruption"
-                usage_record.log_path = str(result.log_path) if result.log_path else None
-            next_timeout_seconds = remaining
-            log(config, f"{agent_name}: {result.self_update_reason}; replaying once after executable stability")
-            continue
-
+                # Preserve any ordinary transient retry allowance: a failed
+                # stability observation does not make provider errors final.
+            else:
+                if usage_record is not None:
+                    usage_record.outcome = "self_update_interruption"
+                    usage_record.log_path = str(result.log_path) if result.log_path else None
+                next_timeout_seconds = remaining
+                log(config, f"{agent_name}: {result.self_update_reason}; replaying once after executable stability")
+                continue
         should_retry = False
         provider_capacity = False
         if result.returncode is None and artifact_unavailable is None:
@@ -2837,10 +2837,20 @@ def _run_validated_agent(
                     ordinary_retries_used += 1
                 delay = _retry_delay(config, attempt)
                 category = last_failure_category
+                retry_attempt = (
+                    ordinary_retries_used + 1
+                    if antigravity_attempts is None
+                    else attempt + 1
+                )
+                retry_budget = (
+                    config.agent_max_retries + 1
+                    if antigravity_attempts is None
+                    else max_attempts
+                )
                 log(
                     config,
                     f"{agent_name}: {category} failure ({last_error}); "
-                    f"retrying in {delay}s (attempt {attempt + 1}/{max_attempts})",
+                    f"retrying in {delay}s (attempt {retry_attempt}/{retry_budget})",
                 )
                 runner.run(("sleep", str(delay)), cwd=active_workdir(config))
                 continue
@@ -2854,6 +2864,8 @@ def _run_validated_agent(
                 continue
         break
 
+    if self_update_stability_error is not None:
+        last_error = f"{self_update_stability_error}; final failure: {last_error}"
     diagnostics = _failed_run_diagnostics(
         runner=runner,
         config=config,

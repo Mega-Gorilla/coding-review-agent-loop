@@ -225,7 +225,7 @@ class Runner:
 
     def wait_for_executable_stability(self, command: str, *, deadline: float | None = None) -> bool:
         """Observe two matching command identities a second apart, for at most six seconds."""
-        if os.path.isabs(command) or self._interrupted:
+        if self._interrupted:
             return False
         end = min(deadline, time.monotonic() + 6) if deadline is not None else time.monotonic() + 6
         previous: ExecutableIdentity | None = None
@@ -399,7 +399,7 @@ class Runner:
         exited = time.monotonic()
         result = CommandResult(cmd, cwd, output, "", returncode, ExecutionObservation(
             spawn_wall_time, spawn_monotonic,
-            exited, exited - started, before_identity, executable_identity(cmd[0]), self._interrupted,
+            exited, exited - spawn_monotonic, before_identity, executable_identity(cmd[0]), self._interrupted,
         ))
         if check and returncode != 0:
             raise AgentLoopError(
