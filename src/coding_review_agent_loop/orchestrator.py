@@ -132,6 +132,7 @@ from .protocol import (
     ApprovedFollowups,
     DISCUSS_FAILED_OUTCOME,
     DISCUSS_RESEARCH_TARGET_VALUES,
+    ChildStage,
     DeferredStage,
     HUMAN_REQUIREMENTS_ADDRESSED_MARKER,
     ParsedDiscussAgenda,
@@ -3361,14 +3362,14 @@ def _extract_current_deferred_stages(current_plan: str) -> tuple[DeferredStage, 
     return tuple(stages)
 
 
-def _extract_current_child_stages(current_plan: str) -> tuple[DeferredStage, ...]:
+def _extract_current_child_stages(current_plan: str) -> tuple[ChildStage, ...]:
     """Return only explicitly typed child stages; legacy entries are record-only."""
     try:
         structured = validate_structured_plan_state(current_plan)
     except AgentLoopError:
         structured = None
     if structured is not None:
-        return tuple(DeferredStage(item.title, item.summary) for item in structured.typed_stages.child_stages)
+        return structured.typed_stages.child_stages
     marker = re.search(r"<!--\s*AGENT_TYPED_PLAN_STAGES:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->", current_plan, re.I)
     if not marker:
         return ()
@@ -3377,9 +3378,57 @@ def _extract_current_child_stages(current_plan: str) -> tuple[DeferredStage, ...
         children = payload.get("child_stages", [])
         if not isinstance(children, list):
             return ()
-        return tuple(DeferredStage(str(item["title"]), str(item["summary"])) for item in children if isinstance(item, dict) and isinstance(item.get("title"), str) and isinstance(item.get("summary"), str))
+        return tuple(
+            ChildStage(str(item["title"]), str(item["summary"]))
+            for item in children
+            if isinstance(item, dict)
+            and isinstance(item.get("title"), str)
+            and isinstance(item.get("summary"), str)
+        )
     except AgentLoopError:
         return ()
+
+
+def _log_typed_plan_stage_dispositions(current_plan: str, *, config: AgentLoopConfig) -> None:
+    """Make the record-only typed categories visible in CLI output (#585)."""
+    try:
+        structured = validate_structured_plan_state(current_plan)
+    except AgentLoopError:
+        structured = None
+    if structured is not None:
+        categories = (
+            ("linked dependency", structured.typed_stages.external_dependencies),
+            ("recorded-only deferred work", structured.typed_stages.deferred_work),
+            ("recorded-only plan action", structured.typed_stages.plan_actions),
+        )
+        for disposition, entries in categories:
+            for entry in entries:
+                log(config, f"Plan scope: {disposition}: {entry.title}.")
+        return
+    marker = re.search(
+        r"<!--\s*AGENT_TYPED_PLAN_STAGES:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->",
+        current_plan,
+        re.I,
+    )
+    if not marker:
+        return
+    try:
+        payload = _decode_json_payload(
+            marker.group("payload"), marker_name="AGENT_TYPED_PLAN_STAGES"
+        )
+    except AgentLoopError:
+        return
+    for field, disposition in (
+        ("external_dependencies", "linked dependency"),
+        ("deferred_work", "recorded-only deferred work"),
+        ("plan_actions", "recorded-only plan action"),
+    ):
+        entries = payload.get(field, [])
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            if isinstance(entry, dict) and isinstance(entry.get("title"), str):
+                log(config, f"Plan scope: {disposition}: {entry['title']}.")
 
 
 def _prior_discuss_split_proposals(
@@ -3459,6 +3508,7 @@ def _handle_plan_first_split_scope(
     """
     current_deferred_stages = _extract_current_deferred_stages(current_plan)
     current_child_stages = _extract_current_child_stages(current_plan)
+    _log_typed_plan_stage_dispositions(current_plan, config=config)
     prior_discuss_proposals = _prior_discuss_split_proposals(issue_context, config=config)
     if current_child_stages or current_deferred_stages:
         # This plan structurally declares its own deferred_stages, so it keeps

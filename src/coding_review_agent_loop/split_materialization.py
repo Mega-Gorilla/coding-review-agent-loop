@@ -1,10 +1,9 @@
-"""Materialize discuss `split` proposals and plan `deferred_stages` into child issues (#476).
+"""Materialize discuss `split` proposals and typed plan child stages into child issues (#476).
 
 When a discuss consensus lands on `outcome: split`, or an approved plan-first
-plan narrows scope via `deferred_stages`, the proposed follow-up work should
-not remain text buried in issue comments: it should become concrete GitHub
-issues linked back to the parent, so an implementation run that scopes down to
-one stage cannot silently leave the rest unfiled.
+plan names explicit `child_stages`, the bounded implementation work should not
+remain text buried in issue comments: it becomes concrete GitHub issues linked
+back to the parent.
 """
 
 from __future__ import annotations
@@ -19,15 +18,10 @@ from .decomposition import _decode_json_payload, _encode_json_payload, _issue_nu
 from .errors import AgentLoopError
 from .github import FoundIssue, create_issue, post_issue_comment, search_issues
 from .logging import log
-from .protocol import DeferredStage
+from .protocol import ChildStage, DeferredStage, ISSUE_REFERENCE_RE, TRACKER_ACTION_TITLE_RE
 from .runner import Runner
 
 MAX_SPLIT_CHILDREN = 8
-_ISSUE_REFERENCE_RE = re.compile(r"(?:\B#[1-9]\d*\b|github\.com/[^/\s]+/[^/\s]+/issues/[1-9]\d*\b|[\w.-]+/[\w.-]+#[1-9]\d*\b)", re.I)
-_TRACKER_ACTION_TITLE_RE = re.compile(
-    r"^(?:post|after)[ -]?approval.*\b(?:creat|fil|materializ).*\bchild issue", re.I
-)
-
 DISCUSS_SPLIT_MARKER_RE = re.compile(
     r"<!--\s*AGENT_DISCUSS_SPLIT:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->",
     re.I,
@@ -54,6 +48,7 @@ class SplitStageProposal:
     title: str
     body: str
     key: str
+    typed_child: bool = False
 
 
 @dataclass(frozen=True)
@@ -99,8 +94,13 @@ def split_stage_proposal_from_text(text: str) -> SplitStageProposal:
     return SplitStageProposal(title=title, body=text.strip(), key=_stage_key(title))
 
 
-def split_stage_proposal_from_deferred_stage(stage: DeferredStage) -> SplitStageProposal:
-    return SplitStageProposal(title=stage.title, body=stage.summary, key=_stage_key(stage.title))
+def split_stage_proposal_from_deferred_stage(stage: DeferredStage | ChildStage) -> SplitStageProposal:
+    return SplitStageProposal(
+        title=stage.title,
+        body=stage.summary,
+        key=_stage_key(stage.title),
+        typed_child=isinstance(stage, ChildStage),
+    )
 
 
 def dedupe_split_stage_proposals(
@@ -313,6 +313,21 @@ def _adopt_from_search(
             key = _stage_key(_strip_child_title_prefix(found.title, parent_issue))
         if key in remaining_keys and key not in by_key:
             by_key[key] = found
+    # Also adopt a canonical child that was created by another workflow and
+    # therefore lacks our parent marker/prefix. This deterministic normalized
+    # title check prevents the #479-style duplicate placeholders.
+    for proposal in remaining:
+        if proposal.key in by_key:
+            continue
+        for found in search_issues(
+            runner,
+            config=config,
+            search=f'"{proposal.title}" in:title',
+            state="all",
+        ):
+            if found.title and _stage_key(found.title) == proposal.key:
+                by_key[proposal.key] = found
+                break
     return by_key
 
 
@@ -336,13 +351,16 @@ def materialize_split_proposals(
     if not deduped:
         return None
 
-    # Do this before the first create so a malformed approved plan cannot
-    # partially materialize placeholders.  Typed dependencies/actions never
-    # reach this function, but the guard also protects programmatic callers.
+    # Do this before the first create so a malformed typed plan cannot
+    # partially materialize placeholders. Free-form discuss proposals remain
+    # eligible even when their explanatory prose references a parent issue.
     rejected = [
         proposal.title for proposal in deduped
-        if _ISSUE_REFERENCE_RE.search(proposal.title + "\n" + proposal.body)
-        or _TRACKER_ACTION_TITLE_RE.match(" ".join(proposal.title.split()))
+        if proposal.typed_child
+        and (
+            ISSUE_REFERENCE_RE.search(proposal.title + "\n" + proposal.body)
+            or TRACKER_ACTION_TITLE_RE.match(" ".join(proposal.title.split()))
+        )
     ]
     if rejected:
         raise AgentLoopError(
@@ -417,6 +435,14 @@ def materialize_split_proposals(
         )
         new_children.append(child)
         resolved_so_far.append(child)
+
+    for child in new_children:
+        location = child.url or (f"#{child.number}" if child.number is not None else "unavailable")
+        log(
+            config,
+            f"Split materialization for issue #{parent_issue}: {child.origin} child "
+            f"{child.title!r} ({location}).",
+        )
 
     if skipped:
         skipped_titles = ", ".join(proposal.title for proposal in skipped)

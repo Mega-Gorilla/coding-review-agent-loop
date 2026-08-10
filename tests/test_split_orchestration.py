@@ -100,6 +100,36 @@ def test_plan_first_materializes_explicit_child_stages_before_implementation(tmp
     assert "Fixes #56" in runner.pr_payload["body"]
 
 
+def test_470_legacy_deferred_stages_are_recorded_without_placeholder_children(tmp_path):
+    """Regression for #470: overloaded legacy entries must never be filed."""
+    runner = FakeRunner(
+        pr_payload={"body": "Fixes #470"},
+        claude_outputs=[
+            structured_plan_state(
+                state="blocking",
+                summary="Implement the approved scope.",
+                deferred_stages=[
+                    {"title": "Post-approval child issue materialization", "summary": "Tracker action."},
+                    {"title": "#481", "summary": "Existing external gate."},
+                    {"title": "Stage 4", "summary": "Future work."},
+                ],
+            ),
+            "Implemented approved plan.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
+        ],
+        codex_outputs=[
+            structured_plan_review(state="approved"),
+            structured_pr_review(state="approved", summary="LGTM."),
+        ],
+    )
+
+    assert run_issue_loop(
+        runner, issue_number=470, config=make_config(tmp_path, materialize_split_issues=True),
+        plan_first=True, implement_after_approval=True,
+    ) == 0
+
+    assert runner.issues == []
+
+
 def test_plan_first_child_stage_title_with_colon_round_trips_through_canonical_markdown(tmp_path):
     """A revised plan's `deferred_stages` are carried in `current_plan` as the
     canonical revision markdown (not the raw structured JSON), which renders

@@ -252,7 +252,6 @@ class ChildStage:
 
     title: str
     summary: str
-    allow_action_title: bool = False
 
 
 @dataclass(frozen=True)
@@ -263,7 +262,17 @@ class TypedPlanStages:
     external_dependencies: tuple[DeferredStage, ...] = ()
     deferred_work: tuple[DeferredStage, ...] = ()
     plan_actions: tuple[DeferredStage, ...] = ()
-    legacy_parent_owned_scope: bool = False
+
+
+# Shared classification rules for typed plan validation and materialization.
+ISSUE_REFERENCE_RE = re.compile(
+    r"(?:\B#[1-9]\d*\b|github\.com/[^/\s]+/[^/\s]+/issues/[1-9]\d*\b|[\w.-]+/[\w.-]+#[1-9]\d*\b)",
+    re.I,
+)
+TRACKER_ACTION_TITLE_RE = re.compile(
+    r"^(?:post|after)[ -]?approval.*(?:\b(?:creat|fil|materializ).*\bchild issue|\bchild issue.*\bmaterializ)",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -975,49 +984,62 @@ def _expect_typed_plan_stages(payload: dict[str, object], *, context: str) -> Ty
     """
     categories = ("child_stages", "external_dependencies", "deferred_work", "plan_actions")
     present = [name for name in categories if name in payload]
-    legacy = _expect_deferred_stage_list(payload, "deferred_stages", context=f"{context}.deferred_stages")
+    _expect_deferred_stage_list(payload, "deferred_stages", context=f"{context}.deferred_stages")
     if not present:
-        return TypedPlanStages(deferred_work=legacy, legacy_parent_owned_scope=bool(legacy))
+        return TypedPlanStages()
 
-    def stages(name: str, *, children: bool = False) -> tuple[DeferredStage, ...] | tuple[ChildStage, ...]:
+    def child_stages() -> tuple[ChildStage, ...]:
+        value = payload.get("child_stages", [])
+        if not isinstance(value, list):
+            raise AgentLoopError(f"{context}.child_stages must be a JSON array.")
+        result: list[ChildStage] = []
+        for index, item in enumerate(value):
+            item_context = f"{context}.child_stages at index {index}"
+            obj = _expect_object(item, context=item_context)
+            _expect_exact_keys(obj, context=item_context, required={"title", "summary"})
+            title = _expect_non_empty_string(obj["title"], context=f"{item_context}.title")
+            summary = _expect_non_empty_string(obj["summary"], context=f"{item_context}.summary")
+            if ISSUE_REFERENCE_RE.search(title + "\n" + summary):
+                raise AgentLoopError(f"{item_context} references an existing issue; use external_dependencies.")
+            if TRACKER_ACTION_TITLE_RE.match(" ".join(title.split())):
+                raise AgentLoopError(f"{item_context} is a tracker action; use plan_actions.")
+            result.append(ChildStage(title, summary))
+        return tuple(result)
+
+    def recorded_stages(name: str) -> tuple[DeferredStage, ...]:
         value = payload.get(name, [])
         if not isinstance(value, list):
             raise AgentLoopError(f"{context}.{name} must be a JSON array.")
-        result: list[DeferredStage] | list[ChildStage] = []
+        result: list[DeferredStage] = []
         for index, item in enumerate(value):
             item_context = f"{context}.{name} at index {index}"
             obj = _expect_object(item, context=item_context)
-            allowed = {"title", "summary", "allow_action_title"} if children else {"title", "summary"}
-            _expect_exact_keys(obj, context=item_context, required={"title", "summary"}, optional=allowed - {"title", "summary"})
+            _expect_exact_keys(obj, context=item_context, required={"title", "summary"})
             title = _expect_non_empty_string(obj["title"], context=f"{item_context}.title")
             summary = _expect_non_empty_string(obj["summary"], context=f"{item_context}.summary")
-            if children:
-                allow = obj.get("allow_action_title", False)
-                if not isinstance(allow, bool):
-                    raise AgentLoopError(f"{item_context}.allow_action_title must be a boolean.")
-                reference = re.search(r"(?:\B#[1-9]\d*\b|github\.com/[^/\s]+/[^/\s]+/issues/[1-9]\d*\b|[\w.-]+/[\w.-]+#[1-9]\d*\b)", title + "\n" + summary, re.I)
-                action = re.match(r"^(?:post|after)[ -]?approval.*\b(?:creat|fil|materializ).*\bchild issue", " ".join(title.split()), re.I)
-                if reference:
-                    raise AgentLoopError(f"{item_context} references an existing issue; use external_dependencies.")
-                if action and not allow:
-                    raise AgentLoopError(f"{item_context} is a tracker action; use plan_actions or set allow_action_title for implementation work.")
-                result.append(ChildStage(title, summary, allow))  # type: ignore[arg-type]
-            else:
-                result.append(DeferredStage(title, summary))  # type: ignore[arg-type]
+            result.append(DeferredStage(title, summary))
         return tuple(result)
 
-    child_stages = stages("child_stages", children=True)
-    dependencies = stages("external_dependencies")
-    deferred = stages("deferred_work")
-    actions = stages("plan_actions")
+    child_stages = child_stages()
+    dependencies = recorded_stages("external_dependencies")
+    deferred = recorded_stages("deferred_work")
+    actions = recorded_stages("plan_actions")
     seen: dict[str, str] = {}
-    for category, entries in (("child_stages", child_stages), ("external_dependencies", dependencies), ("deferred_work", deferred), ("plan_actions", actions)):
+    for category, entries in (
+        ("child_stages", child_stages),
+        ("external_dependencies", dependencies),
+        ("deferred_work", deferred),
+        ("plan_actions", actions),
+    ):
         for entry in entries:
             key = " ".join(entry.title.casefold().split())
             if key in seen:
-                raise AgentLoopError(f"{context} has a duplicate title in {seen[key]} and {category}: {entry.title!r}.")
+                raise AgentLoopError(
+                    f"{context} has a duplicate title in {seen[key]} and {category}: "
+                    f"{entry.title!r}."
+                )
             seen[key] = category
-    return TypedPlanStages(child_stages, dependencies, deferred, actions, bool(legacy))
+    return TypedPlanStages(child_stages, dependencies, deferred, actions)
 
 
 def _expect_state(value: object, *, context: str) -> str:

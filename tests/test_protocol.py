@@ -2601,6 +2601,55 @@ def test_validate_structured_plan_state_accepts_deferred_stages():
     )
 
 
+def test_typed_plan_categories_keep_only_child_stages_eligible_for_materialization():
+    parsed = validate_structured_plan_state(
+        structured_plan_state(
+            child_stages=[{"title": "3A implementation", "summary": "New bounded work."}],
+            external_dependencies=[{"title": "#481", "summary": "Existing external gate."}],
+            deferred_work=[{"title": "Stage 4", "summary": "Future work."}],
+            plan_actions=[
+                {"title": "Post-approval child issue materialization", "summary": "Tracker task."}
+            ],
+        )
+    )
+
+    assert parsed is not None
+    assert [stage.title for stage in parsed.typed_stages.child_stages] == ["3A implementation"]
+    assert [stage.title for stage in parsed.typed_stages.external_dependencies] == ["#481"]
+    assert [stage.title for stage in parsed.typed_stages.deferred_work] == ["Stage 4"]
+    assert [stage.title for stage in parsed.typed_stages.plan_actions] == [
+        "Post-approval child issue materialization"
+    ]
+
+
+@pytest.mark.parametrize(
+    "child_stage, pattern",
+    [
+        ({"title": "Depend on #481", "summary": "Already exists."}, "external_dependencies"),
+        (
+            {
+                "title": "Post-approval child issue materialization",
+                "summary": "Tracker task.",
+            },
+            "plan_actions",
+        ),
+    ],
+)
+def test_typed_child_stages_reject_dependencies_and_tracker_actions(child_stage, pattern):
+    with pytest.raises(AgentLoopError, match=pattern):
+        validate_structured_plan_state(structured_plan_state(child_stages=[child_stage]))
+
+
+def test_typed_plan_categories_reject_cross_category_duplicate_titles():
+    with pytest.raises(AgentLoopError, match="duplicate title"):
+        validate_structured_plan_state(
+            structured_plan_state(
+                child_stages=[{"title": "Stage 3A", "summary": "Implement."}],
+                deferred_work=[{"title": "stage   3a", "summary": "Do later."}],
+            )
+        )
+
+
 def test_validate_structured_plan_state_accepts_signed_human_requirements_before_footer():
     acknowledgement = (
         "\n<!-- HUMAN_REQUIREMENTS_ADDRESSED -->\n"

@@ -19,6 +19,7 @@ from coding_review_agent_loop.comment_rendering import (
     render_agent_unavailable_comment,
     render_deferred_stages_section,
     render_discuss_round_summary_comment,
+    render_typed_plan_stages_section,
 )
 from coding_review_agent_loop.protocol import DiscussUnresolvedItem, ParsedDiscussAnswer, ParsedFailedDiscussResponse, ParsedDiscussReview
 from coding_review_agent_loop.orchestrator import (
@@ -33,6 +34,7 @@ from coding_review_agent_loop.orchestrator import (
     render_public_agent_comment,
 )
 from coding_review_agent_loop.protocol import (
+    ChildStage,
     DeferredStage,
     ReviewItemDisposition,
     UnresolvedReviewItem,
@@ -44,6 +46,7 @@ from coding_review_agent_loop.protocol import (
     validate_structured_plan_revision,
     validate_structured_plan_state,
 )
+from coding_review_agent_loop.protocol import TypedPlanStages
 
 from agent_loop_helpers import (
     blocking_issues,
@@ -249,6 +252,37 @@ def test_render_structured_plan_state_to_public_markdown():
         "-- Google Antigravity: Gemini 3.1 Pro (High)"
     )
     assert '"kind": "plan_state"' not in public
+
+
+def test_legacy_deferred_stages_render_once_without_typed_marker():
+    parsed = validate_structured_plan_revision(
+        structured_plan_revision(
+            deferred_stages=[{"title": "Stage 4", "summary": "Record only."}]
+        )
+    )
+    assert parsed is not None
+
+    canonical = render_canonical_plan_revision(parsed, ())
+
+    assert canonical.count("Stage 4: Record only.") == 1
+    assert "AGENT_DEFERRED_STAGES" in canonical
+    assert "AGENT_TYPED_PLAN_STAGES" not in canonical
+
+
+def test_typed_plan_stages_marker_round_trips_child_categories():
+    section = render_typed_plan_stages_section(
+        TypedPlanStages(
+            child_stages=(ChildStage("3A implementation", "New work."),),
+            external_dependencies=(DeferredStage("#481", "Existing gate."),),
+            deferred_work=(DeferredStage("Stage 4", "Later."),),
+            plan_actions=(DeferredStage("Post-approval materialization", "Tracker."),),
+        )
+    )
+
+    assert section is not None
+    assert "AGENT_TYPED_PLAN_STAGES" in section
+    assert "Child stages (eligible for child issues)" in section
+    assert "External dependencies (linked, never created)" in section
 
 
 def test_render_public_coder_followup_comment():

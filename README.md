@@ -352,12 +352,13 @@ over-cap response is rejected and must be consolidated, not truncated. This cap
 is separate from the approved-review follow-up issue cap used by
 `--approved-followups`.
 
-If the approved plan narrows scope (via explicit `child_stages`,
-`external_dependencies`, `deferred_work`, and `plan_actions` fields, or a legacy structured `deferred_stages` field,
-or a prior discuss `split` consensus), pass `--materialize-split-issues` to
-file each remaining stage as its own linked child issue instead of leaving it
-as unfiled text — default is off, and the orchestrator always warns explicitly
-when stages would otherwise go unfiled. When a parent's stages are already
+If the approved plan narrows scope via explicit `child_stages`, pass
+`--materialize-split-issues` to file those bounded implementation stages as
+linked child issues. `external_dependencies`, `deferred_work`, `plan_actions`,
+and legacy structured `deferred_stages` are recorded only; legacy discuss
+`split` proposals remain eligible for filing. Materialization is off by default,
+and the orchestrator warns explicitly when eligible stages would otherwise go
+unfiled. When a parent's stages are already
 fully materialized, `--implement-after-approval` hands implementation off to
 the specific child the plan covers (via a unique title match or an explicit
 `--split-stage <child>` flag) instead of treating the whole parent as solved,
