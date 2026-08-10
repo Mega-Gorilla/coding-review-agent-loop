@@ -248,6 +248,7 @@ def _reconcile_human_requirements_ack_item(
             )
             validate_structured_human_requirements_acknowledgement(
                 structured_followup.human_requirements.addressed_ids,
+                dispositions=structured_followup.human_requirement_dispositions,
                 checked_discussion_directly=structured_followup.human_requirements.checked_discussion_directly,
                 surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
                 requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,
@@ -421,6 +422,7 @@ def _validate_coder_followup_response(
         )
         validate_structured_human_requirements_acknowledgement(
             structured_followup.human_requirements.addressed_ids,
+            dispositions=structured_followup.human_requirement_dispositions,
             checked_discussion_directly=structured_followup.human_requirements.checked_discussion_directly,
             surfaced_requirement_ids=prompt_context.surfaced_requirement_ids,
             requires_direct_discussion_ack=prompt_context.requires_direct_discussion_ack,

@@ -11,6 +11,7 @@ from coding_review_agent_loop.repair import (
 )
 from coding_review_agent_loop.protocol import (
     validate_structured_discuss_answer,
+    validate_structured_coder_followup,
     validate_structured_plan_state,
 )
 from coding_review_agent_loop.orchestrator import _new_usage_context, _structured_response_candidates
@@ -681,7 +682,7 @@ def test_attempt_repair_includes_surfaced_requirement_labels_for_mixed_repairs()
     cmd = mock_run.call_args.args[0]
     prompt = cmd[cmd.index("--prompt") + 1]
     assert "`Requirement 1`" in prompt
-    assert "keep [\"Requirement 1\"] and drop \"Issue #221 acceptance criteria\"" in prompt
+    assert "put it in addressed_ids only when that disposition is `addressed`" in prompt
 
 def test_attempt_repair_rejects_unresolved_item_ids_for_non_coder_kind():
     with pytest.raises(ValueError, match="unresolved_item_ids"):
@@ -1650,6 +1651,25 @@ def test_repair_prompt_coder_followup_fenced_json_example():
     assert "HUMAN_REQUIREMENTS_ADDRESSED" in _REPAIR_PROMPT
     # The prompt explains the marker is not needed in structured path
     assert "NOT needed" in _REPAIR_PROMPT or "not needed" in _REPAIR_PROMPT.lower()
+
+
+def test_repair_prompt_coder_followup_examples_include_current_requirement_schema():
+    format_c = _REPAIR_PROMPT.split("## Valid Format C — Coder Follow-up:", 1)[1].split(
+        "## Valid Format E", 1
+    )[0]
+    assert '"human_requirement_dispositions"' in format_c
+    assert '"disposition": "blocked"' in format_c
+    assert '"addressed_ids": []' in format_c
+    format_c_example = format_c.split("This is a blocking example", 1)[0].strip()
+    parsed = validate_structured_coder_followup(format_c_example)
+    assert parsed.state == "blocking"
+    assert parsed.human_requirement_dispositions[0].disposition == "blocked"
+    assert '"state": "approved"' in format_c
+    assert "<!-- AGENT_STATE: approved -->" in format_c
+    example_3 = _REPAIR_PROMPT.split("## WORKED EXAMPLE 3", 1)[1].split("## WORKED EXAMPLE 4", 1)[0]
+    example_5 = _REPAIR_PROMPT.split("## WORKED EXAMPLE 5", 1)[1].split("## WORKED EXAMPLE 6", 1)[0]
+    assert example_3.count('"human_requirement_dispositions"') == 2
+    assert '"human_requirement_dispositions": []' in example_5
 
 def test_repair_prompt_plan_revision_preserves_human_requirements_acknowledgement():
     assert "WORKED EXAMPLE 4" in _REPAIR_PROMPT

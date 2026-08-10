@@ -258,19 +258,26 @@ You are a format-repair assistant. An AI agent produced an initial plan state, c
 {
   "schema_version": 1,
   "kind": "coder_followup",
-  "state": "approved" | "blocking",
+  "state": "blocking",
   "summary": "<short summary>",
   "addressed_items": ["item-1"],
   "remaining_items": ["item-2"],
   "addressed_item_notes": {"item-1": "<how it was resolved>"},
   "remaining_item_notes": {"item-2": "<why it remains>"},
+  "human_requirement_dispositions": [
+    {"requirement_id": "Requirement 1", "disposition": "blocked", "evidence": "<why it cannot be completed>"}
+  ],
   "human_requirements": {
-    "addressed_ids": ["Requirement 1"],
+    "addressed_ids": [],
     "checked_discussion_directly": false
   }
 }
-<!-- AGENT_STATE: approved -->
+<!-- AGENT_STATE: blocking -->
 -- <Coder Name>
+
+This is a blocking example because it has a `blocked` human-requirement disposition.
+For an approved coder follow-up, use `"state": "approved"`, an
+`<!-- AGENT_STATE: approved -->` footer, and no `blocked` dispositions.
 
 ## Valid Format E — Discuss Review:
 
@@ -565,8 +572,11 @@ section and missing <!-- HUMAN_REQUIREMENTS_ADDRESSED --> marker.
   "summary": "Implemented the quota exit policy.",
   "addressed_items": ["item-1"],
   "remaining_items": [],
+  "human_requirement_dispositions": [
+    {"requirement_id": "Requirement 1", "disposition": "blocked", "evidence": "The required service is unavailable."}
+  ],
   "human_requirements": {
-    "addressed_ids": ["Requirement 1"],
+    "addressed_ids": [],
     "checked_discussion_directly": false
   }
 }
@@ -588,8 +598,11 @@ CORRECT repair — strip the fences, remove the prose, output bare JSON + footer
   "summary": "Implemented the quota exit policy.",
   "addressed_items": ["item-1"],
   "remaining_items": [],
+  "human_requirement_dispositions": [
+    {"requirement_id": "Requirement 1", "disposition": "blocked", "evidence": "The required service is unavailable."}
+  ],
   "human_requirements": {
-    "addressed_ids": ["Requirement 1"],
+    "addressed_ids": [],
     "checked_discussion_directly": false
   }
 }
@@ -598,7 +611,7 @@ CORRECT repair — strip the fences, remove the prose, output bare JSON + footer
 
 Notes:
 - addressed_items contains real reviewer item IDs (like "item-1"), never the human-requirements ack pseudo-item
-- "Requirement 1" stays in human_requirements.addressed_ids (it is a human requirement label, not an item ID)
+- Only `addressed` human-requirement dispositions belong in human_requirements.addressed_ids; blocked dispositions require state `blocking`.
 - <!-- HUMAN_REQUIREMENTS_ADDRESSED --> is NOT needed in the structured path
 - No prose, no ### sections after the JSON
 
@@ -660,6 +673,7 @@ CORRECT repair — keep reviewer items separate and rewrite human_requirements.a
   "summary": "Updated the implementation and left one reviewer item pending.",
   "addressed_items": ["item-1"],
   "remaining_items": ["item-2"],
+  "human_requirement_dispositions": [],
   "human_requirements": {
     "addressed_ids": [],
     "checked_discussion_directly": false
@@ -671,7 +685,7 @@ CORRECT repair — keep reviewer items separate and rewrite human_requirements.a
 Notes:
 - Issue acceptance criteria are not signed human requirements.
 - Reviewer items belong in addressed_items / remaining_items, never in human_requirements.addressed_ids.
-- If surfaced signed labels include "Requirement 1" and the malformed response has ["Requirement 1", "Issue #221 acceptance criteria"], keep ["Requirement 1"] and drop "Issue #221 acceptance criteria".
+- If surfaced signed labels include "Requirement 1", include one evidenced disposition for it and put it in addressed_ids only when that disposition is `addressed`; blocked dispositions require blocking state.
 
 ## WORKED EXAMPLE 6 — approved plan_review with same-plan disposition whose note says plan covers it:
 
@@ -1341,7 +1355,8 @@ def _coder_followup_human_requirements_instruction(
         f"{rendered_ids}\n"
         "Include exactly one `human_requirement_dispositions` object per listed ID, with the exact ID, disposition "
         "`addressed`, `blocked`, or `not-applicable`, and non-blank evidence.\n"
-        "Only the exact labels above may appear in `human_requirements.addressed_ids`.\n"
+        "Only labels with an `addressed` disposition may appear in `human_requirements.addressed_ids`; "
+        "omit `blocked` and `not-applicable` labels. A `blocked` disposition requires `state: blocking`.\n"
         "When the list is `(none)`, set `human_requirements.addressed_ids` to `[]`. "
         "Do not use issue numbers, issue acceptance criteria, reviewer item IDs, reviewer comments, "
         "summaries, or arbitrary labels as human requirement IDs.\n"

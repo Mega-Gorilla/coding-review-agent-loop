@@ -710,6 +710,7 @@ def validate_human_requirements_acknowledgement(
 def validate_structured_human_requirements_acknowledgement(
     addressed_ids: Sequence[str],
     *,
+    dispositions: Sequence[HumanRequirementDisposition] | None = None,
     checked_discussion_directly: bool,
     surfaced_requirement_ids: Sequence[str],
     requires_direct_discussion_ack: bool,
@@ -762,11 +763,29 @@ def validate_structured_human_requirements_acknowledgement(
         )
 
     if expected_ids:
-        missing = sorted(set(expected_ids) - set(normalized_addressed_ids))
+        if dispositions is None:
+            expected_addressed_ids = set(expected_ids)
+            missing_message = "Coder response did not address all surfaced signed human requirement IDs: "
+        else:
+            expected_addressed_ids = {
+                _normalize_requirement_label(item.requirement_id)
+                for item in dispositions
+                if item.disposition == "addressed"
+            }
+            missing_message = (
+                "Coder response human_requirements.addressed_ids must contain every requirement "
+                "with an `addressed` disposition: "
+            )
+        actual_addressed_ids = set(normalized_addressed_ids)
+        missing = sorted(expected_addressed_ids - actual_addressed_ids)
+        unexpected = sorted(actual_addressed_ids - expected_addressed_ids)
         if missing:
+            raise AgentLoopError(missing_message + ", ".join(missing))
+        if unexpected:
             raise AgentLoopError(
-                "Coder response did not address all surfaced signed human requirement IDs: "
-                + ", ".join(missing)
+                "Coder response human_requirements.addressed_ids may contain only requirements "
+                "with an `addressed` disposition: "
+                + ", ".join(unexpected)
             )
         return
 
@@ -1759,10 +1778,17 @@ def validate_structured_coder_followup(text: str) -> StructuredCoderFollowup | N
             "Coder follow-up listed unresolved reviewer item IDs more than once: "
             + ", ".join(duplicates)
         )
+    state = _expect_state(payload["state"], context="coder_followup.state")
+    if state == "approved" and any(
+        item.disposition == "blocked" for item in human_requirement_dispositions
+    ):
+        raise AgentLoopError(
+            "coder_followup.state must be `blocking` when a signed human requirement is blocked."
+        )
     return StructuredCoderFollowup(
         schema_version=1,
         kind="coder_followup",
-        state=_expect_state(payload["state"], context="coder_followup.state"),
+        state=state,
         summary=_expect_non_empty_string(payload["summary"], context="coder_followup.summary"),
         addressed_items=addressed_items,
         remaining_items=remaining_items,

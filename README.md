@@ -707,6 +707,11 @@ once in either `addressed_items` or `remaining_items`.
 The disposition ledger must contain one entry per surfaced signed requirement,
 marked `addressed`, `blocked`, or `not-applicable` with non-blank evidence;
 use an empty ledger when no signed requirements were surfaced.
+In structured follow-ups, `human_requirements.addressed_ids` contains exactly
+the requirements with an `addressed` disposition. A `blocked` disposition
+requires `state: "blocking"`; `not-applicable` may be used in an approved
+follow-up. Markdown fallback acknowledgements retain their legacy rule: they
+must list every surfaced requirement.
 Plan-revision responses use `kind: "plan_revision"` with `state: "blocking"`,
 `summary`, `prior_plan_item_dispositions`, and `plan_steps`. Structured
 responses must start with one top-level JSON object, place the matching
