@@ -62,14 +62,14 @@ def _existing_split_children_comment() -> dict:
     }
 
 
-def test_plan_first_no_prior_split_materializes_deferred_stages_before_implementation(tmp_path):
+def test_plan_first_materializes_explicit_child_stages_before_implementation(tmp_path):
     runner = FakeRunner(
         pr_payload={"body": "Fixes #56"},
         claude_outputs=[
             structured_plan_state(
                 state="blocking",
                 summary="Implement the core parser change.",
-                deferred_stages=[{"title": "Auth flow", "summary": "Split follow-up out."}],
+                child_stages=[{"title": "Auth flow", "summary": "Split follow-up out."}],
             ),
             "Implemented approved plan.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
         ],
@@ -100,7 +100,7 @@ def test_plan_first_no_prior_split_materializes_deferred_stages_before_implement
     assert "Fixes #56" in runner.pr_payload["body"]
 
 
-def test_plan_first_deferred_stage_title_with_colon_round_trips_through_canonical_markdown(tmp_path):
+def test_plan_first_child_stage_title_with_colon_round_trips_through_canonical_markdown(tmp_path):
     """A revised plan's `deferred_stages` are carried in `current_plan` as the
     canonical revision markdown (not the raw structured JSON), which renders
     each stage as a human-readable `- {title}: {summary}` bullet. A title that
@@ -113,7 +113,7 @@ def test_plan_first_deferred_stage_title_with_colon_round_trips_through_canonica
             structured_plan_state(state="blocking", summary="Initial plan."),
             structured_plan_revision(
                 summary="Implement the core parser change.",
-                deferred_stages=[
+                child_stages=[
                     {"title": "Stage 2: API follow-up", "summary": "Split out the API work."}
                 ],
             ),
@@ -155,7 +155,7 @@ def test_plan_first_no_prior_split_warns_when_materialization_disabled(tmp_path)
             structured_plan_state(
                 state="blocking",
                 summary="Implement the core parser change.",
-                deferred_stages=[{"title": "Auth flow", "summary": "Split follow-up out."}],
+                child_stages=[{"title": "Auth flow", "summary": "Split follow-up out."}],
             ),
             "Implemented approved plan.\n<!-- AGENT_PR: 77 -->\n<!-- AGENT_STATE: blocking -->\n-- Anthropic Claude",
         ],

@@ -30,6 +30,7 @@ from .config import (
     sync_reviewer_pr_before_review,
 )
 from .decomposition import (
+    _decode_json_payload,
     CreatedPhaseIssue,
     RecordedPhase,
     approved_plan_hash,
@@ -3360,6 +3361,27 @@ def _extract_current_deferred_stages(current_plan: str) -> tuple[DeferredStage, 
     return tuple(stages)
 
 
+def _extract_current_child_stages(current_plan: str) -> tuple[DeferredStage, ...]:
+    """Return only explicitly typed child stages; legacy entries are record-only."""
+    try:
+        structured = validate_structured_plan_state(current_plan)
+    except AgentLoopError:
+        structured = None
+    if structured is not None:
+        return tuple(DeferredStage(item.title, item.summary) for item in structured.typed_stages.child_stages)
+    marker = re.search(r"<!--\s*AGENT_TYPED_PLAN_STAGES:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->", current_plan, re.I)
+    if not marker:
+        return ()
+    try:
+        payload = _decode_json_payload(marker.group("payload"), marker_name="AGENT_TYPED_PLAN_STAGES")
+        children = payload.get("child_stages", [])
+        if not isinstance(children, list):
+            return ()
+        return tuple(DeferredStage(str(item["title"]), str(item["summary"])) for item in children if isinstance(item, dict) and isinstance(item.get("title"), str) and isinstance(item.get("summary"), str))
+    except AgentLoopError:
+        return ()
+
+
 def _prior_discuss_split_proposals(
     issue_context: IssueContext, *, config: AgentLoopConfig
 ) -> list[str]:
@@ -3436,8 +3458,9 @@ def _handle_plan_first_split_scope(
     look stale and hide children materialized moments earlier in this same run.
     """
     current_deferred_stages = _extract_current_deferred_stages(current_plan)
+    current_child_stages = _extract_current_child_stages(current_plan)
     prior_discuss_proposals = _prior_discuss_split_proposals(issue_context, config=config)
-    if current_deferred_stages:
+    if current_child_stages or current_deferred_stages:
         # This plan structurally declares its own deferred_stages, so it keeps
         # a primary scope on the parent (the implement-one-shot branch below
         # never hands that scope off to a child in this case). If a prior
@@ -3451,7 +3474,7 @@ def _handle_plan_first_split_scope(
             if split_stage_proposal_from_text(proposal).key != plan_own_key
         ]
     remaining_proposals = dedupe_split_stage_proposals(
-        [split_stage_proposal_from_deferred_stage(stage) for stage in current_deferred_stages]
+        [split_stage_proposal_from_deferred_stage(stage) for stage in current_child_stages]
         + [split_stage_proposal_from_text(proposal) for proposal in prior_discuss_proposals]
     )
     if remaining_proposals:
@@ -4813,8 +4836,12 @@ def _run_plan_first_loop(
                 target_issue_number = issue_number
                 target_issue_context = issue_context
                 staged_parent_issue: int | None = None
+                # Explicit child stages are the parent plan's bounded remainder;
+                # legacy deferred entries preserve the same historical parent-owned
+                # behavior. Dependencies/actions alone must not suppress handoff.
                 current_plan_declares_own_deferred_stages = bool(
-                    _extract_current_deferred_stages(current_plan)
+                    _extract_current_child_stages(current_plan)
+                    or _extract_current_deferred_stages(current_plan)
                 )
                 split_metadata = find_existing_split_materialization(
                     issue_context.comments, parent_issue=issue_number

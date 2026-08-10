@@ -352,7 +352,8 @@ over-cap response is rejected and must be consolidated, not truncated. This cap
 is separate from the approved-review follow-up issue cap used by
 `--approved-followups`.
 
-If the approved plan narrows scope (via a structured `deferred_stages` field,
+If the approved plan narrows scope (via explicit `child_stages`,
+`external_dependencies`, `deferred_work`, and `plan_actions` fields, or a legacy structured `deferred_stages` field,
 or a prior discuss `split` consensus), pass `--materialize-split-issues` to
 file each remaining stage as its own linked child issue instead of leaving it
 as unfiled text — default is off, and the orchestrator always warns explicitly

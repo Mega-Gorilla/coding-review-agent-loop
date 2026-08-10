@@ -973,20 +973,22 @@ Use this mandatory structured JSON response format:
     "Normalize structured plan rendering and metadata-backed resume behavior in `src/coding_review_agent_loop/orchestrator.py`.",
     "Extend prompts and targeted tests for structured planning flows."
   ],
-  "deferred_stages": [
-    {"title": "Follow-up stage title", "summary": "One-sentence scope this plan intentionally leaves out."}
-  ]
+  "child_stages": [
+    {"title": "New implementation stage", "summary": "Bounded work eligible for a new child issue."}
+  ],
+  "external_dependencies": [{"title": "#481", "summary": "Existing issue to link, never create."}],
+  "deferred_work": [{"title": "Future work", "summary": "Recorded only."}],
+  "plan_actions": [{"title": "Post-approval materialization", "summary": "Tracker action, never an issue."}]
 }
 <!-- AGENT_PLAN_STATE: blocking -->
 -- coder signature shown in the volatile tail
 
 If the plan intentionally narrows scope (mentions a later stage, follow-up
 issue, or explicitly out-of-scope work), declare EVERY such stage in the
-optional `deferred_stages` field instead of leaving it only in prose; omit the
-field entirely (or use an empty list) when the plan covers full scope. The
-orchestrator uses `deferred_stages` to file or warn about unfiled follow-up
-work before implementation, so undeclared narrowing can leave scope silently
-untracked once this plan's PR merges.
+typed categories instead of overloading `deferred_stages`: only `child_stages`
+are eligible for filing. Put existing `#N`, issue URLs, or `owner/repo#N`
+references in `external_dependencies`; use `deferred_work` and `plan_actions`
+for record-only entries. Legacy `deferred_stages` remains record-only.
 
 The orchestrator will normalize structured plan revisions into canonical
 markdown for stored plan state, reviewer prompts, subject hashing, and resume.
@@ -1170,8 +1172,10 @@ For a plan (rather than a clarification), respond with exactly one structured JS
 intended approach, key files or areas to change, edge cases, and test strategy.
 When signed requirements are surfaced, the disposition array must contain every
 generated `Requirement N` exactly once; when none are surfaced, it must be empty.
-The optional `deferred_stages` field is a list of objects with non-empty `title`
-and `summary` strings.
+Use the optional typed `child_stages`, `external_dependencies`, `deferred_work`,
+and `plan_actions` arrays (each has non-empty `title` and `summary` strings).
+Only `child_stages` may be materialized; existing issue references belong in
+`external_dependencies`, not a child title or summary.
 Do not substitute a generic `implementation_plan` object or markdown plan for this
 schema. If signed human-requirements acknowledgement is required, put its
 `<!-- HUMAN_REQUIREMENTS_ADDRESSED -->` marker and `### Human requirements` section

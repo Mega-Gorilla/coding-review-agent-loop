@@ -19,6 +19,7 @@ from .protocol import (
     SIGNATURE_RE,
     AgentUnavailable,
     DeferredStage,
+    TypedPlanStages,
     HumanRequirementDisposition,
     ParsedDiscussAgenda,
     ParsedDiscussAnswer,
@@ -277,6 +278,31 @@ def render_deferred_stages_section(deferred_stages: Sequence[DeferredStage]) -> 
     return "\n".join(lines)
 
 
+def render_typed_plan_stages_section(stages: TypedPlanStages) -> str | None:
+    """Render #585 categories; only child stages are eligible for filing."""
+    groups = (
+        ("Child stages (eligible for child issues)", stages.child_stages),
+        ("External dependencies (linked, never created)", stages.external_dependencies),
+        ("Deferred work (recorded only)", stages.deferred_work),
+        ("Plan actions (recorded only)", stages.plan_actions),
+    )
+    if not any(entries for _, entries in groups):
+        return None
+    lines = ["### Structured scope categories"]
+    for title, entries in groups:
+        if entries:
+            lines.append(f"#### {title}")
+            lines.extend(f"- {entry.title}: {entry.summary}" for entry in entries)
+    payload = {
+        "child_stages": [{"title": item.title, "summary": item.summary, "allow_action_title": item.allow_action_title} for item in stages.child_stages],
+        "external_dependencies": [{"title": item.title, "summary": item.summary} for item in stages.external_dependencies],
+        "deferred_work": [{"title": item.title, "summary": item.summary} for item in stages.deferred_work],
+        "plan_actions": [{"title": item.title, "summary": item.summary} for item in stages.plan_actions],
+    }
+    lines.append(f"<!-- AGENT_TYPED_PLAN_STAGES: {_encode_json_payload(payload)} -->")
+    return "\n".join(lines)
+
+
 def _encode_deferred_stages_marker(deferred_stages: Sequence[DeferredStage]) -> str:
     return _encode_json_payload(
         {"stages": [{"title": stage.title, "summary": stage.summary} for stage in deferred_stages]}
@@ -337,6 +363,9 @@ def render_canonical_plan_revision(
     deferred_section = render_deferred_stages_section(parsed_revision.deferred_stages)
     if deferred_section:
         sections.append(deferred_section)
+    typed_section = render_typed_plan_stages_section(parsed_revision.typed_stages)
+    if typed_section:
+        sections.append(typed_section)
     return "\n\n".join(sections)
 
 
@@ -635,6 +664,9 @@ def _render_public_plan_state_comment(
     deferred_section = render_deferred_stages_section(parsed_plan.deferred_stages)
     if deferred_section:
         sections.append(deferred_section)
+    typed_section = render_typed_plan_stages_section(parsed_plan.typed_stages)
+    if typed_section:
+        sections.append(typed_section)
     sections.append(f"<!-- AGENT_PLAN_STATE: {parsed_plan.state} -->")
     sections.append(f"-- {_comment_signature(agent, config, model_used)}")
     return "\n\n".join(section for section in sections if section)

@@ -1003,6 +1003,7 @@ def structured_plan_revision(
     human_requirements: str = "",
     human_requirement_dispositions: list[dict[str, str]] | None = None,
     deferred_stages: list[dict[str, str]] | None = None,
+    child_stages: list[dict[str, str]] | None = None,
 ) -> str:
     payload = {
         "schema_version": 1,
@@ -1018,6 +1019,8 @@ def structured_plan_revision(
     }
     if deferred_stages is not None:
         payload["deferred_stages"] = deferred_stages
+    if child_stages is not None:
+        payload["child_stages"] = child_stages
     return (
         json.dumps(payload)
         + human_requirements
@@ -1033,6 +1036,7 @@ def structured_plan_state(
     plan_steps: list[str] | None = None,
     reviewer: str = "Anthropic Claude",
     deferred_stages: list[dict[str, str]] | None = None,
+    child_stages: list[dict[str, str]] | None = None,
     human_requirement_dispositions: list[dict[str, str]] | None = None,
 ) -> str:
     payload = {
@@ -1045,6 +1049,8 @@ def structured_plan_state(
     }
     if deferred_stages is not None:
         payload["deferred_stages"] = deferred_stages
+    if child_stages is not None:
+        payload["child_stages"] = child_stages
     return (
         json.dumps(payload)
         + f"\n<!-- AGENT_PLAN_STATE: {state} -->\n"

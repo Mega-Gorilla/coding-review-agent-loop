@@ -23,6 +23,10 @@ from .protocol import DeferredStage
 from .runner import Runner
 
 MAX_SPLIT_CHILDREN = 8
+_ISSUE_REFERENCE_RE = re.compile(r"(?:\B#[1-9]\d*\b|github\.com/[^/\s]+/[^/\s]+/issues/[1-9]\d*\b|[\w.-]+/[\w.-]+#[1-9]\d*\b)", re.I)
+_TRACKER_ACTION_TITLE_RE = re.compile(
+    r"^(?:post|after)[ -]?approval.*\b(?:creat|fil|materializ).*\bchild issue", re.I
+)
 
 DISCUSS_SPLIT_MARKER_RE = re.compile(
     r"<!--\s*AGENT_DISCUSS_SPLIT:\s*(?P<payload>[A-Za-z0-9+/=_-]+)\s*-->",
@@ -331,6 +335,20 @@ def materialize_split_proposals(
     deduped = dedupe_split_stage_proposals(proposals)
     if not deduped:
         return None
+
+    # Do this before the first create so a malformed approved plan cannot
+    # partially materialize placeholders.  Typed dependencies/actions never
+    # reach this function, but the guard also protects programmatic callers.
+    rejected = [
+        proposal.title for proposal in deduped
+        if _ISSUE_REFERENCE_RE.search(proposal.title + "\n" + proposal.body)
+        or _TRACKER_ACTION_TITLE_RE.match(" ".join(proposal.title.split()))
+    ]
+    if rejected:
+        raise AgentLoopError(
+            "Split child candidates reference an existing issue or are tracker actions; "
+            "place them in external_dependencies or plan_actions instead: " + ", ".join(rejected)
+        )
 
     existing = find_existing_split_materialization(issue_comments, parent_issue=parent_issue)
     known_by_key: dict[str, MaterializedSplitChild] = (
