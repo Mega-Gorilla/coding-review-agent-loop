@@ -26,6 +26,7 @@ from coding_review_agent_loop.github import (
     get_pr_checks,
 )
 from coding_review_agent_loop.migrations import MigrationValidationResult
+from coding_review_agent_loop.managed_ci import ManagedCiContract, ManagedCiOutcome
 from coding_review_agent_loop.orchestrator import (
     HUMAN_REQUIREMENTS_ACK_ITEM_ID,
     PostedRoundMetadata,
@@ -926,6 +927,47 @@ def test_watch_mode_success_skips_legacy_wait_for_ci(
         cmd for cmd, _cwd in runner.commands if cmd[:3] == ["gh", "pr", "merge"]
     ]
     assert bool(merge_commands) is auto_merge
+
+
+def test_auto_merge_supported_repo_dispatches_and_merges_exact_approved_head(
+    tmp_path, monkeypatch
+):
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="Approved.")]
+    )
+    config = make_config(tmp_path, watch_pending_ci=True, auto_merge=True)
+    monkeypatch.setattr(
+        orchestrator,
+        "activate_managed_ci",
+        lambda *args, **kwargs: ManagedCiContract(),
+    )
+    dispatches = []
+    monkeypatch.setattr(
+        orchestrator,
+        "dispatch_final_qualification",
+        lambda *args, **kwargs: dispatches.append(kwargs),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "wait_for_final_qualification",
+        lambda *args, **kwargs: ManagedCiOutcome(status="passed", head_sha="abc123"),
+    )
+    merges = []
+    monkeypatch.setattr(
+        orchestrator,
+        "merge_pr",
+        lambda *args, **kwargs: merges.append(kwargs),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "watch_pr_checks",
+        lambda *args, **kwargs: pytest.fail("managed CI must bypass the ordinary watcher"),
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert dispatches[0]["expected_head_sha"] == "abc123"
+    assert merges == [{"expected_head_sha": "abc123"}]
 
 
 def test_watch_failure_on_final_round_dispatches_coder_with_check_diagnostic(
