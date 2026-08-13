@@ -284,7 +284,7 @@ def test_wait_for_final_qualification_returns_infrastructure_stall(tmp_path):
             "check_runs": [
                 {
                     "id": 99,
-                    "name": FINAL_CONTEXT,
+                    "name": "test (pr-inline)",
                     "status": "queued",
                     "conclusion": None,
                     "html_url": "https://github.com/OWNER/REPO/actions/runs/123/job/99",
@@ -294,7 +294,10 @@ def test_wait_for_final_qualification_returns_infrastructure_stall(tmp_path):
                 }
             ]
         },
-        pr_status_payload={"state": "pending", "statuses": []},
+        pr_status_payload={
+            "state": "pending",
+            "statuses": [{"context": FINAL_CONTEXT, "state": "pending"}],
+        },
         pr_branch_protection_payload={"contexts": [FINAL_CONTEXT], "checks": []},
     )
 
@@ -304,7 +307,7 @@ def test_wait_for_final_qualification_returns_infrastructure_stall(tmp_path):
 
     assert outcome.status == "infrastructure_stall"
     assert outcome.stall is not None
-    assert outcome.stall.checks[0].name == FINAL_CONTEXT
+    assert outcome.stall.checks[0].name == "test (pr-inline)"
 
 
 @pytest.mark.parametrize("status", ["startup_failure", "stale"])

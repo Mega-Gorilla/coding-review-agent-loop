@@ -337,14 +337,6 @@ def wait_for_final_qualification(
                 head_sha=live_head,
             )
         latest = get_pr_checks(runner, config=config, metadata=metadata)
-        if is_wholly_infrastructure_blocked(latest):
-            stall = CiInfrastructureStall(checks=latest.infrastructure_stalls)
-            return ManagedCiOutcome(
-                status="infrastructure_stall",
-                checks=latest,
-                head_sha=live_head,
-                stall=stall,
-            )
         final = _find_context(latest, FINAL_CONTEXT)
         status = final.status.lower() if final is not None else "pending"
         log(config, f"Managed CI context '{FINAL_CONTEXT}' status: {status}")
@@ -360,6 +352,15 @@ def wait_for_final_qualification(
             "stale",
         }:
             return ManagedCiOutcome(status="failed", checks=latest, head_sha=live_head)
+        stall_checks = intermediate_managed_checks(latest)
+        if is_wholly_infrastructure_blocked(stall_checks):
+            stall = CiInfrastructureStall(checks=stall_checks.infrastructure_stalls)
+            return ManagedCiOutcome(
+                status="infrastructure_stall",
+                checks=latest,
+                head_sha=live_head,
+                stall=stall,
+            )
         if attempt < attempts - 1:
             runner.run(["sleep", str(config.ci_poll_interval_seconds)], cwd=active_workdir(config))
     return ManagedCiOutcome(status="timeout", checks=latest, head_sha=expected_head)
