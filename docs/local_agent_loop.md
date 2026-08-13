@@ -1247,8 +1247,9 @@ agent-loop pr 123 \
   --ci-check-name test
 ```
 
-When enabled with the full-board watcher (the default — see "Watch pending CI"
-below), the tool foreground-polls the whole PR check board before merging.
+For repositories without the managed exact-head CI contract, enabling auto-merge
+with the full-board watcher (the default — see "Watch pending CI" below) makes
+the tool foreground-poll the whole PR check board before merging.
 With `--no-watch-pending-ci`, it instead waits for the single configured
 `--ci-check-name` check-run to pass before merging, as in earlier releases.
 Local `--test-command` is an additional local gate, not a replacement for CI.
@@ -1280,11 +1281,15 @@ repository's `CI` workflow with the PR number and that exact expected SHA. It
 polls `final-ci/exact-head`, routes a real failure back to the coder, and
 restarts review if the head moves. A passing aggregate is merged with
 `--match-head-commit`, so a different head cannot inherit the approval or CI
-result. The managed label remains in place through merge.
+result. The managed label remains in place through merge. The managed route is
+selected independently of `--watch-pending-ci`; neither that flag nor
+`--no-watch-pending-ci` replaces exact-head qualification with an ordinary
+full-board or named-check wait.
 
 ### Watch pending CI
 
-`--watch-pending-ci` is enabled by default whenever `--auto-merge` is set;
+For repositories not using managed exact-head CI, `--watch-pending-ci` is
+enabled by default whenever `--auto-merge` is set;
 pass `--no-watch-pending-ci` to fall back to the legacy single
 `--ci-check-name` waiter described above. It can also be passed explicitly
 without `--auto-merge`, in which case it watches checks after approval and

@@ -9,6 +9,7 @@ README = REPO_ROOT / "README.md"
 
 HEADING_TEXT = "Phased decomposition versus split materialization"
 CI_STALL_HEADING_TEXT = "External CI infrastructure stalls"
+MANAGED_CI_HEADING_TEXT = "Managed exact-head CI"
 LOCAL_TEST_SCOPE_HEADING_TEXT = "Focused, bounded local test selection"
 
 
@@ -95,6 +96,22 @@ def test_readme_links_to_ci_infrastructure_stall_section():
     readme_text = README.read_text(encoding="utf-8")
     assert f"docs/local_agent_loop.md#{expected_anchor}" in readme_text
     assert "`--ci-queued-grace-seconds`" in readme_text
+
+
+def test_readme_links_to_managed_exact_head_ci_and_scopes_watch_mode():
+    doc_text = LOCAL_AGENT_LOOP_DOC.read_text(encoding="utf-8")
+    assert f"### {MANAGED_CI_HEADING_TEXT}" in doc_text
+    expected_anchor = _github_anchor(MANAGED_CI_HEADING_TEXT)
+
+    readme_text = README.read_text(encoding="utf-8")
+    normalized_readme_text = " ".join(readme_text.split())
+    assert f"docs/local_agent_loop.md#{expected_anchor}" in readme_text
+    assert "`--match-head-commit`" in readme_text
+    assert "merges only that qualified SHA" in normalized_readme_text
+    assert (
+        "`--watch-pending-ci` and `--no-watch-pending-ci` do not alter"
+        in normalized_readme_text
+    )
 
 
 def test_local_agent_loop_doc_has_focused_bounded_local_test_section():

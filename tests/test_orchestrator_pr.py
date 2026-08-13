@@ -6,6 +6,7 @@ from unittest.mock import patch
 import pytest
 
 import coding_review_agent_loop.orchestrator as orchestrator
+from coding_review_agent_loop.ci_health import CiInfrastructureStall, StalledCheck
 from coding_review_agent_loop.cli import AgentLoopError, run_issue_loop, run_pr_loop
 from coding_review_agent_loop.comment_rendering import (
     _render_public_coder_followup_comment,
@@ -22,6 +23,7 @@ from coding_review_agent_loop.github import (
     PullRequestCheck,
     PullRequestChecks,
     PullRequestMetadata,
+    PullRequestMergeability,
     PullRequestReviewContext,
     get_pr_checks,
 )
@@ -968,6 +970,264 @@ def test_auto_merge_supported_repo_dispatches_and_merges_exact_approved_head(
 
     assert dispatches[0]["expected_head_sha"] == "abc123"
     assert merges == [{"expected_head_sha": "abc123"}]
+
+
+def test_managed_ci_failure_routes_back_to_coder_and_uses_failure_extension(
+    tmp_path, monkeypatch
+):
+    failed_check = PullRequestCheck(
+        name="final-ci/exact-head",
+        kind="check_run",
+        status="failure",
+        url="https://github.com/OWNER/REPO/actions/runs/555",
+    )
+    failed_checks = _watch_check_board("failing", failing=(failed_check,))
+    outcomes = iter(
+        [
+            ManagedCiOutcome(status="failed", checks=failed_checks, head_sha="abc123"),
+            ManagedCiOutcome(status="passed", head_sha="abc123-coder-1"),
+        ]
+    )
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(state="approved", summary="Approved."),
+            structured_pr_review(
+                state="approved",
+                summary="Approved after managed CI fix.",
+                prior_item_dispositions=[
+                    {"item_id": "item-1", "disposition": "resolved"}
+                ],
+            ),
+        ],
+        claude_outputs=[
+            structured_coder_followup(
+                state="blocking",
+                summary="Fixed managed CI.",
+                addressed_items=["item-1"],
+            )
+        ],
+    )
+    config = make_config(tmp_path, auto_merge=True, max_rounds=1)
+    monkeypatch.setattr(
+        orchestrator, "activate_managed_ci", lambda *args, **kwargs: ManagedCiContract()
+    )
+    monkeypatch.setattr(orchestrator, "dispatch_final_qualification", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        orchestrator, "wait_for_final_qualification", lambda *args, **kwargs: next(outcomes)
+    )
+    merges = []
+    monkeypatch.setattr(orchestrator, "merge_pr", lambda *args, **kwargs: merges.append(kwargs))
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    coder_prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"])
+    assert "GitHub managed exact-head CI unresolved blocking item [item-1]" in coder_prompt
+    assert "final-ci/exact-head (failure)" in coder_prompt
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]) == 2
+    assert merges == [{"expected_head_sha": "abc123-coder-1"}]
+
+
+def test_managed_ci_head_change_restarts_review_without_coder(tmp_path, monkeypatch):
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(state="approved", summary="Old head approved."),
+            structured_pr_review(state="approved", summary="New head approved."),
+        ]
+    )
+    config = make_config(tmp_path, auto_merge=True, max_rounds=1)
+    monkeypatch.setattr(
+        orchestrator, "activate_managed_ci", lambda *args, **kwargs: ManagedCiContract()
+    )
+    monkeypatch.setattr(orchestrator, "dispatch_final_qualification", lambda *args, **kwargs: None)
+    call_count = 0
+
+    def wait_for_managed_ci(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            runner.pr_payload["headRefOid"] = "new-head"
+            return ManagedCiOutcome(status="head_changed", head_sha="new-head")
+        return ManagedCiOutcome(status="passed", head_sha="new-head")
+
+    monkeypatch.setattr(orchestrator, "wait_for_final_qualification", wait_for_managed_ci)
+    merges = []
+    monkeypatch.setattr(orchestrator, "merge_pr", lambda *args, **kwargs: merges.append(kwargs))
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert call_count == 2
+    assert not any(cmd[:1] == ["claude"] for cmd, _cwd in runner.commands)
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]) == 2
+    assert merges == [{"expected_head_sha": "new-head"}]
+
+
+def test_managed_ci_merge_conflict_routes_through_reconciliation(tmp_path, monkeypatch):
+    conflict = PullRequestMergeability(
+        state="conflicted",
+        mergeable_raw="CONFLICTING",
+        merge_state_raw="DIRTY",
+        head_sha="abc123",
+        base_branch="main",
+    )
+    outcomes = iter(
+        [
+            ManagedCiOutcome(
+                status="merge_conflict",
+                mergeability=conflict,
+                head_sha="abc123",
+            ),
+            ManagedCiOutcome(status="passed", head_sha="abc123-coder-1"),
+        ]
+    )
+    runner = FakeRunner(
+        codex_outputs=[
+            structured_pr_review(state="approved", summary="Approved before conflict."),
+            structured_pr_review(state="approved", summary="Approved after rebase."),
+        ],
+        claude_outputs=[
+            structured_coder_followup(
+                state="blocking", summary="Rebased and resolved the conflict."
+            )
+        ],
+    )
+    config = make_config(tmp_path, auto_merge=True, max_rounds=2)
+    monkeypatch.setattr(
+        orchestrator, "activate_managed_ci", lambda *args, **kwargs: ManagedCiContract()
+    )
+    monkeypatch.setattr(orchestrator, "dispatch_final_qualification", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        orchestrator, "wait_for_final_qualification", lambda *args, **kwargs: next(outcomes)
+    )
+    monkeypatch.setattr(orchestrator, "merge_pr", lambda *args, **kwargs: None)
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    coder_prompt = next(cmd[-1] for cmd, _cwd in runner.commands if cmd[:1] == ["claude"])
+    assert "merge conflict with its base branch `main`" in coder_prompt
+    assert len([cmd for cmd, _cwd in runner.commands if cmd[:2] == ["codex", "exec"]]) == 2
+
+
+def test_managed_ci_infrastructure_stall_stops_cleanly(tmp_path, monkeypatch):
+    stalled_check = StalledCheck(
+        name="final-ci/exact-head",
+        kind="check_run",
+        reason="queued_too_long",
+        check_id=99,
+        run_id="555",
+        url="https://github.com/OWNER/REPO/actions/runs/555",
+        age_seconds=1800,
+    )
+    stall = CiInfrastructureStall(checks=(stalled_check,))
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="Approved.")]
+    )
+    config = make_config(tmp_path, auto_merge=True, max_rounds=1)
+    monkeypatch.setattr(
+        orchestrator, "activate_managed_ci", lambda *args, **kwargs: ManagedCiContract()
+    )
+    monkeypatch.setattr(orchestrator, "dispatch_final_qualification", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "wait_for_final_qualification",
+        lambda *args, **kwargs: ManagedCiOutcome(
+            status="infrastructure_stall", head_sha="abc123", stall=stall
+        ),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "merge_pr",
+        lambda *args, **kwargs: pytest.fail("infrastructure stall must not merge"),
+    )
+
+    assert run_pr_loop(runner, pr_number=77, config=config) == 0
+
+    assert any(
+        comment.startswith("External GitHub Actions infrastructure is blocking PR #77.")
+        for comment in runner.comments
+    )
+    assert runner.comments[-1].startswith(
+        "PR #77 is blocked on external GitHub Actions infrastructure, not a code defect."
+    )
+
+
+@pytest.mark.parametrize(
+    ("pre_review_tests", "test_command"),
+    [(False, ("python", "-m", "pytest", "focused")), (True, None)],
+)
+def test_managed_ci_does_not_publish_readiness_without_configured_pre_review_gate(
+    tmp_path, monkeypatch, pre_review_tests, test_command
+):
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="Approved.")]
+    )
+    config = make_config(
+        tmp_path,
+        auto_merge=True,
+        pre_review_tests=pre_review_tests,
+        test_command=test_command,
+    )
+    monkeypatch.setattr(
+        orchestrator, "activate_managed_ci", lambda *args, **kwargs: ManagedCiContract()
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "publish_round_readiness",
+        lambda *args, **kwargs: pytest.fail("readiness must not be published"),
+    )
+    monkeypatch.setattr(orchestrator, "dispatch_final_qualification", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "wait_for_final_qualification",
+        lambda *args, **kwargs: ManagedCiOutcome(status="passed", head_sha="abc123"),
+    )
+    monkeypatch.setattr(orchestrator, "merge_pr", lambda *args, **kwargs: None)
+
+    assert run_pr_loop(
+        runner,
+        pr_number=77,
+        config=config,
+        pre_review_test_pending=True,
+    ) == 0
+
+
+def test_managed_ci_publishes_readiness_after_configured_pre_review_gate(
+    tmp_path, monkeypatch
+):
+    runner = FakeRunner(
+        codex_outputs=[structured_pr_review(state="approved", summary="Approved.")]
+    )
+    config = make_config(
+        tmp_path,
+        auto_merge=True,
+        pre_review_tests=True,
+        test_command=("verify-managed-head",),
+    )
+    monkeypatch.setattr(
+        orchestrator, "activate_managed_ci", lambda *args, **kwargs: ManagedCiContract()
+    )
+    published_heads = []
+    monkeypatch.setattr(
+        orchestrator,
+        "publish_round_readiness",
+        lambda *args, **kwargs: published_heads.append(kwargs["head_sha"]),
+    )
+    monkeypatch.setattr(orchestrator, "dispatch_final_qualification", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        orchestrator,
+        "wait_for_final_qualification",
+        lambda *args, **kwargs: ManagedCiOutcome(status="passed", head_sha="abc123"),
+    )
+    monkeypatch.setattr(orchestrator, "merge_pr", lambda *args, **kwargs: None)
+
+    assert run_pr_loop(
+        runner,
+        pr_number=77,
+        config=config,
+        pre_review_test_pending=True,
+    ) == 0
+
+    assert published_heads == ["abc123"]
+    assert ["verify-managed-head"] in [cmd for cmd, _cwd in runner.commands]
 
 
 def test_watch_failure_on_final_round_dispatches_coder_with_check_diagnostic(

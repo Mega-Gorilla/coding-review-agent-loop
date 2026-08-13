@@ -7077,6 +7077,38 @@ def run_pr_loop(
                                     source_round=round_number,
                                     current_head_sha=pr_metadata.head_sha,
                                 )
+                            elif managed_outcome.status == "infrastructure_stall":
+                                assert managed_outcome.stall is not None
+                                post_pr_comment(
+                                    runner,
+                                    config=config,
+                                    pr_number=pr_number,
+                                    body=_format_ci_infrastructure_comment(
+                                        pr_number, managed_outcome.stall
+                                    ),
+                                )
+                                post_pr_comment(
+                                    runner,
+                                    config=config,
+                                    pr_number=pr_number,
+                                    body=_ci_infrastructure_stop_message(
+                                        pr_number, managed_outcome.stall, []
+                                    ),
+                                )
+                                log(
+                                    config,
+                                    f"Round {round_number}: PR #{pr_number} managed CI wait "
+                                    "stopped on external infrastructure blocking; no merge attempted",
+                                )
+                                print(
+                                    f"PR #{pr_number} was approved by "
+                                    f"{format_agent_list(configured_reviewers)}, but external GitHub "
+                                    "Actions infrastructure is blocking managed exact-head CI "
+                                    f"({'; '.join(_ci_infrastructure_details(managed_outcome.stall))}). "
+                                    "No merge was attempted; rerun the same command once GitHub Actions "
+                                    "runners recover."
+                                )
+                                return 0
                             elif managed_outcome.status == "failed":
                                 details = (
                                     _pr_check_details(managed_outcome.checks)
@@ -7167,7 +7199,7 @@ def run_pr_loop(
                                 f"{wait_outcome.mergeability.base_branch or config.base or 'the base branch'} "
                                 "during the CI wait; no merge attempted",
                             )
-                        elif managed_ci is None:
+                        else:
                             merge_pr(runner, config, pr_number)
                     if not must_fix_items:
                         print(f"PR #{pr_number} approved by {format_agent_list(configured_reviewers)}.")

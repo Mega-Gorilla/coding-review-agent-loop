@@ -6,7 +6,12 @@ import json
 from dataclasses import dataclass, replace
 from typing import Literal
 
-from .ci_health import PullRequestCheck, PullRequestChecks
+from .ci_health import (
+    CiInfrastructureStall,
+    PullRequestCheck,
+    PullRequestChecks,
+    is_wholly_infrastructure_blocked,
+)
 from .config import AgentLoopConfig
 from .errors import AgentLoopError
 from .github import (
@@ -35,10 +40,18 @@ class ManagedCiContract:
 
 @dataclass(frozen=True)
 class ManagedCiOutcome:
-    status: Literal["passed", "failed", "timeout", "head_changed", "merge_conflict"]
+    status: Literal[
+        "passed",
+        "failed",
+        "timeout",
+        "head_changed",
+        "merge_conflict",
+        "infrastructure_stall",
+    ]
     checks: PullRequestChecks | None = None
     mergeability: PullRequestMergeability | None = None
     head_sha: str | None = None
+    stall: CiInfrastructureStall | None = None
 
 
 def activate_managed_ci(
@@ -101,7 +114,7 @@ def activate_managed_ci(
     base_ref = (pr_data.get("base") or {}).get("ref")
     if not isinstance(head_repo, str) or head_repo.casefold() != config.repo.casefold():
         return None
-    if base_ref != "main":
+    if not metadata.base_branch or base_ref != metadata.base_branch:
         return None
     if not metadata.head_sha:
         raise AgentLoopError(f"PR #{pr_number} has no head SHA; managed CI cannot be activated.")
@@ -167,13 +180,32 @@ def activate_managed_ci(
         )
         if apply_result.returncode != 0:
             raise AgentLoopError(f"Unable to apply `{MANAGED_LABEL}` to PR #{pr_number}.")
-        _wait_for_label_handoff(
-            runner,
-            config=config,
-            pr_number=pr_number,
-            metadata=metadata,
-            prior_run_ids=prior_workflow_run_ids,
-        )
+        try:
+            _wait_for_label_handoff(
+                runner,
+                config=config,
+                pr_number=pr_number,
+                metadata=metadata,
+                prior_run_ids=prior_workflow_run_ids,
+            )
+        except AgentLoopError as exc:
+            remove_result = runner.run(
+                [
+                    config.gh_cmd,
+                    "api",
+                    "--method",
+                    "DELETE",
+                    f"repos/{config.repo}/issues/{pr_number}/labels/{MANAGED_LABEL}",
+                ],
+                cwd=active_workdir(config),
+                check=False,
+            )
+            if remove_result.returncode != 0:
+                raise AgentLoopError(
+                    f"{exc} Cleanup also failed: `{MANAGED_LABEL}` remains applied and "
+                    "suppresses hosted CI until it is removed."
+                ) from exc
+            raise
     log(config, f"PR #{pr_number}: activated managed exact-head CI")
     return ManagedCiContract()
 
@@ -189,11 +221,10 @@ def intermediate_managed_checks(checks: PullRequestChecks) -> PullRequestChecks:
     pending = tuple(check for check in checks.pending if check.name != FINAL_CONTEXT)
     failing = tuple(check for check in checks.failing if check.name != FINAL_CONTEXT)
     passing = tuple(check for check in checks.passing if check.name != FINAL_CONTEXT)
-    missing_required: tuple[str, ...] = ()
     required = tuple(name for name in checks.required_checks if name != FINAL_CONTEXT)
     if failing:
         state = "failing"
-    elif pending or missing_required:
+    elif pending:
         state = "pending"
     elif passing:
         state = "passing"
@@ -208,7 +239,7 @@ def intermediate_managed_checks(checks: PullRequestChecks) -> PullRequestChecks:
         passing=passing,
         pending=pending,
         failing=failing,
-        missing_required=missing_required,
+        missing_required=(),
         infrastructure_stalls=tuple(
             stall for stall in checks.infrastructure_stalls if stall.name != FINAL_CONTEXT
         ),
@@ -306,12 +337,28 @@ def wait_for_final_qualification(
                 head_sha=live_head,
             )
         latest = get_pr_checks(runner, config=config, metadata=metadata)
+        if is_wholly_infrastructure_blocked(latest):
+            stall = CiInfrastructureStall(checks=latest.infrastructure_stalls)
+            return ManagedCiOutcome(
+                status="infrastructure_stall",
+                checks=latest,
+                head_sha=live_head,
+                stall=stall,
+            )
         final = _find_context(latest, FINAL_CONTEXT)
         status = final.status.lower() if final is not None else "pending"
         log(config, f"Managed CI context '{FINAL_CONTEXT}' status: {status}")
         if status == "success":
             return ManagedCiOutcome(status="passed", checks=latest, head_sha=live_head)
-        if status in {"failure", "error", "cancelled", "timed_out", "action_required"}:
+        if status in {
+            "failure",
+            "error",
+            "cancelled",
+            "timed_out",
+            "action_required",
+            "startup_failure",
+            "stale",
+        }:
             return ManagedCiOutcome(status="failed", checks=latest, head_sha=live_head)
         if attempt < attempts - 1:
             runner.run(["sleep", str(config.ci_poll_interval_seconds)], cwd=active_workdir(config))
