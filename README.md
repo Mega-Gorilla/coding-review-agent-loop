@@ -637,8 +637,17 @@ still-computing (`UNKNOWN`) GitHub mergeability result is re-checked before
 being treated as unresolved. See
 [Merge conflicts](docs/local_agent_loop.md#merge-conflicts) for details.
 
-With `--auto-merge`, agent-loop foreground-polls the complete check board after
-approval with
+With `--auto-merge`, repositories that advertise the managed exact-head CI
+contract use a dedicated flow: agent-loop applies `agent-loop-managed`, may
+publish local round readiness after a configured pre-review test succeeds,
+dispatches final CI for the reviewers' exact approved SHA, and merges only that
+qualified SHA with `--match-head-commit`. `--watch-pending-ci` and
+`--no-watch-pending-ci` do not alter this managed flow. See
+[Managed exact-head CI](docs/local_agent_loop.md#managed-exact-head-ci) for the
+repository contract and failure behavior.
+
+For repositories without that contract, `--auto-merge` foreground-polls the
+complete check board after approval with
 `--ci-timeout-seconds` and
 `--ci-poll-interval-seconds`, without invoking agents while checks are pending.
 Failure resumes the coder with the failed-check details; a successful/no-check

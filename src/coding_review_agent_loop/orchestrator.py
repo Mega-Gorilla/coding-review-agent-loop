@@ -100,6 +100,13 @@ from .evidence_reconciliation import (
     reconcile_evidence,
 )
 from .memory import AgentMemoryContext, prepare_agent_memory
+from .managed_ci import (
+    activate_managed_ci,
+    dispatch_final_qualification,
+    intermediate_managed_checks,
+    publish_round_readiness,
+    wait_for_final_qualification,
+)
 from .migrations import validate_pr_migration_topology
 from .prompts import (
     CompactPlanTailContext,
@@ -5675,6 +5682,12 @@ def run_pr_loop(
             _ensure_parallel_reviewer_workdirs(config, flag_name="--review-parallel", role_label="reviewer")
         log(config, f"Validating PR #{pr_number}")
         validate_open_pr(runner, config=config, pr_number=pr_number)
+        managed_ci = activate_managed_ci(
+            runner,
+            config=config,
+            pr_number=pr_number,
+            metadata=initial_pr_context.metadata,
+        )
         memory = prepare_agent_memory(runner, config)
         reviewer_session_ids: dict[AgentName, str | None] = {}
         unavailable_reviewer_failures: dict[AgentName, AgentInvocationError] = {}
@@ -5726,8 +5739,10 @@ def run_pr_loop(
                     f"One or more reviewers still reported blocking issues after round {allowed_rounds}; human review required."
                 )
             coder_name = agent_display_name(config.coder)
+            pre_review_tests_passed = False
             if pre_review_test_pending:
                 run_pre_review_tests(runner, config)
+                pre_review_tests_passed = bool(config.pre_review_tests and config.test_command)
                 pre_review_test_pending = False
             if round_number == start_round_number:
                 pr_context = initial_pr_context
@@ -5739,6 +5754,12 @@ def run_pr_loop(
             initial_pr_context = pr_context
             pr_metadata = pr_context.metadata
             pr_comments = pr_context.comments
+            if managed_ci is not None and pre_review_tests_passed and pr_metadata.head_sha:
+                publish_round_readiness(
+                    runner,
+                    config=config,
+                    head_sha=pr_metadata.head_sha,
+                )
             human_requirements = _merge_human_requirements(issue_context, pr_context)
             current_resume = resumed_round if resumed_round is not None and round_number == resumed_round.round_number else None
             unresolved_items = _reconcile_human_requirements_ack_item(
@@ -5930,7 +5951,13 @@ def run_pr_loop(
                         # instead of one fetch per reviewer as sequential mode
                         # does, so every concurrently launched prompt and the
                         # post-turn pending-CI-only downgrade agree.
-                        shared_reviewer_pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
+                        shared_reviewer_pr_checks = get_pr_checks(
+                            runner, config=config, metadata=pr_metadata
+                        )
+                        if managed_ci is not None:
+                            shared_reviewer_pr_checks = intermediate_managed_checks(
+                                shared_reviewer_pr_checks
+                            )
                         pr_parallel_compact_tail = (
                             CompactPrReviewTailContext(
                                 head_sha=pr_metadata.head_sha,
@@ -6167,7 +6194,11 @@ def run_pr_loop(
                         f"(context mode: {context_mode})",
                     )
                     sync_reviewer_pr_before_review(config, runner, reviewer, pr_number, pr_metadata)
-                    reviewer_pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
+                    reviewer_pr_checks = get_pr_checks(
+                        runner, config=config, metadata=pr_metadata
+                    )
+                    if managed_ci is not None:
+                        reviewer_pr_checks = intermediate_managed_checks(reviewer_pr_checks)
                     compact_tail = (
                         CompactPrReviewTailContext(
                             head_sha=pr_metadata.head_sha,
@@ -6704,6 +6735,8 @@ def run_pr_loop(
                     pr_checks = None
                 else:
                     pr_checks = get_pr_checks(runner, config=config, metadata=pr_metadata)
+                    if managed_ci is not None:
+                        pr_checks = intermediate_managed_checks(pr_checks)
                 if pr_checks is not None and not must_fix_items and is_wholly_infrastructure_blocked(pr_checks):
                     # Every remaining blocking/pending signal is external GitHub
                     # Actions infrastructure (a queued check that never started a
@@ -6745,7 +6778,7 @@ def run_pr_loop(
                         "Actions runners recover."
                     )
                     return 0
-                if not must_fix_items and config.watch_pending_ci:
+                if not must_fix_items and config.watch_pending_ci and managed_ci is None:
                     if watch_deadline is None:
                         watch_deadline = time.monotonic() + config.ci_timeout_seconds
                         watch_attempts_remaining = max(
@@ -6992,8 +7025,135 @@ def run_pr_loop(
                     )
                     run_optional_tests(runner, config)
                     if config.auto_merge:
-                        wait_outcome = wait_for_ci(runner, config, pr_number, metadata=pr_metadata)
-                        if wait_outcome.status == "infrastructure_stall":
+                        if managed_ci is not None:
+                            assert pr_metadata.head_sha is not None
+                            assert pr_metadata.head_branch is not None
+                            dispatch_final_qualification(
+                                runner,
+                                config=config,
+                                pr_number=pr_number,
+                                expected_head_sha=pr_metadata.head_sha,
+                                head_ref=pr_metadata.head_branch,
+                                contract=managed_ci,
+                            )
+                            managed_outcome = wait_for_final_qualification(
+                                runner,
+                                config=config,
+                                pr_number=pr_number,
+                                metadata=pr_metadata,
+                            )
+                            if managed_outcome.status == "passed":
+                                merge_pr(
+                                    runner,
+                                    config,
+                                    pr_number,
+                                    expected_head_sha=pr_metadata.head_sha,
+                                )
+                                print(
+                                    f"PR #{pr_number} approved by "
+                                    f"{format_agent_list(configured_reviewers)}."
+                                )
+                                return 0
+                            if managed_outcome.status == "head_changed":
+                                log(
+                                    config,
+                                    f"PR #{pr_number} head changed during managed CI; re-review is required",
+                                )
+                                if round_number == allowed_rounds and not watch_head_extension_used:
+                                    allowed_rounds += 1
+                                    watch_head_extension_used = True
+                                resumed_round = None
+                                current_resume = None
+                                prefetched_pr_context = get_pr_review_context(
+                                    runner, config=config, pr_number=pr_number
+                                )
+                                continue
+                            if managed_outcome.status == "merge_conflict":
+                                assert managed_outcome.mergeability is not None
+                                latest_mergeability = managed_outcome.mergeability
+                                unresolved_items = _reconcile_merge_conflict_item(
+                                    unresolved_items,
+                                    mergeability=managed_outcome.mergeability,
+                                    source_round=round_number,
+                                    current_head_sha=pr_metadata.head_sha,
+                                )
+                            elif managed_outcome.status == "infrastructure_stall":
+                                assert managed_outcome.stall is not None
+                                post_pr_comment(
+                                    runner,
+                                    config=config,
+                                    pr_number=pr_number,
+                                    body=_format_ci_infrastructure_comment(
+                                        pr_number, managed_outcome.stall
+                                    ),
+                                )
+                                post_pr_comment(
+                                    runner,
+                                    config=config,
+                                    pr_number=pr_number,
+                                    body=_ci_infrastructure_stop_message(
+                                        pr_number, managed_outcome.stall, []
+                                    ),
+                                )
+                                log(
+                                    config,
+                                    f"Round {round_number}: PR #{pr_number} managed CI wait "
+                                    "stopped on external infrastructure blocking; no merge attempted",
+                                )
+                                print(
+                                    f"PR #{pr_number} was approved by "
+                                    f"{format_agent_list(configured_reviewers)}, but external GitHub "
+                                    "Actions infrastructure is blocking managed exact-head CI "
+                                    f"({'; '.join(_ci_infrastructure_details(managed_outcome.stall))}). "
+                                    "No merge was attempted; rerun the same command once GitHub Actions "
+                                    "runners recover."
+                                )
+                                return 0
+                            elif managed_outcome.status == "failed":
+                                details = (
+                                    _pr_check_details(managed_outcome.checks)
+                                    if managed_outcome.checks
+                                    else ["Managed exact-head CI failed."]
+                                )
+                                post_pr_comment(
+                                    runner,
+                                    config=config,
+                                    pr_number=pr_number,
+                                    body=_format_pr_checks_comment(pr_number, "failing", details),
+                                )
+                                unresolved_items.append(
+                                    _next_unresolved_item(
+                                        item_number=next_unresolved_item_number,
+                                        reviewer="GitHub managed exact-head CI",
+                                        source_round=round_number,
+                                        text=_pr_check_blocking_review(
+                                            pr_number, "failing", details
+                                        ),
+                                        status="blocking",
+                                    )
+                                )
+                                next_unresolved_item_number += 1
+                                if round_number == allowed_rounds and not watch_failure_extension_used:
+                                    allowed_rounds += 1
+                                    watch_failure_extension_used = True
+                            else:
+                                raise AgentLoopError(
+                                    f"Managed exact-head CI for PR #{pr_number} did not pass within "
+                                    f"{config.ci_timeout_seconds}s."
+                                )
+                            must_fix_items = [
+                                item
+                                for item in unresolved_items
+                                if item.status in {"blocking", "same-pr"}
+                            ]
+                            wait_outcome = None
+                        else:
+                            wait_outcome = wait_for_ci(
+                                runner, config, pr_number, metadata=pr_metadata
+                            )
+                        if wait_outcome is None:
+                            pass
+                        elif wait_outcome.status == "infrastructure_stall":
                             assert wait_outcome.stall is not None
                             post_pr_comment(
                                 runner,
@@ -7021,7 +7181,7 @@ def run_pr_loop(
                                 "runners recover."
                             )
                             return 0
-                        if wait_outcome.status == "merge_conflict":
+                        elif wait_outcome.status == "merge_conflict":
                             assert wait_outcome.mergeability is not None
                             latest_mergeability = wait_outcome.mergeability
                             unresolved_items = _reconcile_merge_conflict_item(

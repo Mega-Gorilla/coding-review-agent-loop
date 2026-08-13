@@ -1443,9 +1443,18 @@ def wait_for_ci(
     )
 
 
-def merge_pr(runner: Runner, config: AgentLoopConfig, pr_number: int) -> None:
+def merge_pr(
+    runner: Runner,
+    config: AgentLoopConfig,
+    pr_number: int,
+    *,
+    expected_head_sha: str | None = None,
+) -> None:
     log(config, f"Merging PR #{pr_number}")
+    command = [config.gh_cmd, "pr", "merge", str(pr_number), "--repo", config.repo, "--merge"]
+    if expected_head_sha:
+        command.extend(["--match-head-commit", expected_head_sha])
     runner.run(
-        [config.gh_cmd, "pr", "merge", str(pr_number), "--repo", config.repo, "--merge"],
+        command,
         cwd=active_workdir(config),
     )

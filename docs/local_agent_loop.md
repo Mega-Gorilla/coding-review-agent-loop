@@ -1247,8 +1247,9 @@ agent-loop pr 123 \
   --ci-check-name test
 ```
 
-When enabled with the full-board watcher (the default — see "Watch pending CI"
-below), the tool foreground-polls the whole PR check board before merging.
+For repositories without the managed exact-head CI contract, enabling auto-merge
+with the full-board watcher (the default — see "Watch pending CI" below) makes
+the tool foreground-poll the whole PR check board before merging.
 With `--no-watch-pending-ci`, it instead waits for the single configured
 `--ci-check-name` check-run to pass before merging, as in earlier releases.
 Local `--test-command` is an additional local gate, not a replacement for CI.
@@ -1259,9 +1260,36 @@ on code that already fails the configured local test command. Use
 
 Failing GitHub checks always block approval and can route back to the coder. Pending or unavailable GitHub checks are treated as an external wait state rather than actionable coder feedback: if every reviewer approves the code and only GitHub checks are pending/unavailable, the loop posts a comment and stops with a clear message instead of erroring or starting another coder/reviewer round. If those checks later pass, manual merge is fine and rerunning is optional unless you want agent-loop to re-check or automate the final step. With `--auto-merge`, the loop instead keeps watching until checks resolve before merging.
 
+### Managed exact-head CI
+
+Under `--auto-merge`, agent-loop automatically detects a same-repository PR
+whose `.github/workflows/ci.yml` advertises the `agent-loop-managed`,
+`final-ci/exact-head`, and `expected_head_sha` contract. It applies the managed
+label before iterative review, allowing that repository to suppress full
+hosted test matrices on intermediate heads. Repositories without those markers
+retain the ordinary CI behavior above; a partial contract fails closed.
+
+During managed rounds, the intentionally pending final aggregate and missing
+hosted matrix contexts are not presented as actionable review failures.
+Actually observed non-final failures remain visible. If a configured
+pre-review `--test-command` passes, agent-loop also publishes the non-required
+`agent-loop/round-readiness` status on that head; it never publishes readiness
+without running that command.
+
+After every required reviewer approves one live head, agent-loop dispatches the
+repository's `CI` workflow with the PR number and that exact expected SHA. It
+polls `final-ci/exact-head`, routes a real failure back to the coder, and
+restarts review if the head moves. A passing aggregate is merged with
+`--match-head-commit`, so a different head cannot inherit the approval or CI
+result. The managed label remains in place through merge. The managed route is
+selected independently of `--watch-pending-ci`; neither that flag nor
+`--no-watch-pending-ci` replaces exact-head qualification with an ordinary
+full-board or named-check wait.
+
 ### Watch pending CI
 
-`--watch-pending-ci` is enabled by default whenever `--auto-merge` is set;
+For repositories not using managed exact-head CI, `--watch-pending-ci` is
+enabled by default whenever `--auto-merge` is set;
 pass `--no-watch-pending-ci` to fall back to the legacy single
 `--ci-check-name` waiter described above. It can also be passed explicitly
 without `--auto-merge`, in which case it watches checks after approval and
