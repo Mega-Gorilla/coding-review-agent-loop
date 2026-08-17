@@ -90,7 +90,7 @@
 - 既存リポジトリのClaude Code Skill modeを主経路とし、`agent-loop` headless CLIは補助・復旧経路として維持する
 - 対話型Claude Code terminalには現在state、次action、GitHub URLを簡潔に表示し、詳細と正式な会話履歴はGitHubで確認できるようにする
 - Codexのfresh subprocess logは、必要に応じて別PowerShell tab / paneで観測できるようにする
-- final reportは日本語で生成し、PRコメント、local artifact、terminal summaryへ出力する
+- final report言語はrepository設定で選択可能とし、未設定時は日本語で生成してPRコメント、local artifact、terminal summaryへ出力する
 - reviewとfixは最大3 roundを既定とする
 - review承認後もCIがpendingなら`WAITING_CI`としてmerge可能扱いにしない
 - ユーザー判断とmerge gateの操作は、既存の対話型Claude Code PowerShell sessionで受け取り、ControllerがGitHubへcanonical recordとして転記・確認してから進行する
@@ -101,7 +101,6 @@
 
 ### Open
 
-- final reportを常に日本語にするか、repository設定で言語を選択可能にするか
 - CI待ちをcontrollerがforegroundで継続するか、一度終了してユーザーがresumeするか
 - ユーザー判断・質問・修正依頼・merge承認を直接のGitHub commentで受け取り非同期resumeする機能を、どのreleaseへ含めるか
 - repository既定のmerge methodを使うか、設定で`merge` / `squash` / `rebase`を選択可能にするか
@@ -695,11 +694,12 @@ headless fallbackでは`agent-loop pr 512 --repo OWNER/REPO --reviewer codex`を
 3. **Local Markdown artifact**: JSONから決定論的にrenderした複製
 4. **Terminal summary**: merge判断に必要な短い結果とlink。merge後はGitHubで確認した結果を追記
 
-### Proposed report language
+### Decided report language
 
-- 既定は日本語
+- repository設定ファイルでfinal report言語を選択可能にする
+- 設定解決順はrepository設定、user-level設定、組込み既定値とし、組込み既定値は日本語とする
 - file path、command、state、SHA、固有名詞は原文を維持
-- repository設定による言語切り替えはOpen question
+- 未対応の言語値は暗黙fallbackせずvalidation errorとして表示する
 
 ### Proposed report example
 
@@ -843,7 +843,6 @@ Issue #2で次を順に確認する。
 
 | ID | Question | Why it matters | Current recommendation |
 | --- | --- | --- | --- |
-| Q-003 | final reportの既定言語は日本語固定か | schema、template、設定項目へ影響 | 日本語既定、将来選択可能 |
 | Q-004 | CI pending時にforegroundで待ち続けるか | terminal占有とresume UXへ影響 | bounded wait後に`WAITING_CI` |
 | Q-005 | ユーザー判断・merge gateの入力をどの経路で受け取るか | terminal継続、resume、GitHub comment監視の実装方式へ影響 | MVPは既存の対話型Claude Code PowerShell画面で受け取り、ControllerがGitHubへcanonical recordとして転記・確認。直接の非同期GitHub入力は後続phase（D-013） |
 | Q-008 | artifactの保存期間はどの程度か | disk、機密情報、監査要件へ影響 | repo単位設定、既定30日を検討 |
@@ -874,6 +873,7 @@ Issue #2で次を順に確認する。
 | D-016 | 2026-08-17 | 最初のreleaseへPR modeとIssue modeの両方を含める。内部実装はPR modeを先行可能だが、Issue取得・実装・既存PR再利用・Issue→PR handoff・共通review loopまで完成する前に初回releaseとしない | Decided | PR #3 discussion |
 | D-017 | 2026-08-17 | agentごとのtab / paneは既定で自動起動せず、ユーザーがClaude Code画面から明示要求した場合だけ任意wrapperで監視paneを開く。wrapperなしでもcore loopは動作し、Codex paneはfresh subprocessのread-only log監視に限定する | Decided | PR #3 discussion |
 | D-018 | 2026-08-17 | Linux/SSHでは対応`tmux` wrapper内のrunをSSH切断後もユーザー判断不要な範囲で継続する。判断が必要ならGitHubへ資料を投稿して`AWAITING_USER_DECISION`、merge-readyならfinal reportを投稿して`READY_FOR_HUMAN_MERGE`でmergeせず終了する。wrapper外はprocess生存を保証せずGitHub checkpointからresumeし、独自daemonはMVP外とする | Decided | PR #3 discussion |
+| D-019 | 2026-08-17 | final report言語はrepository設定ファイルで選択可能にし、repository設定、user-level設定、組込み既定値の順に解決する。未設定時の既定は日本語とする | Decided | PR #3 discussion |
 
 ## 16. Agreement checklist
 
@@ -893,7 +893,7 @@ Issue #2で次を順に確認する。
 - [ ] final reportの形式とサンプルを確認した
 - [ ] Windows / Linux SSHの差異を確認した
 - [ ] MVP inclusions、later phases、exclusionsを確認した
-- [ ] Q-001・Q-002はD-016、Q-007はD-017、Q-006はD-018で解決済みであり、残るQ-003～Q-005・Q-008～Q-012を解決または判断時期付きで保留した
+- [ ] Q-001・Q-002はD-016、Q-007はD-017、Q-006はD-018、Q-003はD-019で解決済みであり、残るQ-004・Q-005・Q-008～Q-012を解決または判断時期付きで保留した
 - [ ] 文書statusを`Agreed`へ変更した
 - [ ] implementation plan作成へ進むことをIssue #2で確認した
 
