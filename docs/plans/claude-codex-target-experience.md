@@ -35,45 +35,69 @@
 
 ## 3. 完成状態の要約
 
+ここではtarget behaviorの合意とdelivery phaseを分けて示す。`Decided`となったbehaviorでも、MVPへ含める時期が`Proposed`または`Open`の場合がある。
+
 ### Decided
+
+#### 起動・対象環境
 
 - ユーザーがIssue番号またはPR番号を指定して明示的に開始する
 - PR自動検知、常駐watcher、webhook、label triggerは使用しない
 - Windows PowerShell 7とLinux/SSH上のPowerShell 7を対象とする
 - 既存の対話型Claude Code / Codex TUIへキー入力を注入しない
-- controllerがClaude CodeとCodexの非対話CLIを起動する
-- Codex reviewerとfinal reporterはread-onlyとする
+
+#### 役割・権限境界
+
+- ControllerはLLMを内包しない決定論的なstate machineとし、Claude CodeとCodexの非対話CLIを起動する
+- Claude Codeはcoderとして実装・修正・test・commit・push・PR更新と、ユーザー向け説明を担当する
+- Codexはreviewerおよびfinal reporterとしてread-onlyで動作し、code変更、commit、push、GitHubへの直接書き込みを行わない
+- GitHubへのagent発言はControllerだけが代理投稿し、agentの意味的な内容を変更しない
 - auto-merge、deploy、本番操作は行わない
-- 最終状態はmerge完了ではなく`READY_FOR_HUMAN_MERGE`とする
-- mergeはユーザーがGitHub上で手動実行する
+
+#### GitHub-backed conversation
+
+- GitHub Issue / PRをClaude Code、Codex、ユーザーが共有する正式なconversation sourceとする
+- 実装・review・clarification・ユーザー判断に関する各logical turnは、次agentを起動する前にGitHubへ投稿し、read-after-writeで確認する
+- 未永続化の内部出力だけを次工程の根拠にせず、local memory、log、artifactはcacheまたは診断情報として扱う
+- PR作成前はIssue、PR作成後はPRを正式なconversation sourceとし、両側のhandoff recordを確認してから切り替える
 - Issue modeでは、指定Issueのタイトル・本文・採用対象コメントを実装要件として使用する
 - Issueに対応するPRが既に存在する場合は、重複作成せず既存PRからPR modeへ合流する
+
+#### Agent間の確認とユーザー判断
+
 - 実装中に仕様上の判断が必要と思われる場合、Claudeが作成した問題定義・候補・意見をCodexがレビューし、ユーザー判断の要否も判定する
 - ユーザー判断が必要な場合はClaudeがCodexの指摘を反映したdecision briefを作成して停止し、不要な場合はPRへ判断記録を残して継続する
 - ClaudeはCodexの返答に疑問・異論・追加確認がある場合、同一topicについて最大5 clarification turnsまで再問い合わせできる
-- Claude、Codex、ユーザーの実装・review・判断に関する論理的な発言は、対象GitHub Issue / PRを正式なsource of truthとして、次のagentを起動する前に永続化する
-- ControllerはGitHubへの投稿をread-after-writeで確認し、未永続化の発言だけを根拠にworkflowを進めない
+- clarificationの質問・回答とユーザー決定はGitHubへcanonical recordとして残し、意見相違や未解決事項を隠さない
 
-### Proposed
+#### 正常終了
+
+- 最終状態はmerge完了ではなく`READY_FOR_HUMAN_MERGE`とする
+- final reportとGitHub上のconversationをユーザーへ提示し、mergeはユーザーがGitHub上で手動実行する
+
+### Proposed MVP defaults
 
 - MVPは既存PRを対象とするPR modeから開始する
 - Issue modeはPR modeの実運用確認後に追加する
-- 通常時はController terminalだけで全体状況を理解できるようにする
+- Controller terminalには現在state、次action、GitHub URLを簡潔に表示し、詳細と正式な会話履歴はGitHubで確認できるようにする
 - 詳細確認用にClaude logとCodex logを別tab / paneで表示できるようにする
 - final reportは日本語で生成し、PRコメント、local artifact、terminal summaryへ出力する
 - reviewとfixは最大3 roundを既定とする
 - review承認後もCIがpendingなら`WAITING_CI`としてmerge可能扱いにしない
+- ユーザー判断はMVPではterminalで受け取り、ControllerがGitHubへcanonical decisionとして転記・確認してから再開する
+- 既存のGitHub comment transport、public renderer、round metadata、resume、`discuss` transcriptを再利用し、Controllerの実装を最小化する
 
 ### Open
 
-- MVPをPR modeだけに限定してよいか
-- Issue modeを最初のreleaseへ含める必要があるか
+- MVPをPR modeだけに限定し、Issue modeを後続releaseにしてよいか
 - 正常時にagentごとのtabを自動で開くか、任意wrapperとするか
 - SSH切断後も標準機能として継続させるか、`tmux`等の運用手順で対応するか
 - final reportを常に日本語にするか、repository設定で言語を選択可能にするか
 - CI待ちをcontrollerがforegroundで継続するか、一度終了してユーザーがresumeするか
-- ユーザー判断の回答をterminal入力だけで行うか、GitHub commentも使用するか
+- ユーザー判断を直接のGitHub commentで受け取り非同期resumeする機能を、どのreleaseへ含めるか
 - local artifactの既定保存期間とcleanup方法
+- approved follow-upをfinal reportだけに表示するか、別Issueを自動作成するか
+- Claudeのpermission要求を、明示停止後にどの経路で承認・再実行するか
 
 ## 4. 完了の定義
 
