@@ -30,8 +30,8 @@
 
 - **User**: 実行を開始し、必要な判断を行い、`READY_FOR_HUMAN_MERGE`で質問・修正依頼または明示的なmerge承認を入力する
 - **Controller**: LLMを内包せず、GitHub、worktree、agent、test、CI、state、logと、明示承認後のmergeを決定論的に調整する
-- **Claude coder**: 実装・修正・test・commit・push・PR更新、判断事項と説明の作成に加え、Claude Code画面のユーザー入力を構造化してControllerへ渡す
-- **Codex reviewer**: 現在のPR head、Claudeの判断依頼、Claudeからの再質問をread-onlyでレビューする
+- **Claude Code host / coder**: 既存の対話型PowerShell sessionでSkillを実行し、会話contextを維持したまま実装・修正・test・commit・push・PR更新、判断事項と説明の作成、ユーザー入力の構造化を担当する
+- **Codex reviewer**: 既存の対話sessionを再利用せず、各review turnをfreshなread-only subprocessとして実行し、現在のPR headとGitHub上の正式なconversationを評価する
 - **Codex final reporter**: 承認済みheadの変更と検証履歴をread-onlyで説明する
 
 ## 3. 完成状態の要約
@@ -45,13 +45,15 @@
 - ユーザーがIssue番号またはPR番号を指定して明示的に開始する
 - PR自動検知、常駐watcher、webhook、label triggerは使用しない
 - Windows PowerShell 7とLinux/SSH上のPowerShell 7を対象とする
+- 主操作は既存の対話型Claude Code PowerShell sessionからClaude Code Skillを自然言語またはslash commandで呼び出す
 - 既存の対話型Claude Code / Codex TUIへキー入力を注入しない
 
 #### 役割・権限境界
 
-- ControllerはLLMを内包しない決定論的なstate machineとし、自動化されたClaude / Codex turnは非対話CLIとして起動する。ユーザー向けの既存Claude Code PowerShell sessionはREADY gateの対話窓口として維持する
-- Claude Codeはcoderとして実装・修正・test・commit・push・PR更新と、ユーザー向け説明を担当する
-- Codexはreviewerおよびfinal reporterとしてread-onlyで動作し、code変更、commit、push、GitHubへの直接書き込みを行わない
+- ControllerはLLMを内包しない決定論的なhelper / state machineとし、Skillから呼び出されてGitHub、state、process、test、CI、mergeを調整する
+- Claude Codeは既存のactive sessionをhost / coderとして使用し、実装・修正・test・commit・push・PR更新とユーザー向け説明を担当する
+- Codexは各review turnをfresh sessionで起動するreviewer / final reporterとしてread-onlyで動作し、code変更、commit、push、GitHubへの直接書き込みを行わない
+- Codexへ必要なcontextはIssue、PR、diff、対象head、GitHub上のClaude / Codex / ユーザー発言から毎回再構築し、既存のCodex PowerShell sessionのmemoryへ依存しない
 - GitHubへのagent発言はControllerだけが代理投稿し、agentの意味的な内容を変更しない
 - ユーザーの明示承認がない無人auto-merge、deploy、本番操作は行わない
 
@@ -83,12 +85,14 @@
 
 - MVPは既存PRを対象とするPR modeから開始する
 - Issue modeはPR modeの実運用確認後に追加する
-- Controller terminalには現在state、次action、GitHub URLを簡潔に表示し、詳細と正式な会話履歴はGitHubで確認できるようにする
-- 詳細確認用にClaude logとCodex logを別tab / paneで表示できるようにする
+- 既存リポジトリのClaude Code Skill modeを主経路とし、`agent-loop` headless CLIは補助・復旧経路として維持する
+- 対話型Claude Code terminalには現在state、次action、GitHub URLを簡潔に表示し、詳細と正式な会話履歴はGitHubで確認できるようにする
+- Codexのfresh subprocess logは、必要に応じて別PowerShell tab / paneで観測できるようにする
 - final reportは日本語で生成し、PRコメント、local artifact、terminal summaryへ出力する
 - reviewとfixは最大3 roundを既定とする
 - review承認後もCIがpendingなら`WAITING_CI`としてmerge可能扱いにしない
 - ユーザー判断とmerge gateの操作は、既存の対話型Claude Code PowerShell sessionで受け取り、ControllerがGitHubへcanonical recordとして転記・確認してから進行する
+- Codex reviewer / final reporterは現在headごとにfreshなread-only subprocessとして起動する
 - 既存のGitHub comment transport、public renderer、round metadata、resume、`discuss` transcriptを再利用し、Controllerの実装を最小化する
 
 ### Open
@@ -103,6 +107,7 @@
 - local artifactの既定保存期間とcleanup方法
 - approved follow-upをfinal reportだけに表示するか、別Issueを自動作成するか
 - Claudeのpermission要求を、明示停止後にどの経路で承認・再実行するか
+- Claude Code Skillを任意の対象repositoryから利用可能にする配布方式を、repo-local Skill、user-level plugin / Skill、MCP併用のどれにするか
 
 ## 4. 完了の定義
 
@@ -134,18 +139,20 @@
 - 対象repository、`gh`、Claude Code、Codexの認証が完了している
 - coder用とreviewer用のworktreeを準備できる
 
-ユーザー操作:
+ユーザー操作（主経路: 既存のClaude Code PowerShell sessionへ入力）:
 
-```powershell
-claude-codex-dev-loop pr 512 --repo OWNER/REPO
+```text
+/coding-review-agent-loop pr 512 --repo OWNER/REPO --reviewers codex
 ```
+
+同じ内容を自然言語で指示してもよい。現在のactive Claude Code sessionを使用せずheadlessで起動・復旧する場合だけ、既存CLIの`agent-loop pr 512 --repo OWNER/REPO --reviewer codex`を補助経路として使用する。
 
 期待する処理:
 
 1. Controllerがrepository、PR、author、base/head、mergeability、lockを確認する
 2. ControllerがPR conversation、review、review thread、agent metadataを取得し、未処理のユーザー発言と再開可能地点を確認する
-3. Codex reviewer用checkoutを現在のPR headへ同期する
-4. Codexがread-onlyでreviewし、JSON Schemaに従うfindingを返す
+3. Skill / Controller helperがCodex reviewer用checkoutを現在のPR headへ同期し、過去のCodex TUI memoryを引き継がないfresh sessionを起動する
+4. CodexがIssue、PR、diff、対象headとGitHub上のcanonical conversationを入力としてread-onlyでreviewし、JSON Schemaに従うfindingを返す
 5. Controllerが出力を検証・公開用にrenderし、Codex reviewとしてGitHubへ投稿する。投稿結果を再取得し、comment / review ID、URL、本文hash、対象head SHAの一致を確認する
 6. findingがなければ、永続化されたreview承認を現在headへbindして承認後gateへ進む
 7. blocking findingがあればClaude coder用checkoutを現在headへ同期し、GitHubへ永続化されたCodex commentと関連threadだけを正式なreview入力として渡す
@@ -153,7 +160,7 @@ claude-codex-dev-loop pr 512 --repo OWNER/REPO
 9. Claude Codeがfindingへ同意した場合は必要な修正とtestを行い、commit・pushする。Controllerが新head SHAを確認する
 10. ControllerがClaudeの対応内容、finding disposition、test結果、新head SHAをGitHubへ投稿し、read-after-writeで確認する
 11. 次のagentを起動する直前にGitHubの差分を再取得する。新しいユーザー発言があれば未処理のまま進まず、promptへ反映するかユーザー判断として停止する
-12. Codexは新headとGitHub上のClaude responseに対してfresh sessionで再レビューする
+12. Codexは新headとGitHub上のClaude responseに対して、前回sessionを再利用しないfresh read-only sessionで再レビューする
 13. 最大roundまたは停止条件まで4～12を反復する
 14. 承認されたheadでfinal local testとGitHub CIを確認する
 15. Codex final reporterがGitHub上の正式な会話履歴とapproved headをread-onlyで確認し、最終レポートを生成する
@@ -167,9 +174,11 @@ claude-codex-dev-loop pr 512 --repo OWNER/REPO
 
 **Behavior: Decided / Delivery phase: Proposed for a later phase**
 
-```powershell
-claude-codex-dev-loop issue 436 --repo OWNER/REPO
+```text
+/coding-review-agent-loop issue 436 --repo OWNER/REPO --reviewers codex
 ```
+
+自然言語では「`OWNER/REPO`のIssue #436を計画・実装し、Codex reviewまで進めてください」のように指示できる。Skillは実装まで進むか、承認済みplanで停止するかをユーザー意図から確認する。
 
 Issue modeでは、指定Issueのタイトル・本文・採用対象コメントを実装要件としてClaude Codeへ渡す。ここで指定する番号は実装対象のIssue番号であり、既存PR番号ではない。
 
@@ -220,13 +229,15 @@ GitHub Issue / PRは、Claude Code、Codex、ユーザーが共有する正式�
 
 | Existing capability | Reuse | Required extension |
 | --- | --- | --- |
+| `SKILL.md` / `.claude/commands/coding-review-agent-loop.md` | active Claude Code sessionから自然言語またはslash commandで開始 | 任意の対象repositoryから利用できる配布・path解決方式を追加する |
+| `helpers.skill_runner` | Codex subprocess、GitHub metadata、round stateを既存Skillから利用 | fresh reviewer、decision gate、明示承認後mergeを共通protocolへ追加する |
 | `post_issue_comment` / `post_pr_comment` | Issue / PRへの代理投稿 | comment ID、URL、本文hashを返し、read-after-write確認を行う |
 | `render_public_agent_comment` | agent / modelを明示した公開用render | decision request、clarification question / answerのkindを追加する |
 | round metadata / resume | GitHub commentからroundを復元 | finding / decision / turn、返信元、head SHAをcanonical metadataにする |
 | `discuss` mode transcript | 各participantの発言とsummaryを個別投稿 | Claude–CodexのPR clarificationへ一般化する |
 | `get_pr_review_context` | PR conversationとhuman requirement取得 | review thread、増分cursor、投稿後検証を追加する |
 
-Controllerへ残す責務は、CLI process起動・停止、worktree分離、schema検証、redaction、GitHub transport、idempotency、head binding、lock、turn / round上限、test / CI gate、明示承認の検証、merge実行・確認、cancel / resumeに限定する。agent間の意味的な要約、推奨生成、独自message queue、会話専用local databaseは実装しない。
+Controller helperへ残す責務は、external CLI process起動・停止、worktree分離、schema検証、redaction、GitHub transport、idempotency、head binding、lock、turn / round上限、test / CI gate、明示承認の検証、merge実行・確認、cancel / resumeに限定する。Claude Code hostが会話・実装・説明を担当し、Controllerにはagent間の意味的な要約、推奨生成、独自message queue、会話専用local databaseを実装しない。
 
 ### 5.5 READY_FOR_HUMAN_MERGE interaction
 
@@ -270,37 +281,33 @@ Round      : 2 / 3
 State      : RUNNING_REVIEW
 
 [12:10:03] PR and trust policy validated
-[12:10:04] Codex reviewer started in read-only mode
+[12:10:04] Fresh Codex reviewer started in read-only mode
 [12:13:20] Review completed: 2 blocking findings
-[12:13:21] Claude coder started
+[12:13:21] Active Claude Code host started applying fixes
 [12:19:48] Tests passed: 128 passed
 [12:20:12] Pushed new head: fedcba9
 [12:20:14] Starting fresh review for fedcba9
 
-Claude log : .agent-loop-logs/<run-id>-claude.log
-Codex log  : .agent-loop-logs/<run-id>-codex.log
+Skill state : GitHub AGENT_LOOP_META + local session cache
+Codex log   : .agent-loop-logs/<run-id>-codex.log
 ```
 
-Controller terminalは、agentの思考全文ではなく、ユーザーが判断に必要なstate、round、SHA、test、CI、次の処理を表示する。
+対話型Claude Code terminalは、ユーザーとの会話・実装contextを維持しながら、agentの思考全文ではなく、判断に必要なstate、round、SHA、test、CI、次の処理を表示する。
 
 ### 6.2 監視pane
 
 **Status: Proposed**
 
-Windows Terminalでは任意wrapperにより次の3 paneを開ける。
+Windows Terminalでは、主操作用のClaude Code PowerShellと、fresh Codex subprocessのlog監視用PowerShellを次のように配置できる。
 
 ```text
-+----------------------+----------------------+
-| Controller           | Claude log           |
-| state / round / SHA  | implementation log   |
-| test / CI / action   | test / commit / push |
-+----------------------+----------------------+
-| Codex log                                   |
-| review progress / structured output         |
-+---------------------------------------------+
++--------------------------------+-----------------------------+
+| Claude Code host               | Codex reviewer log          |
+| 対話・Skill・state・実装・承認 | fresh subprocessの進行・結果 |
++--------------------------------+-----------------------------+
 ```
 
-Linux/SSHでは同じ役割を`pwsh`と、必要に応じて`tmux` paneで提供する。監視paneは観測専用であり、Controllerによる実行中agent TUIへのキー入力先にはしない。ただし`READY_FOR_HUMAN_MERGE`では、ユーザーが既存の対話型Claude Code PowerShell画面へ自分で質問・修正依頼・merge承認を入力する。
+Linux/SSHでは同じ役割を`pwsh`と、必要に応じて`tmux` paneで提供する。Codex側paneは既存Codex TUIのsessionではなく、Skillが起動したfresh read-only subprocessのlogを観測する。ControllerによるTUIへのキー入力は行わず、ユーザー操作はClaude Code PowerShell画面へ入力する。
 
 ### 6.3 merge判断gateの表示
 
@@ -619,13 +626,13 @@ Claude / CodexへGitHub書込credentialを渡さず、Controllerだけが代理�
 
 **Status: Proposed**
 
-ユーザーは同じPR commandを再実行するだけで、安全なcheckpointから再開できる。
+ユーザーは同じClaude Code Skill commandをactive sessionまたは新しいClaude Code sessionで再実行するだけで、安全なcheckpointから再開できる。
 
-```powershell
-claude-codex-dev-loop pr 512 --repo OWNER/REPO
+```text
+/coding-review-agent-loop pr 512 --repo OWNER/REPO --reviewers codex
 ```
 
-controllerは最初にGitHub conversationからcanonical stateを再構築し、local checkpointはcacheとして照合する。GitHub上の現在headと保存済みheadを比較し、古いagent session、未確認の投稿、承認を無条件に再利用しない。質問だけ投稿済みで回答がない等のpartial turnは同じturn IDから再開する。
+headless fallbackでは`agent-loop pr 512 --repo OWNER/REPO --reviewer codex`を使用できる。Controller helperは最初にGitHub conversationからcanonical stateを再構築し、local checkpointはcacheとして照合する。GitHub上の現在headと保存済みheadを比較し、古いagent session、未確認の投稿、承認を無条件に再利用しない。質問だけ投稿済みで回答がない等のpartial turnは同じturn IDから再開する。
 
 ### 10.4 GitHub conversation failure
 
@@ -760,7 +767,9 @@ PR #512は、WindowsとLinuxでagent processを安全に停止できるplatform 
 ### Proposed MVP inclusions
 
 - 手動起動のPR mode
-- Claude coder / Codex reviewer固定preset
+- 既存の対話型Claude Code PowerShell sessionから呼び出すClaude Code Skill modeを主経路とする
+- active Claude host / coderと、fresh read-only Codex reviewerの固定preset
+- `agent-loop` headless CLIを補助・復旧経路として維持する
 - reviewer read-only保証
 - review -> fix -> re-review、最大round
 - head SHA binding、coder snapshot、PR lock
@@ -787,6 +796,7 @@ PR #512は、WindowsとLinuxでagent processを安全に停止できるplatform 
 
 - PR自動検知、watcher、webhook、label trigger
 - 対話型agent TUIへのキー入力注入
+- 既存のCodex対話sessionをautomation reviewerとして再利用すること
 - 明示承認のない無人auto-merge、GitHub auto-merge予約、曖昧な入力によるmerge
 - deploy、本番操作
 - Windowsから複数SSH先を中央制御するremote execution system
@@ -808,6 +818,7 @@ Issue #2で次を順に確認する。
 | Q-009 | approved follow-upをどう表示するか | merge判断と追加Issue作成へ影響 | reportでsummary、Issue自動作成なし |
 | Q-010 | Claude permission要求をどう扱うか | bypassせず自動化する境界を決める | 停止して明示的にユーザーへ提示 |
 | Q-011 | どのmerge methodを使用するか | repository履歴、branch protection、commit構成へ影響 | repository既定を尊重し、必要なら明示設定 |
+| Q-012 | Claude Code Skillを任意repositoryへどう配布するか | 現行はrepo rootまたは`helpers/`・`SKILL.md`配置が必要で、複数repository運用の導入負荷へ影響 | user-level plugin / Skillを第一候補とし、MCPは決定論的Controller toolの公開が必要になった段階で検討 |
 
 ## 15. Decision log
 
@@ -815,7 +826,7 @@ Issue #2で次を順に確認する。
 | --- | --- | --- | --- | --- |
 | D-001 | 2026-08-17 | 実行はユーザーがIssue / PR commandで開始する | Decided | Issue #1 discussion |
 | D-002 | 2026-08-17 | PR自動検知、watcher、webhook、label triggerは対象外 | Decided | Issue #1 discussion |
-| D-003 | 2026-08-17 | Controllerは対話型TUIへキー入力を注入せず、agent turnを非対話CLIとして起動する | Partially superseded by D-013: READY gateではユーザー自身がClaude Code画面へ入力可 | Issue #1 roadmap、PR #3 discussion |
+| D-003 | 2026-08-17 | Controllerは対話型TUIへキー入力を注入せず、agent turnを非対話CLIとして起動する | Superseded by D-014 / D-015: Claudeはactive Skill host、Codexだけをfresh subprocess化。キー注入禁止は維持 | Issue #1 roadmap、PR #3 discussion |
 | D-004 | 2026-08-17 | PowerShellからの操作・log監視を維持する | Decided | Issue #1 roadmap |
 | D-005 | 2026-08-17 | 明示承認のない無人auto-merge、deploy、本番操作は行わない | Decided | Issue #1 roadmap、PR #3 discussion |
 | D-006 | 2026-08-17 | 正常なterminal stateは`READY_FOR_HUMAN_MERGE` | Superseded by D-013 | Issue #1 roadmap |
@@ -826,6 +837,8 @@ Issue #2で次を順に確認する。
 | D-011 | 2026-08-17 | ClaudeはCodexの返答へ同一topicあたり最大5 clarification turnsまで再問い合わせでき、解決・no-progress・ユーザー判断移行時は早期終了する | Decided | PR #3 discussion |
 | D-012 | 2026-08-17 | GitHub Issue / PRをagent・ユーザー間の正式なconversation sourceとし、各論理turnを投稿・read-after-write確認してから次agentを起動する | Decided | PR #3 discussion |
 | D-013 | 2026-08-17 | `READY_FOR_HUMAN_MERGE`をClaude Code PowerShell画面で質問・修正依頼・明示承認を受ける対話gateとし、明示承認をGitHubへ記録後、Controllerが同一headを再検証・merge・確認して`MERGED`を正常な最終状態とする | Decided | PR #3 discussion |
+| D-014 | 2026-08-17 | 主操作は既存の対話型Claude Code PowerShell sessionからClaude Code Skillを呼び出し、active sessionの会話contextを維持したままClaudeがhost / coderを担当する。`agent-loop` CLIはheadless・復旧用の補助経路とする | Decided | PR #3 discussion |
+| D-015 | 2026-08-17 | Codex reviewer / final reporterは既存の対話sessionを再利用せず、現在headとGitHub canonical conversationを入力に毎回freshなread-only subprocessとして実行する | Decided | PR #3 discussion |
 
 ## 16. Agreement checklist
 
@@ -838,13 +851,14 @@ Issue #2で次を順に確認する。
 - [ ] Claude Code–Codex clarification protocolと5 turn上限を確認した
 - [ ] GitHub-backed conversation、投稿gate、Issue→PR handoffを確認した
 - [ ] Controllerの最小責務と既存GitHub transport再利用方針を確認した
+- [ ] Claude Code Skillを主経路とし、active Claude contextとfresh Codex reviewerを組み合わせる方針を確認した
 - [ ] `READY_FOR_HUMAN_MERGE`での質問・修正依頼・明示承認と、`MERGED`までの遷移を確認した
 - [ ] merge承認のhead binding、直前検証、失敗時の安全動作を確認した
 - [ ] roleとpermission boundaryを確認した
 - [ ] final reportの形式とサンプルを確認した
 - [ ] Windows / Linux SSHの差異を確認した
 - [ ] MVP inclusions、later phases、exclusionsを確認した
-- [ ] Q-001～Q-011を解決または判断時期付きで保留した
+- [ ] Q-001～Q-012を解決または判断時期付きで保留した
 - [ ] 文書statusを`Agreed`へ変更した
 - [ ] implementation plan作成へ進むことをIssue #2で確認した
 
