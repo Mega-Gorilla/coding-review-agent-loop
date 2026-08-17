@@ -28,9 +28,9 @@
 主要な役割:
 
 - **User**: 実行を開始し、必要な判断を行い、最後にmerge可否を決定する
-- **Controller**: GitHub、worktree、agent、test、CI、state、logを調整する
-- **Claude coder**: 実装・修正・test・commit・push・PR更新を行う
-- **Codex reviewer**: 現在のPR headをread-onlyでレビューする
+- **Controller**: LLMを内包せず、GitHub、worktree、agent、test、CI、state、logを決定論的に調整する
+- **Claude coder**: 実装・修正・test・commit・push・PR更新に加え、判断事項とユーザー向け説明を作成する
+- **Codex reviewer**: 現在のPR head、Claudeの判断依頼、Claudeからの再質問をread-onlyでレビューする
 - **Codex final reporter**: 承認済みheadの変更と検証履歴をread-onlyで説明する
 
 ## 3. 完成状態の要約
@@ -48,7 +48,9 @@
 - mergeはユーザーがGitHub上で手動実行する
 - Issue modeでは、指定Issueのタイトル・本文・採用対象コメントを実装要件として使用する
 - Issueに対応するPRが既に存在する場合は、重複作成せず既存PRからPR modeへ合流する
-- 実装中に仕様上の判断が必要になった場合は変更を止め、Claudeの候補とCodexの独立意見を揃えてから、推奨案付きでユーザーへ判断を求める
+- 実装中に仕様上の判断が必要と思われる場合、Claudeが作成した問題定義・候補・意見をCodexがレビューし、ユーザー判断の要否も判定する
+- ユーザー判断が必要な場合はClaudeがCodexの指摘を反映したdecision briefを作成して停止し、不要な場合はPRへ判断記録を残して継続する
+- ClaudeはCodexの返答に疑問・異論・追加確認がある場合、同一topicについて最大5 clarification turnsまで再問い合わせできる
 
 ### Proposed
 
@@ -68,7 +70,7 @@
 - SSH切断後も標準機能として継続させるか、`tmux`等の運用手順で対応するか
 - final reportを常に日本語にするか、repository設定で言語を選択可能にするか
 - CI待ちをcontrollerがforegroundで継続するか、一度終了してユーザーがresumeするか
-- ユーザーへのclarificationをterminal入力だけで行うか、GitHub commentも使用するか
+- ユーザー判断の回答をterminal入力だけで行うか、GitHub commentも使用するか
 - local artifactの既定保存期間とcleanup方法
 
 ## 4. 完了の定義
@@ -222,8 +224,9 @@ No merge was performed.
 | `RUNNING_REVIEW` | Codexが現在headをreview中 |
 | `CHANGES_REQUESTED` | blocking findingがあり、修正が必要 |
 | `APPLYING_FIXES` | Claude Codeがfindingを評価・修正中 |
-| `REVIEWING_DECISION_OPTIONS` | Claudeが提示した判断候補をCodexが独立に評価中 |
-| `AWAITING_USER_DECISION` | 候補、両agentの意見、推奨案を提示済みでユーザー判断待ち |
+| `CLARIFYING_REVIEW` | 同一findingまたは判断依頼についてClaudeとCodexが追加確認中 |
+| `REVIEWING_DECISION_REQUEST` | Claudeの判断依頼とユーザー判断の要否をCodexが評価中 |
+| `AWAITING_USER_DECISION` | ClaudeがCodex reviewを反映した候補と推奨案を提示済みでユーザー判断待ち |
 | `WAITING_CI` | review承認済みだが対象headのCI待ち |
 | `GENERATING_REPORT` | final reporter実行中 |
 | `READY_FOR_HUMAN_MERGE` | test・CI・reportが揃い、ユーザー判断待ち |
@@ -237,16 +240,23 @@ flowchart TD
     Start[User starts issue or PR command] --> Validate[Validate target, policy, head and lock]
     Validate --> Review[RUNNING_REVIEW]
     Review -->|Blocking findings| Changes[CHANGES_REQUESTED]
+    Changes -->|Question or disagreement| Clarify[CLARIFYING_REVIEW]
+    Clarify -->|Confirmed or revised| Changes
+    Clarify -->|Finding withdrawn| Review
+    Clarify -->|User decision may be required| DecisionReview[REVIEWING_DECISION_REQUEST]
+    Clarify -->|No progress or 5 turns reached| Blocked[BLOCKED]
     Changes --> Fix[APPLYING_FIXES]
     Fix -->|New head| Review
-    Fix -->|Material product or implementation decision| DecisionReview[REVIEWING_DECISION_OPTIONS]
-    DecisionReview --> AwaitDecision[AWAITING_USER_DECISION]
+    Fix -->|Material product or implementation decision| DecisionReview
+    DecisionReview -->|REVISE_AND_RESUBMIT| DecisionReview
+    DecisionReview -->|PROCEED_WITH_RECORD| Fix
+    DecisionReview -->|ASK_USER; Claude prepares brief| AwaitDecision[AWAITING_USER_DECISION]
     AwaitDecision -->|User decision recorded| Fix
     Review -->|Approved exact head| CI[WAITING_CI]
     CI -->|Tests and CI pass| Report[GENERATING_REPORT]
     Report -->|Report saved and posted| Ready[READY_FOR_HUMAN_MERGE]
     Validate --> Failed[FAILED]
-    Review --> Blocked[BLOCKED]
+    Review --> Blocked
     DecisionReview --> Blocked
     AwaitDecision --> Cancelled
     Fix --> Blocked
@@ -263,10 +273,11 @@ flowchart TD
 
 | Situation | Automatic behavior | User receives | Resume |
 | --- | --- | --- | --- |
-| Codex finds blockers | Claudeへ渡して自動継続 | round summary | 不要 |
+| Codex finds blockers | Claudeが評価し、同意すれば修正、疑問があれば`CLARIFYING_REVIEW` | round summary | 不要 |
+| Claude questions a Codex response | 同一topicで最大5 clarification turnsまでCodexへ再問い合わせ | 結論または停止理由のsummary | 通常は不要。未解決時のみ判断または追加検証 |
 | Same finding remains | bounded retry後に停止 | unresolved findingとevidence | 同じPRから再開 |
 | Max rounds reached | `BLOCKED` | 全未解決findingと推奨対応 | max rounds変更または手動修正後に再開 |
-| Claude requests a material decision | `REVIEWING_DECISION_OPTIONS`へ移行し、Codexの独立意見を取得後に`AWAITING_USER_DECISION`で停止 | 判断理由、候補、影響、Claude / Codexの意見、推奨案 | ユーザーの決定を記録してClaudeへ渡し、同じPRから再開 |
+| Claude identifies a material decision | `REVIEWING_DECISION_REQUEST`でCodexが判断要否と提案内容を評価 | `ASK_USER`時のみ、Claudeが作成した判断理由、候補、影響、両者の見解、推奨案 | ユーザーの決定を記録してClaudeへ渡し、同じPRから再開 |
 | Permission required | bypassしない | 必要な操作と理由 | ユーザー承認後に再開 |
 | Quota exhausted | retry loopを止める | agent、reset情報、保存済みstate | quota回復後に再開 |
 | Authentication failure | `FAILED` | 対象CLIと再認証手順 | 認証後に再開 |
@@ -281,12 +292,25 @@ flowchart TD
 
 要件だけでは実装方針を一意に決められず、選択によってユーザー体験、互換性、security、運用、scopeのいずれかが実質的に変わる場合は、agentが推測で決定しない。単純な内部実装の詳細や、安全かつ容易に戻せる選択まで毎回問い合わせる必要はない。
 
-1. Claude Codeは変更を止め、判断が必要な理由、制約、候補、各候補の利点・欠点・影響、自身の推奨案を構造化して返す。
-2. Controllerはsource変更、commit、pushを進めず、stateを`REVIEWING_DECISION_OPTIONS`にする。
-3. Codexはread-onlyでIssue、PR、現在のdiff、Claudeの候補を確認し、候補の不足、risk、要件との整合性、独立した推奨案を返す。
-4. Controllerは両agentの見解を出典付きで統合し、平易な説明、選択肢、推奨案とその理由をユーザーへ提示して`AWAITING_USER_DECISION`で停止する。両agentの意見が異なる場合は、相違を隠さず並べて示す。
-5. ユーザーが候補を選択するか別案を指示したら、Controllerは回答をdecision ledgerへ記録し、その決定を改変せずClaudeへ渡して実装を再開する。
-6. 次のCodex reviewでは、通常のcode reviewに加えて、実装が記録されたユーザー決定へ適合していることを確認する。
+ControllerはLLMとして問題を解釈したり推奨を生成したりしない。意味的な提案はClaudeが作成し、その妥当性をCodexがreviewする。Controllerは構造化出力の検証、受け渡し、state遷移、記録、表示だけを行う。
+
+1. Claude Codeは変更を止め、判断が必要と考えた理由、制約、候補、各候補の利点・欠点・影響、自身の推奨案をdraft decision requestとして構造化する。
+2. Controllerは対象head SHAを固定し、source変更、commit、pushを進めず、stateを`REVIEWING_DECISION_REQUEST`にする。Issue、PR、diff、関連codeとdraftをCodexへ渡す。
+3. Codexはread-onlyで、ユーザー判断フローを開始する定義に該当するか、Claudeの問題定義・候補・意見が適切か、既存要件から自動決定できないかをreviewする。
+4. ClaudeはCodexの判定と指摘を受け取り、必要ならclarification protocolで再問い合わせする。
+5. `ASK_USER`の場合、ClaudeはCodexの指摘を省略せず反映した最終decision briefを作成する。Controllerがschemaと必須項目を検証して表示し、`AWAITING_USER_DECISION`で停止する。
+6. `PROCEED_WITH_RECORD`の場合、Claudeが根拠へ同意すればPRへdecision recordを残して実装を継続する。Claudeがなおユーザー判断を必要と考える場合は、安全側に倒してユーザーへ問い合わせる。
+7. `REVISE_AND_RESUBMIT`の場合、Claudeは問題定義または候補を修正してCodexへ再提出する。同一topicの再提出はclarification turnとして数える。
+8. ユーザーが候補を選択するか別案を指示したら、Controllerは回答をdecision ledgerへ記録し、その決定を改変せずClaudeへ渡して実装を再開する。
+9. 次のCodex reviewでは、通常のcode reviewに加えて、実装が記録されたユーザー決定へ適合していることを確認する。
+
+Codexは次のいずれかを返す。
+
+| Verdict | Meaning | Next action |
+| --- | --- | --- |
+| `ASK_USER` | 外部仕様、ユーザー体験、互換性、security、運用、scope等に実質的な選択が残る | Claudeが最終decision briefを作成して停止 |
+| `PROCEED_WITH_RECORD` | Issue、PR、既存方針、明確な制約等から決定でき、ユーザー判断は不要 | ClaudeがPRへ根拠と採用実装を記録して継続 |
+| `REVISE_AND_RESUBMIT` | 問題定義、影響調査、候補、根拠のいずれかが不足または不正確 | Claudeが修正し、Codexへ再提出 |
 
 ユーザーへ提示するdecision briefは最低限、次を含む。
 
@@ -296,9 +320,10 @@ flowchart TD
 | 判断が必要な内容 | 何を決める必要があり、なぜ今は自動決定できないか |
 | 制約と影響範囲 | 要件、互換性、security、運用、変更対象 |
 | 候補 | 各案の内容、利点、欠点、risk、見送った場合の影響 |
-| Claudeの意見 | coderとしての推奨案と根拠 |
-| Codexの意見 | reviewerとしての独立評価、追加候補、推奨案と根拠 |
-| システムの推奨表示 | 両者の根拠から推奨する候補。意見が割れた場合はその旨を表示 |
+| Claudeの最終意見 | Codex reviewを反映したcoderとしての推奨案と根拠 |
+| Codex review | 判断要否の判定、問題定義への修正、追加候補、risk、推奨案と根拠 |
+| 意見の相違 | 両者が一致しない点を省略せず表示 |
+| 推奨表示 | Claudeが最終的に推奨する候補と理由。`Recommended`を付け、Codexと異なる場合は明示 |
 | 回答方法 | 番号付き候補を示し、推奨候補へ`Recommended`を付ける。自由記述も受け付ける |
 
 表示例:
@@ -316,14 +341,50 @@ AWAITING_USER_DECISION (decision-003)
     利点: 初回利用が簡単になる
     欠点: 意図しないfile書き込みが発生する
 
-Claudeの意見: [2]。初回利用を簡単にできるため
-Codexの意見: [1]。暗黙のfile書き込みを避けられるため
-推奨: [1]。既存互換性と安全性を優先するため
+Claudeの当初意見: [2]。初回利用を簡単にできるため
+Codex review: ASK_USER。[1]は暗黙のfile書き込みを避けられる
+Claudeの最終意見: [1]。Codexの指摘を踏まえ、安全性と互換性を優先する
+推奨: [1] (Recommended)
 
 1または2を選択するか、別案を入力してください。
 ```
 
 ユーザー回答を待つ間は、同じ判断に関係するsource変更、commit、pushを行わない。安全なcheckpoint保存、status表示、cancelは許可する。
+
+`PROCEED_WITH_RECORD`で継続する場合、PRのdecision recordにはDecision ID、検討事項、Claudeの当初判断、Codexのverdictと根拠、採用実装、対象head SHAを残す。Controllerは同一runの記録を冪等に作成または更新し、PR commentの重複を避ける。
+
+### Decided: Claude Code–Codex clarification protocol
+
+このprotocolはユーザー判断フローだけでなく、通常のcode review、findingの意味・scope・根拠、修正案、誤検出の再評価等、ClaudeがCodexの返答へ疑問・異論・追加確認を持つすべての場面に適用する。
+
+- 1 clarification turnは「ClaudeからCodexへの1回の質問または再提出」と「CodexからClaudeへの1回の回答」の一往復とする
+- 最初のCodex reviewはturn数へ含めず、同一topicについて追加のclarification turnを最大5回まで許可する
+- counterは`run ID + finding / decision fingerprint`で管理し、同じ問題のままhead SHAだけが変わってもリセットしない
+- Claudeの質問には、対象finding、疑問点、根拠、期待する確認内容を含める。新しい根拠のない単なる否定や同一質問の反復は認めない
+- clarification中は対象headを固定し、source変更、commit、pushを行わない。codeを変更した場合はclarificationを終了し、新しいreview roundとして扱う
+- review / fixの最大round数とclarification turn数は別々に管理する
+
+Codexは通常reviewのclarificationへ次のいずれかを返す。
+
+| Result | Meaning |
+| --- | --- |
+| `CONFIRMED` | 元のfindingまたは回答を維持する |
+| `REVISED` | findingの問題定義、severity、scope、修正案等を変更する |
+| `WITHDRAWN` | Claudeの説明または追加evidenceを受け、findingを撤回する |
+| `MORE_EVIDENCE_REQUIRED` | 判断に必要な調査、test、再現条件等を明示する |
+| `USER_DECISION_REQUIRED` | 技術的な正誤だけでは解決できず、D-010のユーザー判断フローへ移行する |
+
+次の場合は5回を待たずにclarificationを終了する。
+
+- Claudeがfindingまたは修正後の内容へ同意した
+- Codexがfindingを撤回した
+- ユーザー判断または外部情報・permissionが必要と判明した
+- 実質的に同じ主張が2往復続き、新しいevidenceがないためno-progressと判定した
+- IssueまたはPR要件自体の矛盾が判明した
+
+5回で解決しない場合は一方のagentだけで進行を決定せず、`BLOCKED`へ移行する。製品・運用上の選択が残る場合はD-010へ接続し、純粋な技術検証が不足する場合は必要な追加test、再現手順、第三の検証方法をユーザーへ提示する。根拠なく技術的正誤をユーザーへ丸投げしない。
+
+各turnの構造化された質問、回答、evidence、resultはlocal artifactへ保存する。PRには生の内部推論ではなく、議論の要約、根拠、最終結果、採用した対応だけをdecision / review discussion logとして記録する。
 
 ### Open intervention questions
 
@@ -343,10 +404,13 @@ Codexの意見: [1]。暗黙のfile書き込みを避けられるため
 | Modify code | Optional | Coordination only | Yes | **No** |
 | Run repository tests | Yes | Gate | Yes | Review only by default |
 | Commit / push | Yes | Verify | Yes | **No** |
+| Draft / review decision brief | Decide | Validate / route only | Draft | Review |
 | Post GitHub comments | Yes | Yes | Through controller only | **No direct write** |
 | Merge / deploy | **User only** | **No** | **No** | **No** |
 
 Reviewerのread-onlyはプロンプト上の依頼ではなく、sandbox、profile、worktree、credential、network、MCP、hookの能力制限で保証する。
+
+Controllerは非LLMのstate machineとし、agentの意見や推奨を創作しない。Claude / Codexの構造化出力をschema検証し、欠落があれば再実行または停止する。
 
 ### Proposed safety behavior
 
@@ -370,6 +434,7 @@ Reviewerのread-onlyはプロンプト上の依頼ではなく、sandbox、profi
 - base SHA、observed head SHA、approved head SHA
 - state、round、agent role、session ID
 - finding ledgerとresolution
+- clarification counter、finding / decision fingerprint、構造化された質問・回答・evidence・result
 - coder実行前後のHEAD、dirty status、push後head
 - test command、cwd、result、duration
 - GitHub check名、result、URL
@@ -509,6 +574,7 @@ No merge or deployment was performed.
 - cancel、timeout、resume
 - final reporterと`READY_FOR_HUMAN_MERGE`
 - PR comment、local artifact、terminal summary
+- ユーザー判断フローと最大5 clarification turnsの共通対話規約
 - credential redactionと基本trust policy
 
 ### Proposed later phases
@@ -559,7 +625,8 @@ Issue #2で次を順に確認する。
 | D-007 | 2026-08-17 | Issue #1を親roadmap、Issue #2を完成イメージ合意に使う | Decided | Issue #2 |
 | D-008 | 2026-08-17 | 既存docsは初回整理で移動せず、indexで分類する | Decided | Issue #2 preparation |
 | D-009 | 2026-08-17 | Issue modeは指定Issueの内容を実装要件とし、対応PRが既にあれば重複作成せず再利用する | Decided | PR #3 discussion |
-| D-010 | 2026-08-17 | 実装中の重要判断では、Claudeの候補をCodexが独立評価し、推奨付きdecision briefを提示してユーザー決定後に再開する | Decided | PR #3 discussion |
+| D-010 | 2026-08-17 | Claudeのdraft decision requestをCodexが判断要否も含めてreviewし、`ASK_USER`時はClaudeが最終briefを作成して停止、`PROCEED_WITH_RECORD`時はPRへ記録して継続する | Decided | PR #3 discussion |
+| D-011 | 2026-08-17 | ClaudeはCodexの返答へ同一topicあたり最大5 clarification turnsまで再問い合わせでき、解決・no-progress・ユーザー判断移行時は早期終了する | Decided | PR #3 discussion |
 
 ## 16. Agreement checklist
 
@@ -569,6 +636,7 @@ Issue #2で次を順に確認する。
 - [ ] state modelを確認した
 - [ ] user interventionとresume UXを確認した
 - [ ] 実装中のユーザー判断フローとdecision briefを確認した
+- [ ] Claude Code–Codex clarification protocolと5 turn上限を確認した
 - [ ] roleとpermission boundaryを確認した
 - [ ] final reportの形式とサンプルを確認した
 - [ ] Windows / Linux SSHの差異を確認した
