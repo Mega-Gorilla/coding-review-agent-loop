@@ -44,6 +44,7 @@
 
 - ユーザーがIssue番号またはPR番号を指定して明示的に開始する
 - PR自動検知、常駐watcher、webhook、label triggerは使用しない
+- 最初のreleaseにはPR modeとIssue modeの両方を含め、Issue指定からPR作成・review loop・merge完了まで利用可能にする
 - Windows PowerShell 7とLinux/SSH上のPowerShell 7を対象とする
 - 主操作は既存の対話型Claude Code PowerShell sessionからClaude Code Skillを自然言語またはslash commandで呼び出す
 - 既存の対話型Claude Code / Codex TUIへキー入力を注入しない
@@ -83,8 +84,8 @@
 
 ### Proposed MVP defaults
 
-- MVPは既存PRを対象とするPR modeから開始する
-- Issue modeはPR modeの実運用確認後に追加する
+- 内部の実装順序はPR modeのGitHub transport・review loopを先に構築し、その上にIssue取得・実装・Issue→PR handoffを追加する
+- 最初のreleaseはPR modeとIssue modeの両方の受入条件を満たしてから提供する
 - 既存リポジトリのClaude Code Skill modeを主経路とし、`agent-loop` headless CLIは補助・復旧経路として維持する
 - 対話型Claude Code terminalには現在state、次action、GitHub URLを簡潔に表示し、詳細と正式な会話履歴はGitHubで確認できるようにする
 - Codexのfresh subprocess logは、必要に応じて別PowerShell tab / paneで観測できるようにする
@@ -97,7 +98,6 @@
 
 ### Open
 
-- MVPをPR modeだけに限定し、Issue modeを後続releaseにしてよいか
 - 正常時にagentごとのtabを自動で開くか、任意wrapperとするか
 - SSH切断後も標準機能として継続させるか、`tmux`等の運用手順で対応するか
 - final reportを常に日本語にするか、repository設定で言語を選択可能にするか
@@ -172,7 +172,7 @@
 
 ### 5.2 Issue mode
 
-**Behavior: Decided / Delivery phase: Proposed for a later phase**
+**Behavior / Delivery phase: Decided for the first release**
 
 ```text
 /coding-review-agent-loop issue 436 --repo OWNER/REPO --reviewers codex
@@ -764,9 +764,12 @@ PR #512は、WindowsとLinuxでagent processを安全に停止できるplatform 
 
 ## 13. MVP boundary
 
-### Proposed MVP inclusions
+### MVP inclusions
+
+**PR mode / Issue mode inclusion: Decided. Other implementation details: Proposed.**
 
 - 手動起動のPR mode
+- 手動起動のIssue modeと、Issue要件取得・既存PR再利用・Issue→PR canonical handoff
 - 既存の対話型Claude Code PowerShell sessionから呼び出すClaude Code Skill modeを主経路とする
 - active Claude host / coderと、fresh read-only Codex reviewerの固定preset
 - `agent-loop` headless CLIを補助・復旧経路として維持する
@@ -784,7 +787,6 @@ PR #512は、WindowsとLinuxでagent processを安全に停止できるplatform 
 
 ### Proposed later phases
 
-- Issue mode
 - llm-custom-commands compatibility wrapper
 - 複数reviewer
 - distributed multi-host lock
@@ -807,8 +809,6 @@ Issue #2で次を順に確認する。
 
 | ID | Question | Why it matters | Current recommendation |
 | --- | --- | --- | --- |
-| Q-001 | MVPはPR modeだけでよいか | 最初の実装範囲と復旧難易度を左右する | PR modeから開始 |
-| Q-002 | Issue modeを最初のreleaseへ含めるか | PR作成前後のsalvageが追加で必要 | 後続phase |
 | Q-003 | final reportの既定言語は日本語固定か | schema、template、設定項目へ影響 | 日本語既定、将来選択可能 |
 | Q-004 | CI pending時にforegroundで待ち続けるか | terminal占有とresume UXへ影響 | bounded wait後に`WAITING_CI` |
 | Q-005 | ユーザー判断・merge gateの入力をどの経路で受け取るか | terminal継続、resume、GitHub comment監視の実装方式へ影響 | MVPは既存の対話型Claude Code PowerShell画面で受け取り、ControllerがGitHubへcanonical recordとして転記・確認。直接の非同期GitHub入力は後続phase（D-013） |
@@ -839,6 +839,7 @@ Issue #2で次を順に確認する。
 | D-013 | 2026-08-17 | `READY_FOR_HUMAN_MERGE`をClaude Code PowerShell画面で質問・修正依頼・明示承認を受ける対話gateとし、明示承認をGitHubへ記録後、Controllerが同一headを再検証・merge・確認して`MERGED`を正常な最終状態とする | Decided | PR #3 discussion |
 | D-014 | 2026-08-17 | 主操作は既存の対話型Claude Code PowerShell sessionからClaude Code Skillを呼び出し、active sessionの会話contextを維持したままClaudeがhost / coderを担当する。`agent-loop` CLIはheadless・復旧用の補助経路とする | Decided | PR #3 discussion |
 | D-015 | 2026-08-17 | Codex reviewer / final reporterは既存の対話sessionを再利用せず、現在headとGitHub canonical conversationを入力に毎回freshなread-only subprocessとして実行する | Decided | PR #3 discussion |
+| D-016 | 2026-08-17 | 最初のreleaseへPR modeとIssue modeの両方を含める。内部実装はPR modeを先行可能だが、Issue取得・実装・既存PR再利用・Issue→PR handoff・共通review loopまで完成する前に初回releaseとしない | Decided | PR #3 discussion |
 
 ## 16. Agreement checklist
 
@@ -858,7 +859,7 @@ Issue #2で次を順に確認する。
 - [ ] final reportの形式とサンプルを確認した
 - [ ] Windows / Linux SSHの差異を確認した
 - [ ] MVP inclusions、later phases、exclusionsを確認した
-- [ ] Q-001～Q-012を解決または判断時期付きで保留した
+- [ ] Q-001・Q-002はD-016で解決済みであり、残るQ-003～Q-012を解決または判断時期付きで保留した
 - [ ] 文書statusを`Agreed`へ変更した
 - [ ] implementation plan作成へ進むことをIssue #2で確認した
 
