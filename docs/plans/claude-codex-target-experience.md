@@ -47,6 +47,7 @@
 - 最初のreleaseにはPR modeとIssue modeの両方を含め、Issue指定からPR作成・review loop・merge完了まで利用可能にする
 - Windows PowerShell 7とLinux/SSH上のPowerShell 7を対象とする
 - 主操作は既存の対話型Claude Code PowerShell sessionからClaude Code Skillを自然言語またはslash commandで呼び出す
+- Linux/SSHでは対応`tmux` wrapper内で開始したrunについて、SSH切断後もユーザー判断が不要な範囲を継続し、安全な判断gateまで到達できるようにする
 - 既存の対話型Claude Code / Codex TUIへキー入力を注入しない
 
 #### 役割・権限境界
@@ -94,11 +95,12 @@
 - review承認後もCIがpendingなら`WAITING_CI`としてmerge可能扱いにしない
 - ユーザー判断とmerge gateの操作は、既存の対話型Claude Code PowerShell sessionで受け取り、ControllerがGitHubへcanonical recordとして転記・確認してから進行する
 - Codex reviewer / final reporterは現在headごとにfreshなread-only subprocessとして起動する
+- `tmux`内のSSH runは切断後も自動処理を継続し、ユーザー判断時はGitHubへ資料を投稿して`AWAITING_USER_DECISION`、merge判断時はfinal reportを投稿して`READY_FOR_HUMAN_MERGE`で終了する
+- `tmux`を利用できないSSH環境ではprocess生存を保証せず、GitHub checkpointからのresumeを保証する
 - 既存のGitHub comment transport、public renderer、round metadata、resume、`discuss` transcriptを再利用し、Controllerの実装を最小化する
 
 ### Open
 
-- SSH切断後も標準機能として継続させるか、`tmux`等の運用手順で対応するか
 - final reportを常に日本語にするか、repository設定で言語を選択可能にするか
 - CI待ちをcontrollerがforegroundで継続するか、一度終了してユーザーがresumeするか
 - ユーザー判断・質問・修正依頼・merge承認を直接のGitHub commentで受け取り非同期resumeする機能を、どのreleaseへ含めるか
@@ -263,6 +265,21 @@ merge承認recordには少なくともrepository、PR番号、approved head SHA�
 - GitHubがmergeableと判定し、repository policyで許可されたmerge methodを使用できる
 
 head変更、条件不一致、GitHub API失敗、merge結果未確認のいずれかが起きた場合は、別headを暗黙にmergeしない。承認を無効化するか`MERGE_FAILED`で停止し、差分と再開方法をユーザーへ提示する。
+
+SSH切断等によりユーザーが対話できない場合、Controllerは`READY_FOR_HUMAN_MERGE`とfinal reportをPRへ投稿・確認し、mergeせずrunを終了する。GitHub commentを無期限に監視せず、ユーザーが再接続後にSkillをresumeして質問・修正依頼・明示承認を入力する。
+
+### 5.6 SSH disconnect behavior
+
+**Status: Decided**
+
+Linux/SSHで対応`tmux` wrapper内から開始したrunは、SSH connectionが切断されてもClaude Code Skill、Controller helper、実行中のClaude / Codex subprocessを維持し、ユーザー入力が不要な処理を継続する。
+
+- 仕様判断、permission、未解決の意見相違等でユーザー判断が必要になった場合、判断資料をIssue / PRへ投稿・read-after-write確認し、`AWAITING_USER_DECISION`をcheckpointして終了する
+- review、test、CI、final reportまで完了した場合、PRへfinal reportと`READY_FOR_HUMAN_MERGE`を投稿・確認し、mergeせず終了する
+- quota、credential、network、tool approval等で安全に継続できない場合、可能な範囲で理由とresume方法をGitHubへ記録し、`BLOCKED`または`FAILED`で終了する
+- ユーザー回答をGitHubから無期限にpollして自動resumeしない。再接続後に同じSkill commandでresumeする
+- `tmux`がない、wrapper外で開始した、またはprocess生存を確認できない場合、切断後の継続を保証しない。この場合も、最後に確認済みのGitHub checkpointから再開できるようにする
+- MVPでは独自daemon、systemd service、複数hostを制御する常駐serviceを実装しない
 
 ## 6. 期待するterminal experience
 
@@ -434,6 +451,10 @@ flowchart TD
 | READY gateで明示的なmerge承認 | 承認をPRへ記録し、Controllerが直前検証後にmerge | 対象PR、approved head、検証結果、merge結果 | 成功時は`MERGED` |
 | READY gateの入力が曖昧 | mergeせず明示確認する | 解釈できない点と必要な承認文脈 | 同じgateで再入力 |
 | merge条件不一致・API失敗 | 別headをmergeせず停止 | 不一致、GitHub応答、承認の有効性 | fresh reviewまたは`MERGE_FAILED`から再開 |
+| SSH切断（対応`tmux`内） | ユーザー入力不要な処理を安全gateまで継続 | GitHub上の進行記録、判断資料またはfinal report | 再接続後に同じSkill commandでresume |
+| SSH切断中にユーザー判断が必要 | GitHubへdecision briefを投稿・確認して`AWAITING_USER_DECISION`で終了 | Issue / PR commentとresume方法 | 回答後に明示resume |
+| SSH切断中にmerge-ready | final reportと`READY_FOR_HUMAN_MERGE`をPRへ投稿・確認して終了 | approved head、test、CI、risk。mergeは未実行 | 再接続後に質問・修正依頼・merge承認 |
+| SSH切断（`tmux`外または継続不可） | process継続を保証しない | 最後に確認済みのGitHub checkpoint | 再接続後に同じSkill commandでresume |
 | Ctrl+C | 子process treeを停止 | last checkpointとresume command | 同じPRから再開 |
 | Reporter fails | `REPORT_FAILED` | review承認とreport error | reporterだけ再実行 |
 
@@ -654,6 +675,17 @@ headless fallbackでは`agent-loop pr 512 --repo OWNER/REPO --reviewer codex`を
 - GitHub上でmerge完了を確認できた場合だけ`MERGED`へ遷移する。確認できない場合は成功と表示しない
 - retryまたはresumeでも承認対象と異なるheadをmergeせず、新しい明示承認を要求する
 
+### 10.6 SSH disconnect and detached execution
+
+**Status: Decided behavior / wrapper implementation: Proposed**
+
+- Linux/SSHのpreflightで`tmux`の有無、現在session、永続workdir、GitHub / agent credentialを確認する
+- 対応wrapperはrepository、Issue / PR、run IDへbindした`tmux` sessionを作成または再接続し、同じrunの重複起動を防ぐ
+- `tmux`内ではSSH切断をcancelとして扱わず、ユーザー判断が不要な現在のworkflowを継続する
+- ユーザー判断またはmerge判断へ到達したらGitHubへcanonical recordを投稿・確認し、processを無期限待機させず安全にrunを終了する
+- `tmux`外ではprocess生存を保証せず、突然終了後には新しいGitHub commentを保証しない。最後に確認済みのGitHub recordから再開する
+- wrapperが利用できない、permission promptを非対話で解決できない、または安全な継続を保証できない場合は、bypassせず中断・resumeを選ぶ
+
 ## 11. Final report experience
 
 ### Proposed outputs
@@ -711,7 +743,7 @@ PR #512は、WindowsとLinuxでagent processを安全に停止できるplatform 
 ### Remaining risks and follow-ups
 
 - Windows Store版PowerShellは未検証です
-- SSH切断後の自動継続は今回の対象外です
+- SSH切断後の継続は対応`tmux` wrapper内で保証し、wrapper外ではGitHub checkpointからresumeします
 
 ### merge前の確認
 
@@ -743,8 +775,11 @@ PR #512は、WindowsとLinuxでagent processを安全に停止できるplatform 
 - state名、report schema、GitHub comment形式をOS間で共通化する
 - controllerは対象repositoryと同じマシンで実行する
 - timeout、cancel、resumeを両OSで提供する
+- Linux/SSHでは対応`tmux` wrapperをMVPの切断耐性として提供し、ユーザー判断またはmerge判断までの安全な自動処理を継続できるようにする
 
-### Proposed platform differences
+### Platform differences
+
+**SSH / `tmux` disconnect behavior: Decided. Remaining implementation details: Proposed.**
 
 | Area | Windows | Linux/SSH |
 | --- | --- | --- |
@@ -752,19 +787,17 @@ PR #512は、WindowsとLinuxでagent processを安全に停止できるplatform 
 | Monitoring | Windows Terminal tab / pane | shellまたは`tmux` pane |
 | Process tree | Windows Job Object等 | POSIX process group |
 | Temp paths | `%TEMP%`, `%LOCALAPPDATA%` | `/tmp`, XDG/cache directory |
-| Long-running session | terminalを維持 | `tmux`等を運用手順として案内 |
+| Long-running session | terminalを維持 | 対応`tmux` wrapper内は切断後も継続。wrapper外はGitHub checkpointからresume |
 
 ### Open platform questions
 
-- Linux/SSHで`tmux`を推奨に留めるか、support要件に含めるか
 - Windows Store版とMSI版PowerShellの両方を正式検証するか
-- SSH切断耐性をMVPの受入条件に含めるか
 
 ## 13. MVP boundary
 
 ### MVP inclusions
 
-**PR mode / Issue mode inclusion: Decided. Other implementation details: Proposed.**
+**PR mode / Issue mode and SSH / `tmux` resilience: Decided. Other implementation details: Proposed.**
 
 - 手動起動のPR mode
 - 手動起動のIssue modeと、Issue要件取得・既存PR再利用・Issue→PR canonical handoff
@@ -778,6 +811,7 @@ PR #512は、WindowsとLinuxでagent processを安全に停止できるplatform 
 - Windows/Linux process abstraction
 - cancel、timeout、resume
 - 明示要求時だけ起動する任意のWindows Terminal / `tmux`監視wrapper
+- Linux/SSH用の対応`tmux`継続wrapper、disconnect preflight、重複run防止、安全gateでのGitHub投稿・終了、reconnect / resume
 - final reporter、`READY_FOR_HUMAN_MERGE`対話gate、明示承認後のgated merge、`MERGED`確認
 - PR comment、local artifact、terminal summary
 - ユーザー判断フローと最大5 clarification turnsの共通対話規約
@@ -801,6 +835,7 @@ PR #512は、WindowsとLinuxでagent processを安全に停止できるplatform 
 - 明示承認のない無人auto-merge、GitHub auto-merge予約、曖昧な入力によるmerge
 - deploy、本番操作
 - Windowsから複数SSH先を中央制御するremote execution system
+- 独自daemon、systemd service、常駐型の中央orchestrator
 
 ## 14. Open questions
 
@@ -811,7 +846,6 @@ Issue #2で次を順に確認する。
 | Q-003 | final reportの既定言語は日本語固定か | schema、template、設定項目へ影響 | 日本語既定、将来選択可能 |
 | Q-004 | CI pending時にforegroundで待ち続けるか | terminal占有とresume UXへ影響 | bounded wait後に`WAITING_CI` |
 | Q-005 | ユーザー判断・merge gateの入力をどの経路で受け取るか | terminal継続、resume、GitHub comment監視の実装方式へ影響 | MVPは既存の対話型Claude Code PowerShell画面で受け取り、ControllerがGitHubへcanonical recordとして転記・確認。直接の非同期GitHub入力は後続phase（D-013） |
-| Q-006 | SSH切断耐性をMVPへ含めるか | service化または`tmux`依存へ影響 | `tmux`運用を案内、MVP外 |
 | Q-008 | artifactの保存期間はどの程度か | disk、機密情報、監査要件へ影響 | repo単位設定、既定30日を検討 |
 | Q-009 | approved follow-upをどう表示するか | merge判断と追加Issue作成へ影響 | reportでsummary、Issue自動作成なし |
 | Q-010 | Claude permission要求をどう扱うか | bypassせず自動化する境界を決める | 停止して明示的にユーザーへ提示 |
@@ -839,6 +873,7 @@ Issue #2で次を順に確認する。
 | D-015 | 2026-08-17 | Codex reviewer / final reporterは既存の対話sessionを再利用せず、現在headとGitHub canonical conversationを入力に毎回freshなread-only subprocessとして実行する | Decided | PR #3 discussion |
 | D-016 | 2026-08-17 | 最初のreleaseへPR modeとIssue modeの両方を含める。内部実装はPR modeを先行可能だが、Issue取得・実装・既存PR再利用・Issue→PR handoff・共通review loopまで完成する前に初回releaseとしない | Decided | PR #3 discussion |
 | D-017 | 2026-08-17 | agentごとのtab / paneは既定で自動起動せず、ユーザーがClaude Code画面から明示要求した場合だけ任意wrapperで監視paneを開く。wrapperなしでもcore loopは動作し、Codex paneはfresh subprocessのread-only log監視に限定する | Decided | PR #3 discussion |
+| D-018 | 2026-08-17 | Linux/SSHでは対応`tmux` wrapper内のrunをSSH切断後もユーザー判断不要な範囲で継続する。判断が必要ならGitHubへ資料を投稿して`AWAITING_USER_DECISION`、merge-readyならfinal reportを投稿して`READY_FOR_HUMAN_MERGE`でmergeせず終了する。wrapper外はprocess生存を保証せずGitHub checkpointからresumeし、独自daemonはMVP外とする | Decided | PR #3 discussion |
 
 ## 16. Agreement checklist
 
@@ -858,7 +893,7 @@ Issue #2で次を順に確認する。
 - [ ] final reportの形式とサンプルを確認した
 - [ ] Windows / Linux SSHの差異を確認した
 - [ ] MVP inclusions、later phases、exclusionsを確認した
-- [ ] Q-001・Q-002はD-016、Q-007はD-017で解決済みであり、残るQ-003～Q-006・Q-008～Q-012を解決または判断時期付きで保留した
+- [ ] Q-001・Q-002はD-016、Q-007はD-017、Q-006はD-018で解決済みであり、残るQ-003～Q-005・Q-008～Q-012を解決または判断時期付きで保留した
 - [ ] 文書statusを`Agreed`へ変更した
 - [ ] implementation plan作成へ進むことをIssue #2で確認した
 
