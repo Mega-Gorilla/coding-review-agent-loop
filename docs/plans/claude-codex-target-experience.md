@@ -98,7 +98,6 @@
 
 ### Open
 
-- 正常時にagentごとのtabを自動で開くか、任意wrapperとするか
 - SSH切断後も標準機能として継続させるか、`tmux`等の運用手順で対応するか
 - final reportを常に日本語にするか、repository設定で言語を選択可能にするか
 - CI待ちをcontrollerがforegroundで継続するか、一度終了してユーザーがresumeするか
@@ -296,9 +295,9 @@ Codex log   : .agent-loop-logs/<run-id>-codex.log
 
 ### 6.2 監視pane
 
-**Status: Proposed**
+**Behavior: Decided / Wrapper implementation: Proposed**
 
-Windows Terminalでは、主操作用のClaude Code PowerShellと、fresh Codex subprocessのlog監視用PowerShellを次のように配置できる。
+正常時にagentごとのtab / paneを既定で自動起動しない。ユーザーがClaude Code画面から明示的に監視画面を要求した場合だけ、任意wrapperが主操作用のClaude Code PowerShellと、fresh Codex subprocessのlog監視用PowerShellを次のように配置する。
 
 ```text
 +--------------------------------+-----------------------------+
@@ -307,7 +306,7 @@ Windows Terminalでは、主操作用のClaude Code PowerShellと、fresh Codex 
 +--------------------------------+-----------------------------+
 ```
 
-Linux/SSHでは同じ役割を`pwsh`と、必要に応じて`tmux` paneで提供する。Codex側paneは既存Codex TUIのsessionではなく、Skillが起動したfresh read-only subprocessのlogを観測する。ControllerによるTUIへのキー入力は行わず、ユーザー操作はClaude Code PowerShell画面へ入力する。
+wrapperを使用しなくてもreview loop本体は動作し、wrapperの起動失敗をrunの失敗にしない。同じrun IDの監視paneを重複作成しない。Linux/SSHでは同じ役割を`pwsh`と、必要に応じて`tmux` paneで提供する。Codex側paneは既存Codex TUIのsessionではなく、Skillが起動したfresh read-only subprocessのlogを観測する。ControllerによるTUIへのキー入力は行わず、ユーザー操作はClaude Code PowerShell画面へ入力する。
 
 ### 6.3 merge判断gateの表示
 
@@ -758,7 +757,6 @@ PR #512は、WindowsとLinuxでagent processを安全に停止できるplatform 
 ### Open platform questions
 
 - Linux/SSHで`tmux`を推奨に留めるか、support要件に含めるか
-- Windows Terminal wrapperを標準installへ含めるか、examplesとして提供するか
 - Windows Store版とMSI版PowerShellの両方を正式検証するか
 - SSH切断耐性をMVPの受入条件に含めるか
 
@@ -779,6 +777,7 @@ PR #512は、WindowsとLinuxでagent processを安全に停止できるplatform 
 - local test gate、GitHub CI確認
 - Windows/Linux process abstraction
 - cancel、timeout、resume
+- 明示要求時だけ起動する任意のWindows Terminal / `tmux`監視wrapper
 - final reporter、`READY_FOR_HUMAN_MERGE`対話gate、明示承認後のgated merge、`MERGED`確認
 - PR comment、local artifact、terminal summary
 - ユーザー判断フローと最大5 clarification turnsの共通対話規約
@@ -813,7 +812,6 @@ Issue #2で次を順に確認する。
 | Q-004 | CI pending時にforegroundで待ち続けるか | terminal占有とresume UXへ影響 | bounded wait後に`WAITING_CI` |
 | Q-005 | ユーザー判断・merge gateの入力をどの経路で受け取るか | terminal継続、resume、GitHub comment監視の実装方式へ影響 | MVPは既存の対話型Claude Code PowerShell画面で受け取り、ControllerがGitHubへcanonical recordとして転記・確認。直接の非同期GitHub入力は後続phase（D-013） |
 | Q-006 | SSH切断耐性をMVPへ含めるか | service化または`tmux`依存へ影響 | `tmux`運用を案内、MVP外 |
-| Q-007 | Windows Terminal paneを自動で開くか | wrapperと環境依存が増える | 任意wrapper |
 | Q-008 | artifactの保存期間はどの程度か | disk、機密情報、監査要件へ影響 | repo単位設定、既定30日を検討 |
 | Q-009 | approved follow-upをどう表示するか | merge判断と追加Issue作成へ影響 | reportでsummary、Issue自動作成なし |
 | Q-010 | Claude permission要求をどう扱うか | bypassせず自動化する境界を決める | 停止して明示的にユーザーへ提示 |
@@ -840,6 +838,7 @@ Issue #2で次を順に確認する。
 | D-014 | 2026-08-17 | 主操作は既存の対話型Claude Code PowerShell sessionからClaude Code Skillを呼び出し、active sessionの会話contextを維持したままClaudeがhost / coderを担当する。`agent-loop` CLIはheadless・復旧用の補助経路とする | Decided | PR #3 discussion |
 | D-015 | 2026-08-17 | Codex reviewer / final reporterは既存の対話sessionを再利用せず、現在headとGitHub canonical conversationを入力に毎回freshなread-only subprocessとして実行する | Decided | PR #3 discussion |
 | D-016 | 2026-08-17 | 最初のreleaseへPR modeとIssue modeの両方を含める。内部実装はPR modeを先行可能だが、Issue取得・実装・既存PR再利用・Issue→PR handoff・共通review loopまで完成する前に初回releaseとしない | Decided | PR #3 discussion |
+| D-017 | 2026-08-17 | agentごとのtab / paneは既定で自動起動せず、ユーザーがClaude Code画面から明示要求した場合だけ任意wrapperで監視paneを開く。wrapperなしでもcore loopは動作し、Codex paneはfresh subprocessのread-only log監視に限定する | Decided | PR #3 discussion |
 
 ## 16. Agreement checklist
 
@@ -859,7 +858,7 @@ Issue #2で次を順に確認する。
 - [ ] final reportの形式とサンプルを確認した
 - [ ] Windows / Linux SSHの差異を確認した
 - [ ] MVP inclusions、later phases、exclusionsを確認した
-- [ ] Q-001・Q-002はD-016で解決済みであり、残るQ-003～Q-012を解決または判断時期付きで保留した
+- [ ] Q-001・Q-002はD-016、Q-007はD-017で解決済みであり、残るQ-003～Q-006・Q-008～Q-012を解決または判断時期付きで保留した
 - [ ] 文書statusを`Agreed`へ変更した
 - [ ] implementation plan作成へ進むことをIssue #2で確認した
 
