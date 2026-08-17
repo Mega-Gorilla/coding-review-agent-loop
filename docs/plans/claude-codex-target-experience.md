@@ -11,7 +11,7 @@
 
 ## 1. この文書の目的
 
-この文書は、Claude Codeをcoder、Codexをread-only reviewerとして利用し、PRの実装・修正・再レビューからユーザーのmerge判断までを支援するloopの完成イメージを定義する。
+この文書は、Claude Codeをcoder、Codexをread-only reviewerとして利用し、PRの実装・修正・再レビュー、ユーザーの明示的なmerge承認、merge実行・確認までを支援するloopの完成イメージを定義する。
 
 実装詳細を決める前に、ユーザーから見た操作、表示、停止条件、復旧、最終成果物を合意するためのゴールドキュメントとして使用する。
 
@@ -24,12 +24,13 @@
 | `Decided` | ユーザーと合意済み |
 | `Proposed` | 現時点の推奨案。レビューにより変更可能 |
 | `Open` | ユーザー判断または技術検証が必要 |
+| `Superseded` | 後の合意により置き換えられた過去の決定 |
 
 主要な役割:
 
-- **User**: 実行を開始し、必要な判断を行い、最後にmerge可否を決定する
-- **Controller**: LLMを内包せず、GitHub、worktree、agent、test、CI、state、logを決定論的に調整する
-- **Claude coder**: 実装・修正・test・commit・push・PR更新に加え、判断事項とユーザー向け説明を作成する
+- **User**: 実行を開始し、必要な判断を行い、`READY_FOR_HUMAN_MERGE`で質問・修正依頼または明示的なmerge承認を入力する
+- **Controller**: LLMを内包せず、GitHub、worktree、agent、test、CI、state、logと、明示承認後のmergeを決定論的に調整する
+- **Claude coder**: 実装・修正・test・commit・push・PR更新、判断事項と説明の作成に加え、Claude Code画面のユーザー入力を構造化してControllerへ渡す
 - **Codex reviewer**: 現在のPR head、Claudeの判断依頼、Claudeからの再質問をread-onlyでレビューする
 - **Codex final reporter**: 承認済みheadの変更と検証履歴をread-onlyで説明する
 
@@ -48,11 +49,11 @@
 
 #### 役割・権限境界
 
-- ControllerはLLMを内包しない決定論的なstate machineとし、Claude CodeとCodexの非対話CLIを起動する
+- ControllerはLLMを内包しない決定論的なstate machineとし、自動化されたClaude / Codex turnは非対話CLIとして起動する。ユーザー向けの既存Claude Code PowerShell sessionはREADY gateの対話窓口として維持する
 - Claude Codeはcoderとして実装・修正・test・commit・push・PR更新と、ユーザー向け説明を担当する
 - Codexはreviewerおよびfinal reporterとしてread-onlyで動作し、code変更、commit、push、GitHubへの直接書き込みを行わない
 - GitHubへのagent発言はControllerだけが代理投稿し、agentの意味的な内容を変更しない
-- auto-merge、deploy、本番操作は行わない
+- ユーザーの明示承認がない無人auto-merge、deploy、本番操作は行わない
 
 #### GitHub-backed conversation
 
@@ -72,8 +73,11 @@
 
 #### 正常終了
 
-- 最終状態はmerge完了ではなく`READY_FOR_HUMAN_MERGE`とする
-- final reportとGitHub上のconversationをユーザーへ提示し、mergeはユーザーがGitHub上で手動実行する
+- `READY_FOR_HUMAN_MERGE`は最終状態ではなく、final reportとGitHub conversationを確認したユーザーがClaude CodeのPowerShell画面で対話するgateとする
+- ユーザーはgateで質問、修正依頼、cancel、または対象PRの明示的なmerge承認を入力できる
+- 質問では回答をGitHubへ記録してgateを維持し、修正依頼ではreview loopへ戻る
+- 明示的なmerge承認では、Controllerが承認済みhead、test、CI、未解決事項、mergeabilityを再検証してからmergeする
+- 正常な最終状態はGitHub上のmerge完了を確認した`MERGED`とする
 
 ### Proposed MVP defaults
 
@@ -84,7 +88,7 @@
 - final reportは日本語で生成し、PRコメント、local artifact、terminal summaryへ出力する
 - reviewとfixは最大3 roundを既定とする
 - review承認後もCIがpendingなら`WAITING_CI`としてmerge可能扱いにしない
-- ユーザー判断はMVPではterminalで受け取り、ControllerがGitHubへcanonical decisionとして転記・確認してから再開する
+- ユーザー判断とmerge gateの操作は、既存の対話型Claude Code PowerShell sessionで受け取り、ControllerがGitHubへcanonical recordとして転記・確認してから進行する
 - 既存のGitHub comment transport、public renderer、round metadata、resume、`discuss` transcriptを再利用し、Controllerの実装を最小化する
 
 ### Open
@@ -94,7 +98,8 @@
 - SSH切断後も標準機能として継続させるか、`tmux`等の運用手順で対応するか
 - final reportを常に日本語にするか、repository設定で言語を選択可能にするか
 - CI待ちをcontrollerがforegroundで継続するか、一度終了してユーザーがresumeするか
-- ユーザー判断を直接のGitHub commentで受け取り非同期resumeする機能を、どのreleaseへ含めるか
+- ユーザー判断・質問・修正依頼・merge承認を直接のGitHub commentで受け取り非同期resumeする機能を、どのreleaseへ含めるか
+- repository既定のmerge methodを使うか、設定で`merge` / `squash` / `rebase`を選択可能にするか
 - local artifactの既定保存期間とcleanup方法
 - approved follow-upをfinal reportだけに表示するか、別Issueを自動作成するか
 - Claudeのpermission要求を、明示停止後にどの経路で承認・再実行するか
@@ -111,10 +116,11 @@
 6. Codex final reporterが変更、test、review履歴、残存riskを説明している
 7. workflowへ影響したClaude / Codexの各turnとユーザー決定がGitHub上で確認でき、未記録のturnが次工程の根拠になっていない
 8. GitHub上の正式な会話記録と、cacheであるlocal artifactがapproved head SHAに結び付いている
-9. controllerが`READY_FOR_HUMAN_MERGE`で停止している
-10. ユーザーが十分な情報をもとにmerge可否を判断できる
-
-merge自体は完成条件に含めない。
+9. controllerが`READY_FOR_HUMAN_MERGE`へ到達した時点ではmergeを実行せず、Claude Code画面のユーザー入力を待機している
+10. gateで質問された場合はGitHubへ回答を記録して待機を継続し、修正依頼された場合は承認を無効化してreview loopへ戻る
+11. ユーザーの明示的なmerge承認が、対象repository、PR番号、approved head SHA、入力経路とともにGitHubへ記録されている
+12. ControllerがPR open状態、現在head、test、CI、未解決判断、mergeabilityを再検証し、承認対象と完全一致する場合だけmergeしている
+13. GitHub上のmerge完了とmerged commit SHAを確認し、`MERGED`を表示している
 
 ## 5. MVP利用シナリオ
 
@@ -152,8 +158,10 @@ claude-codex-dev-loop pr 512 --repo OWNER/REPO
 14. 承認されたheadでfinal local testとGitHub CIを確認する
 15. Codex final reporterがGitHub上の正式な会話履歴とapproved headをread-onlyで確認し、最終レポートを生成する
 16. Controllerがfinal reportをPRへ投稿・再取得し、local artifactとterminal summaryを生成する
-17. Terminalへ`READY_FOR_HUMAN_MERGE`、PR URL、approved head、確認事項を表示する
-18. ユーザーがGitHub上で内容を確認し、手動でmergeまたは差し戻す
+17. Terminalへ`READY_FOR_HUMAN_MERGE`、PR URL、approved head、確認事項と選択可能な操作を表示し、既存のClaude Code PowerShell画面でユーザー入力を待つ
+18. 質問の場合はClaudeが回答案を作成し、ControllerがPRへ記録・確認して同じgateを維持する。修正依頼の場合は既存承認を無効化し、`CHANGES_REQUESTED`からreview loopへ戻る
+19. ユーザーが対象PRのmergeを明示的に承認した場合、Controllerが承認recordをPRへ投稿・確認し、PR open状態、現在head、test、CI、未解決事項、mergeabilityを再検証する
+20. 検証対象が承認recordと完全一致する場合だけControllerがmergeを実行し、GitHub上のmerge完了とmerged commit SHAを再取得して`MERGED`を表示する
 
 ### 5.2 Issue mode
 
@@ -200,6 +208,7 @@ GitHub Issue / PRは、Claude Code、Codex、ユーザーが共有する正式�
 | findingへのClaudeの質問・回答 | 元のreview threadへのreply。threadを作れない場合は元comment URL付きPR comment |
 | PR作成後の実装・再review | 対象PR |
 | ユーザー決定 | ユーザーのGitHub comment、またはControllerが入力経路を明記して転記したdecision record |
+| merge gateでの質問・修正依頼・承認 | Controllerが入力経路、対象PR、対象head SHA、構造化したintentを明記して転記したPR comment |
 
 1 logical turnは原則1 commentとし、tool logや逐次的な内部探索は投稿しない。chain-of-thought、credential、未redactの機密情報を本文やHTML commentへ含めてはならない。機械metadataは冪等性とresumeに必要な最小項目だけとし、HTML commentも公開情報として扱う。
 
@@ -217,7 +226,33 @@ GitHub Issue / PRは、Claude Code、Codex、ユーザーが共有する正式�
 | `discuss` mode transcript | 各participantの発言とsummaryを個別投稿 | Claude–CodexのPR clarificationへ一般化する |
 | `get_pr_review_context` | PR conversationとhuman requirement取得 | review thread、増分cursor、投稿後検証を追加する |
 
-Controllerへ残す責務は、CLI process起動・停止、worktree分離、schema検証、redaction、GitHub transport、idempotency、head binding、lock、turn / round上限、test / CI gate、cancel / resumeに限定する。agent間の意味的な要約、推奨生成、独自message queue、会話専用local databaseは実装しない。
+Controllerへ残す責務は、CLI process起動・停止、worktree分離、schema検証、redaction、GitHub transport、idempotency、head binding、lock、turn / round上限、test / CI gate、明示承認の検証、merge実行・確認、cancel / resumeに限定する。agent間の意味的な要約、推奨生成、独自message queue、会話専用local databaseは実装しない。
+
+### 5.5 READY_FOR_HUMAN_MERGE interaction
+
+**Status: Decided**
+
+`READY_FOR_HUMAN_MERGE`は成功終了ではなく、既存の対話型Claude Code PowerShell sessionをユーザーとの接点にする待機gateである。ユーザー自身による入力は許可するが、Controllerがagent TUIへキー入力を注入してはならない。
+
+Claudeは入力を次のintentへ構造化し、対象PRとhead SHAを添えてControllerへ渡す。Controllerはschemaを検証し、PRへcanonical recordとして投稿・再取得した後だけ遷移する。
+
+| Intent | Meaning | Transition |
+| --- | --- | --- |
+| `QUESTION` | PR内容、risk、test、review履歴等への質問 | Claudeが回答を作成し、PRへ記録して`READY_FOR_HUMAN_MERGE`を維持 |
+| `REQUEST_CHANGES` | 追加修正、要件変更、再検証の依頼 | 既存のreview承認とmerge承認を無効化し、`CHANGES_REQUESTED`へ戻る |
+| `APPROVE_MERGE` | 対象PRと表示中headに対する明示的なmerge承認 | 承認recordを永続化して`MERGING`へ進む |
+| `CANCEL` | 今回のrunを終了する指示 | mergeせず`CANCELLED`へ進む |
+
+「問題なさそう」「OKです」など質問への同意ともmerge承認とも解釈できる入力は`APPROVE_MERGE`として扱わない。Claudeは対象PRをmergeしてよいかを明示的に確認し、曖昧さが解消するまでgateを維持する。
+
+merge承認recordには少なくともrepository、PR番号、approved head SHA、構造化intent、ユーザー入力経路、記録時刻、GitHub comment IDを含める。Controllerは次をすべて満たす場合だけmergeを実行する。
+
+- PRがopenであり、現在head SHAが承認対象と完全一致する
+- Codex review承認、required local test、required GitHub CIが同じheadに対して有効である
+- 未解決のblocking finding、decision request、review thread、変更依頼がない
+- GitHubがmergeableと判定し、repository policyで許可されたmerge methodを使用できる
+
+head変更、条件不一致、GitHub API失敗、merge結果未確認のいずれかが起きた場合は、別headを暗黙にmergeしない。承認を無効化するか`MERGE_FAILED`で停止し、差分と再開方法をユーザーへ提示する。
 
 ## 6. 期待するterminal experience
 
@@ -265,9 +300,9 @@ Windows Terminalでは任意wrapperにより次の3 paneを開ける。
 +---------------------------------------------+
 ```
 
-Linux/SSHでは同じ役割を`pwsh`と、必要に応じて`tmux` paneで提供する。paneは観測用であり、実行中agent TUIへの入力先にはしない。
+Linux/SSHでは同じ役割を`pwsh`と、必要に応じて`tmux` paneで提供する。監視paneは観測専用であり、Controllerによる実行中agent TUIへのキー入力先にはしない。ただし`READY_FOR_HUMAN_MERGE`では、ユーザーが既存の対話型Claude Code PowerShell画面へ自分で質問・修正依頼・merge承認を入力する。
 
-### 6.3 正常終了表示
+### 6.3 merge判断gateの表示
 
 **Status: Proposed**
 
@@ -279,14 +314,30 @@ Approved head : fedcba9876543210
 Review rounds : 2
 Local tests   : PASS (128 passed)
 GitHub CI     : PASS (test, lint)
-Final report  : posted to PR and saved locally
+Final report  : PRへ投稿・localへ保存済み
 
-Human checks before merge:
-1. Confirm the approved head still matches fedcba9876543210
-2. Review the remaining risks and follow-ups
-3. Confirm deployment or migration notes
+選択できる操作:
+1. PR内容について質問する
+2. 修正または追加検証を依頼する
+3. 「PR #512 のmergeを承認します」と明示する
+4. 今回のrunをcancelする
 
-No merge was performed.
+現在はまだmergeされていません。曖昧な返答ではmergeしません。
+```
+
+### 6.4 merge完了表示
+
+**Status: Proposed**
+
+```text
+MERGED
+
+PR              : https://github.com/OWNER/REPO/pull/512
+Approved head   : fedcba9876543210
+Merged commit   : 1234567890abcdef
+Merge method    : repository policy
+Approval record : https://github.com/OWNER/REPO/pull/512#issuecomment-123
+GitHub state    : MERGED（再取得して確認済み）
 ```
 
 ## 7. State model
@@ -303,7 +354,10 @@ No merge was performed.
 | `AWAITING_USER_DECISION` | ClaudeがCodex reviewを反映した候補と推奨案を提示済みでユーザー判断待ち |
 | `WAITING_CI` | review承認済みだが対象headのCI待ち |
 | `GENERATING_REPORT` | final reporter実行中 |
-| `READY_FOR_HUMAN_MERGE` | test・CI・reportが揃い、ユーザー判断待ち |
+| `READY_FOR_HUMAN_MERGE` | test・CI・reportが揃い、Claude Code画面で質問・修正依頼・明示的なmerge承認を待つ対話gate |
+| `MERGING` | 明示的なmerge承認をGitHubへ記録済みで、Controllerが直前検証とmergeを実行中 |
+| `MERGED` | GitHub上のmerge完了とmerged commit SHAを確認した正常な最終状態 |
+| `MERGE_FAILED` | merge条件不一致、GitHub操作失敗、または結果未確認によりmerge完了を保証できない状態 |
 | `BLOCKED` | 自動継続できないfinding、no-progress、外部依存待ち |
 | `FAILED` | auth、network、schema、agent、GitHub操作等の失敗 |
 | `CANCELLED` | ユーザーによる中断 |
@@ -329,6 +383,12 @@ flowchart TD
     Review -->|対象PRの正確なheadを承認| CI[WAITING_CI]
     CI -->|テスト・CI成功| Report[GENERATING_REPORT]
     Report -->|レポート保存・投稿完了| Ready[READY_FOR_HUMAN_MERGE]
+    Ready -->|質問・回答をPRへ記録| Ready
+    Ready -->|修正依頼・承認を無効化| Changes
+    Ready -->|明示承認をPRへ記録| Merging[MERGING]
+    Merging -->|条件一致・merge完了を確認| Merged[MERGED]
+    Merging -->|head変更・承認無効| Review
+    Merging -->|merge失敗・結果未確認| MergeFailed[MERGE_FAILED]
     Validate --> Failed[FAILED]
     Review --> Blocked
     DecisionReview --> Blocked
@@ -339,6 +399,7 @@ flowchart TD
     Validate --> Cancelled[CANCELLED]
     Review --> Cancelled
     Fix --> Cancelled
+    Ready --> Cancelled
 ```
 
 図を簡潔に保つため省略しているが、agentまたはユーザーの発言を伴うすべての遷移は、Section 5.3のGitHub永続化・read-after-write gateを通過する。gate未完了の状態遷移は成立しない。
@@ -362,6 +423,11 @@ flowchart TD
 | CI pending | `WAITING_CI` | check名、URL、head SHA | CI完了後に継続 |
 | CI fails | 原因を分類 | failing checkとlog URL | code failureはClaude、infra failureは待機 |
 | External head update | stopまたはreconcile | old/new SHAと無効化対象 | 新headでfresh review |
+| READY gateで質問 | Claudeが回答案を作り、ControllerがPRへ記録 | 回答と根拠、参照したhead | `READY_FOR_HUMAN_MERGE`を維持 |
+| READY gateで修正依頼 | review / merge承認を無効化して`CHANGES_REQUESTED` | 依頼のcanonical commentと影響範囲 | 同じPRのreview loopへ戻る |
+| READY gateで明示的なmerge承認 | 承認をPRへ記録し、Controllerが直前検証後にmerge | 対象PR、approved head、検証結果、merge結果 | 成功時は`MERGED` |
+| READY gateの入力が曖昧 | mergeせず明示確認する | 解釈できない点と必要な承認文脈 | 同じgateで再入力 |
+| merge条件不一致・API失敗 | 別headをmergeせず停止 | 不一致、GitHub応答、承認の有効性 | fresh reviewまたは`MERGE_FAILED`から再開 |
 | Ctrl+C | 子process treeを停止 | last checkpointとresume command | 同じPRから再開 |
 | Reporter fails | `REPORT_FAILED` | review承認とreport error | reporterだけ再実行 |
 
@@ -465,11 +531,17 @@ Codexは通常reviewのclarificationへ次のいずれかを返す。
 
 各turnの公開可能な質問、回答、evidence、resultはGitHubへ個別に記録し、それが正式なconversation sourceとなる。local artifactはGitHub comment ID、URL、本文hash、head SHAを持つcacheとする。GitHubには生の内部推論やtool logではなく、次agentまたはユーザーの判断へ必要な結論、根拠、質問、採用対応を記録する。
 
+### Decided: merge承認gate
+
+merge実行権限は、ユーザーの明示承認を条件としてControllerだけが持つ。Claudeは自然言語入力のintentを構造化し、必要なら明示確認を行うが、GitHub merge APIを直接呼び出さない。Codexは承認を創作・代行せず、必要に応じてread-onlyでriskや修正後headを再評価する。
+
+承認後もControllerは承認recordの存在だけを根拠にせず、対象repository、PR番号、approved head SHA、review・test・CI・未解決事項・mergeabilityを直前に再取得する。GitHubのmerge応答がtimeoutした場合は再実行前にPR状態とmerged commit SHAを照会し、二重操作を避ける。
+
 ### Open intervention questions
 
-- ユーザー判断の回答を同じterminalのstdinで受け取るか
-- controllerを一度終了し、resume commandへ回答を渡す方式にするか
 - GitHub commentによる非同期のユーザー判断を将来サポートするか
+- merge承認を固定commandで補助するか、明示確認付き自然言語だけにするか
+- repository既定のmerge methodを使うか、設定で`merge` / `squash` / `rebase`を選べるようにするか
 - permission承認をagent CLIへ直接渡すか、controller policy変更後にturnを再実行するか
 
 ## 9. Roles and permission boundary
@@ -486,7 +558,9 @@ Codexは通常reviewのclarificationへ次のいずれかを返す。
 | Draft / review decision brief | Decide | Validate / route only | Draft | Review |
 | Read canonical GitHub conversation | Yes | Fetch / verify | Through controller | Through controller |
 | Post GitHub comments | Yes | **Exclusive agent proxy** | Through controller only | Through controller only |
-| Merge / deploy | **User only** | **No** | **No** | **No** |
+| Approve PR merge | **Explicitly approve** | Validate / record | Interpret / request confirmation | **No** |
+| Execute PR merge | Request through Claude Code | **Exclusive executor after approval** | **No** | **No** |
+| Deploy / production operation | Outside workflow | **No** | **No** | **No** |
 
 Reviewerのread-onlyはプロンプト上の依頼ではなく、sandbox、profile、worktree、credential、network、MCP、hookの能力制限で保証する。
 
@@ -502,7 +576,9 @@ Claude / CodexへGitHub書込credentialを渡さず、Controllerだけが代理�
 - `CLAUDE.md`、`AGENTS.md`、`.claude/**`、`.codex/**`、`.github/workflows/**`の変更を目立つ形で表示する
 - fork PRまたは信頼されていないauthorでは、agent instructions、hooks、workflow、testの実行を既定拒否する
 - prompt、log、artifact、PR commentからcredentialをredactする
-- dangerous permission bypassとauto-mergeをpresetから利用できないようにする
+- dangerous permission bypass、無人auto-merge、GitHub auto-merge予約をpresetから利用できないようにする
+- merge承認をrepository、PR、approved head SHAへbindし、head変更時に失効させる
+- 曖昧な肯定、過去の承認、別PRへの承認から`APPROVE_MERGE`を推論しない
 
 ## 10. Failure, cancellation, and resume experience
 
@@ -525,6 +601,8 @@ Claude / CodexへGitHub書込credentialを渡さず、Controllerだけが代理�
 - 最後に成功したGitHub mutation、idempotency marker、read-after-write確認結果
 - error category、再開可能地点、推奨resume command
 - 未解決decision request、Claude / Codexの意見、ユーザー回答、回答時のhead SHA
+- merge gate intent、承認対象PR、approved head SHA、入力経路、approval comment ID
+- merge method、merge API結果、merged commit SHA、GitHub上の再確認結果
 
 ### 10.2 Cancel
 
@@ -560,6 +638,16 @@ controllerは最初にGitHub conversationからcanonical stateを再構築し、
 - canonical commentが削除・改変されmetadataまたはbody hashが一致しない場合は、silent repairせず`BLOCKED`として差分をユーザーへ提示する
 - local cacheだけに存在しGitHubへ確認できないagent出力は破棄し、workflowの判断根拠に使用しない
 
+### 10.5 Merge failure
+
+**Status: Decided behavior / implementation detail: Proposed**
+
+- merge直前にheadが変わっていた場合は承認を失効させ、変更後headをmergeせずfresh reviewへ戻す
+- required check、未解決thread、mergeability等が変化した場合はmergeせず、差分を`MERGE_FAILED`として提示する
+- merge APIがtimeoutまたは不明な結果を返した場合は、同じ操作を再送する前にGitHubからPR stateとmerged commit SHAを再取得する
+- GitHub上でmerge完了を確認できた場合だけ`MERGED`へ遷移する。確認できない場合は成功と表示しない
+- retryまたはresumeでも承認対象と異なるheadをmergeせず、新しい明示承認を要求する
+
 ## 11. Final report experience
 
 ### Proposed outputs
@@ -567,7 +655,7 @@ controllerは最初にGitHub conversationからcanonical stateを再構築し、
 1. **PR comment**: ユーザーがGitHub上で読む正式なsummary
 2. **Local JSON artifact**: GitHub上の正式記録を参照するschema検証済みcache / derived artifact
 3. **Local Markdown artifact**: JSONから決定論的にrenderした複製
-4. **Terminal summary**: merge判断に必要な短い結果とlink
+4. **Terminal summary**: merge判断に必要な短い結果とlink。merge後はGitHubで確認した結果を追記
 
 ### Proposed report language
 
@@ -619,13 +707,26 @@ PR #512は、WindowsとLinuxでagent processを安全に停止できるplatform 
 - Windows Store版PowerShellは未検証です
 - SSH切断後の自動継続は今回の対象外です
 
-### Before merge
+### merge前の確認
 
 1. PR headが`fedcba9876543210`のままであること
 2. Windows runner結果を確認すること
 3. Remaining risksを許容できること
 
-No merge or deployment was performed.
+この時点ではまだmergeされていません。Claude Code画面で質問・修正依頼・対象PRの明示的なmerge承認を入力できます。
+```
+
+明示承認後のmergeが成功した場合、Controllerは同じPRへ次の決定論的な完了recordを追記する。
+
+```markdown
+## MERGED
+
+- PR: #512
+- Approved head: `fedcba9876543210`
+- Merged commit: `1234567890abcdef`
+- Merge method: repository policy
+- User approval: canonical comment link
+- GitHub verification: PR state `MERGED`
 ```
 
 ## 12. Windows and Linux/SSH experience
@@ -666,7 +767,7 @@ No merge or deployment was performed.
 - local test gate、GitHub CI確認
 - Windows/Linux process abstraction
 - cancel、timeout、resume
-- final reporterと`READY_FOR_HUMAN_MERGE`
+- final reporter、`READY_FOR_HUMAN_MERGE`対話gate、明示承認後のgated merge、`MERGED`確認
 - PR comment、local artifact、terminal summary
 - ユーザー判断フローと最大5 clarification turnsの共通対話規約
 - GitHubを正式なconversation sourceとする投稿・read-after-write・resume transport
@@ -686,7 +787,7 @@ No merge or deployment was performed.
 
 - PR自動検知、watcher、webhook、label trigger
 - 対話型agent TUIへのキー入力注入
-- auto-merge
+- 明示承認のない無人auto-merge、GitHub auto-merge予約、曖昧な入力によるmerge
 - deploy、本番操作
 - Windowsから複数SSH先を中央制御するremote execution system
 
@@ -700,12 +801,13 @@ Issue #2で次を順に確認する。
 | Q-002 | Issue modeを最初のreleaseへ含めるか | PR作成前後のsalvageが追加で必要 | 後続phase |
 | Q-003 | final reportの既定言語は日本語固定か | schema、template、設定項目へ影響 | 日本語既定、将来選択可能 |
 | Q-004 | CI pending時にforegroundで待ち続けるか | terminal占有とresume UXへ影響 | bounded wait後に`WAITING_CI` |
-| Q-005 | ユーザー判断の回答をどの経路で受け取るか | terminal継続、resume、GitHub comment監視の実装方式へ影響 | MVPはterminalで受け取り、ControllerがGitHubへcanonical decisionとして転記・確認後にresume。直接の非同期GitHub入力は後続phase |
+| Q-005 | ユーザー判断・merge gateの入力をどの経路で受け取るか | terminal継続、resume、GitHub comment監視の実装方式へ影響 | MVPは既存の対話型Claude Code PowerShell画面で受け取り、ControllerがGitHubへcanonical recordとして転記・確認。直接の非同期GitHub入力は後続phase（D-013） |
 | Q-006 | SSH切断耐性をMVPへ含めるか | service化または`tmux`依存へ影響 | `tmux`運用を案内、MVP外 |
 | Q-007 | Windows Terminal paneを自動で開くか | wrapperと環境依存が増える | 任意wrapper |
 | Q-008 | artifactの保存期間はどの程度か | disk、機密情報、監査要件へ影響 | repo単位設定、既定30日を検討 |
 | Q-009 | approved follow-upをどう表示するか | merge判断と追加Issue作成へ影響 | reportでsummary、Issue自動作成なし |
 | Q-010 | Claude permission要求をどう扱うか | bypassせず自動化する境界を決める | 停止して明示的にユーザーへ提示 |
+| Q-011 | どのmerge methodを使用するか | repository履歴、branch protection、commit構成へ影響 | repository既定を尊重し、必要なら明示設定 |
 
 ## 15. Decision log
 
@@ -713,16 +815,17 @@ Issue #2で次を順に確認する。
 | --- | --- | --- | --- | --- |
 | D-001 | 2026-08-17 | 実行はユーザーがIssue / PR commandで開始する | Decided | Issue #1 discussion |
 | D-002 | 2026-08-17 | PR自動検知、watcher、webhook、label triggerは対象外 | Decided | Issue #1 discussion |
-| D-003 | 2026-08-17 | 対話型TUIへ入力せず、非対話CLIをcontrollerが起動する | Decided | Issue #1 roadmap |
+| D-003 | 2026-08-17 | Controllerは対話型TUIへキー入力を注入せず、agent turnを非対話CLIとして起動する | Partially superseded by D-013: READY gateではユーザー自身がClaude Code画面へ入力可 | Issue #1 roadmap、PR #3 discussion |
 | D-004 | 2026-08-17 | PowerShellからの操作・log監視を維持する | Decided | Issue #1 roadmap |
-| D-005 | 2026-08-17 | auto-merge、deploy、本番操作は行わない | Decided | Issue #1 roadmap |
-| D-006 | 2026-08-17 | 正常なterminal stateは`READY_FOR_HUMAN_MERGE` | Decided | Issue #1 roadmap |
+| D-005 | 2026-08-17 | 明示承認のない無人auto-merge、deploy、本番操作は行わない | Decided | Issue #1 roadmap、PR #3 discussion |
+| D-006 | 2026-08-17 | 正常なterminal stateは`READY_FOR_HUMAN_MERGE` | Superseded by D-013 | Issue #1 roadmap |
 | D-007 | 2026-08-17 | Issue #1を親roadmap、Issue #2を完成イメージ合意に使う | Decided | Issue #2 |
 | D-008 | 2026-08-17 | 既存docsは初回整理で移動せず、indexで分類する | Decided | Issue #2 preparation |
 | D-009 | 2026-08-17 | Issue modeは指定Issueの内容を実装要件とし、対応PRが既にあれば重複作成せず再利用する | Decided | PR #3 discussion |
 | D-010 | 2026-08-17 | Claudeのdraft decision requestをCodexが判断要否も含めてreviewし、`ASK_USER`時はClaudeが最終briefを作成して停止、`PROCEED_WITH_RECORD`時はPRへ記録して継続する | Decided | PR #3 discussion |
 | D-011 | 2026-08-17 | ClaudeはCodexの返答へ同一topicあたり最大5 clarification turnsまで再問い合わせでき、解決・no-progress・ユーザー判断移行時は早期終了する | Decided | PR #3 discussion |
 | D-012 | 2026-08-17 | GitHub Issue / PRをagent・ユーザー間の正式なconversation sourceとし、各論理turnを投稿・read-after-write確認してから次agentを起動する | Decided | PR #3 discussion |
+| D-013 | 2026-08-17 | `READY_FOR_HUMAN_MERGE`をClaude Code PowerShell画面で質問・修正依頼・明示承認を受ける対話gateとし、明示承認をGitHubへ記録後、Controllerが同一headを再検証・merge・確認して`MERGED`を正常な最終状態とする | Decided | PR #3 discussion |
 
 ## 16. Agreement checklist
 
@@ -735,11 +838,13 @@ Issue #2で次を順に確認する。
 - [ ] Claude Code–Codex clarification protocolと5 turn上限を確認した
 - [ ] GitHub-backed conversation、投稿gate、Issue→PR handoffを確認した
 - [ ] Controllerの最小責務と既存GitHub transport再利用方針を確認した
+- [ ] `READY_FOR_HUMAN_MERGE`での質問・修正依頼・明示承認と、`MERGED`までの遷移を確認した
+- [ ] merge承認のhead binding、直前検証、失敗時の安全動作を確認した
 - [ ] roleとpermission boundaryを確認した
 - [ ] final reportの形式とサンプルを確認した
 - [ ] Windows / Linux SSHの差異を確認した
 - [ ] MVP inclusions、later phases、exclusionsを確認した
-- [ ] Q-001～Q-010を解決または判断時期付きで保留した
+- [ ] Q-001～Q-011を解決または判断時期付きで保留した
 - [ ] 文書statusを`Agreed`へ変更した
 - [ ] implementation plan作成へ進むことをIssue #2で確認した
 
