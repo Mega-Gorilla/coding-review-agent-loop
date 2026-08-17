@@ -2,7 +2,7 @@
 
 | Field | Value |
 | --- | --- |
-| Status | **Draft** |
+| Status | **In Review** |
 | Parent roadmap | [#1](https://github.com/Mega-Gorilla/coding-review-agent-loop/issues/1) |
 | Alignment issue | [#2](https://github.com/Mega-Gorilla/coding-review-agent-loop/issues/2) |
 | Owner | Mega-Gorilla |
