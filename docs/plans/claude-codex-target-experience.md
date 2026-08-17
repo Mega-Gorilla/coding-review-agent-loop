@@ -46,6 +46,8 @@
 - auto-merge、deploy、本番操作は行わない
 - 最終状態はmerge完了ではなく`READY_FOR_HUMAN_MERGE`とする
 - mergeはユーザーがGitHub上で手動実行する
+- Issue modeでは、指定Issueのタイトル・本文・採用対象コメントを実装要件として使用する
+- Issueに対応するPRが既に存在する場合は、重複作成せず既存PRからPR modeへ合流する
 
 ### Proposed
 
@@ -121,18 +123,22 @@ claude-codex-dev-loop pr 512 --repo OWNER/REPO
 
 ### 5.2 Issue mode
 
-**Status: Proposed for a later phase**
+**Behavior: Decided / Delivery phase: Proposed for a later phase**
 
 ```powershell
 claude-codex-dev-loop issue 436 --repo OWNER/REPO
 ```
 
+Issue modeでは、指定Issueのタイトル・本文・採用対象コメントを実装要件としてClaude Codeへ渡す。ここで指定する番号は実装対象のIssue番号であり、既存PR番号ではない。
+
 PR modeとの差分:
 
-1. Claude CodeがIssue本文と採用対象コメントを確認する
-2. 実装、test、branch、commit、push、PR作成を行う
-3. ControllerがPR URLとhead SHAを取得・保存する
-4. 以降はPR modeと同じflowへ合流する
+1. ControllerがIssueのタイトル・本文・採用対象コメントを取得・filterする
+2. Issueに対応する既存PRがあるか確認する
+3. 既存PRがある場合は新しいPRを作らず、そのPRの現在headからPR modeへ合流する
+4. 既存PRがない場合は、Claude Codeが実装、test、branch、commit、push、PR作成を行う
+5. Controllerが作成されたPR URLとhead SHAを取得・保存する
+6. 以降はPR modeと同じreview loopへ合流する
 
 PR作成後にagent応答またはvalidationが失敗しても、Issue実装を最初からやり直さず、発見済みPRから再開できることを必須とする。
 
@@ -495,6 +501,7 @@ Issue #2で次を順に確認する。
 | D-006 | 2026-08-17 | 正常なterminal stateは`READY_FOR_HUMAN_MERGE` | Decided | Issue #1 roadmap |
 | D-007 | 2026-08-17 | Issue #1を親roadmap、Issue #2を完成イメージ合意に使う | Decided | Issue #2 |
 | D-008 | 2026-08-17 | 既存docsは初回整理で移動せず、indexで分類する | Decided | Issue #2 preparation |
+| D-009 | 2026-08-17 | Issue modeは指定Issueの内容を実装要件とし、対応PRが既にあれば重複作成せず再利用する | Decided | PR #3 discussion |
 
 ## 16. Agreement checklist
 
