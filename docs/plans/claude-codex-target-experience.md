@@ -93,18 +93,18 @@
 - final report言語はrepository設定で選択可能とし、未設定時は日本語で生成してPRコメント、local artifact、terminal summaryへ出力する
 - reviewとfixは最大3 roundを既定とする
 - review承認後もCIがpendingなら`WAITING_CI`としてmerge可能扱いにしない
+- CIは既定20分・30秒間隔の設定可能なbounded foreground waitとし、上限後もpendingならGitHubへ状態を記録して`WAITING_CI`で終了する
 - ユーザー判断とmerge gateの操作は、既存の対話型Claude Code PowerShell sessionで受け取り、ControllerがGitHubへcanonical recordとして転記・確認してから進行する
+- MVPではユーザーがGitHub commentへ直接回答できるが、そのcommentだけをtriggerに自動resumeせず、次の明示的なSkill resume時に取得する。自動resumeは後続releaseとする
 - Codex reviewer / final reporterは現在headごとにfreshなread-only subprocessとして起動する
 - `tmux`内のSSH runは切断後も自動処理を継続し、ユーザー判断時はGitHubへ資料を投稿して`AWAITING_USER_DECISION`、merge判断時はfinal reportを投稿して`READY_FOR_HUMAN_MERGE`で終了する
 - `tmux`を利用できないSSH環境ではprocess生存を保証せず、GitHub checkpointからのresumeを保証する
+- merge methodはrepository設定で`merge` / `squash` / `rebase`を選択可能にする。未設定でGitHubが複数方式を許可する場合は推測せずユーザー判断を求め、明示承認をmethodへもbindする
+- local artifactは正常runを既定30日、`FAILED` / `BLOCKED` / salvageを既定90日保持し、active / locked runを除外したbounded cleanupを起動時と明示commandで行う
 - 既存のGitHub comment transport、public renderer、round metadata、resume、`discuss` transcriptを再利用し、Controllerの実装を最小化する
 
 ### Open
 
-- CI待ちをcontrollerがforegroundで継続するか、一度終了してユーザーがresumeするか
-- ユーザー判断・質問・修正依頼・merge承認を直接のGitHub commentで受け取り非同期resumeする機能を、どのreleaseへ含めるか
-- repository既定のmerge methodを使うか、設定で`merge` / `squash` / `rebase`を選択可能にするか
-- local artifactの既定保存期間とcleanup方法
 - approved follow-upをfinal reportだけに表示するか、別Issueを自動作成するか
 - Claudeのpermission要求を、明示停止後にどの経路で承認・再実行するか
 - Claude Code Skillを任意の対象repositoryから利用可能にする配布方式を、repo-local Skill、user-level plugin / Skill、MCP併用のどれにするか
@@ -221,6 +221,8 @@ GitHub Issue / PRは、Claude Code、Codex、ユーザーが共有する正式�
 
 1 logical turnは原則1 commentとし、tool logや逐次的な内部探索は投稿しない。chain-of-thought、credential、未redactの機密情報を本文やHTML commentへ含めてはならない。機械metadataは冪等性とresumeに必要な最小項目だけとし、HTML commentも公開情報として扱う。
 
+MVPでは、`AWAITING_USER_DECISION`または`READY_FOR_HUMAN_MERGE`に対するユーザー回答をGitHub commentへ直接記入できる。Controllerは次の明示的なSkill resume時にcommentを取得・検証するが、comment投稿自体をtriggerにwatcher / webhookで自動resumeしない。非同期自動resumeは認可、重複event、comment編集・削除、head bindingを実装する後続releaseへ分離する。
+
 ### 5.4 Controller最小化と既存実装の再利用
 
 **Status: Proposed implementation direction**
@@ -256,12 +258,14 @@ Claudeは入力を次のintentへ構造化し、対象PRとhead SHAを添えてC
 
 「問題なさそう」「OKです」など質問への同意ともmerge承認とも解釈できる入力は`APPROVE_MERGE`として扱わない。Claudeは対象PRをmergeしてよいかを明示的に確認し、曖昧さが解消するまでgateを維持する。
 
-merge承認recordには少なくともrepository、PR番号、approved head SHA、構造化intent、ユーザー入力経路、記録時刻、GitHub comment IDを含める。Controllerは次をすべて満たす場合だけmergeを実行する。
+merge承認recordには少なくともrepository、PR番号、approved head SHA、merge method、構造化intent、ユーザー入力経路、記録時刻、GitHub comment IDを含める。Controllerは次をすべて満たす場合だけmergeを実行する。
 
 - PRがopenであり、現在head SHAが承認対象と完全一致する
 - Codex review承認、required local test、required GitHub CIが同じheadに対して有効である
 - 未解決のblocking finding、decision request、review thread、変更依頼がない
 - GitHubがmergeableと判定し、repository policyで許可されたmerge methodを使用できる
+
+merge methodはrepository設定の`merge` / `squash` / `rebase`を優先する。未設定時にGitHubで許可された方式が1つならそれを使用し、複数ならClaudeが候補と影響を示してユーザー判断を求める。承認後にmethodが変わった場合は既存承認を失効させる。
 
 head変更、条件不一致、GitHub API失敗、merge結果未確認のいずれかが起きた場合は、別headを暗黙にmergeしない。承認を無効化するか`MERGE_FAILED`で停止し、差分と再開方法をユーザーへ提示する。
 
@@ -442,7 +446,7 @@ flowchart TD
 | Authentication failure | `FAILED` | 対象CLIと再認証手順 | 認証後に再開 |
 | Network/GitHub transient failure | bounded retry | retry回数と最終error | 安全なcheckpointから再開 |
 | GitHub conversation write / verification failure | 次agentを起動せず停止 | 未永続化turn、対象Issue / PR、retry結果 | 同じturnをidempotency key付きで再投稿・検証 |
-| CI pending | `WAITING_CI` | check名、URL、head SHA | CI完了後に継続 |
+| CI pending | 既定20分・30秒間隔のbounded foreground wait後もpendingならGitHubへ記録して`WAITING_CI`で終了 | check名、URL、head SHA、待機時間 | CI完了後に明示resume |
 | CI fails | 原因を分類 | failing checkとlog URL | code failureはClaude、infra failureは待機 |
 | External head update | stopまたはreconcile | old/new SHAと無効化対象 | 新headでfresh review |
 | READY gateで質問 | Claudeが回答案を作り、ControllerがPRへ記録 | 回答と根拠、参照したhead | `READY_FOR_HUMAN_MERGE`を維持 |
@@ -565,9 +569,7 @@ merge実行権限は、ユーザーの明示承認を条件としてController�
 
 ### Open intervention questions
 
-- GitHub commentによる非同期のユーザー判断を将来サポートするか
 - merge承認を固定commandで補助するか、明示確認付き自然言語だけにするか
-- repository既定のmerge methodを使うか、設定で`merge` / `squash` / `rebase`を選べるようにするか
 - permission承認をagent CLIへ直接渡すか、controller policy変更後にturnを再実行するか
 
 ## 9. Roles and permission boundary
@@ -684,6 +686,17 @@ headless fallbackでは`agent-loop pr 512 --repo OWNER/REPO --reviewer codex`を
 - ユーザー判断またはmerge判断へ到達したらGitHubへcanonical recordを投稿・確認し、processを無期限待機させず安全にrunを終了する
 - `tmux`外ではprocess生存を保証せず、突然終了後には新しいGitHub commentを保証しない。最後に確認済みのGitHub recordから再開する
 - wrapperが利用できない、permission promptを非対話で解決できない、または安全な継続を保証できない場合は、bypassせず中断・resumeを選ぶ
+
+### 10.7 Local artifact retention and cleanup
+
+**Status: Decided behavior / implementation detail: Proposed**
+
+- GitHubをcanonical sourceとし、local report、log、response、session metadataはcacheまたは診断artifactとして保持する
+- 正常終了runの既定保持期間は30日、`FAILED` / `BLOCKED` / salvage artifactは90日とする
+- repository設定で保持期間とcleanup有無を上書き可能にする
+- active run、lock保持中run、resumeに必要な最新checkpointをcleanup対象から除外する
+- 起動時にbounded cleanupを実行し、明示的なcleanup commandと`--dry-run`相当の削除対象確認を提供する
+- background daemonによるcleanupはMVPへ含めず、credentialや未redact情報をartifactへ保存しない
 
 ## 11. Final report experience
 
@@ -808,6 +821,7 @@ PR #512は、WindowsとLinuxでagent processを安全に停止できるplatform 
 - review -> fix -> re-review、最大round
 - head SHA binding、coder snapshot、PR lock
 - local test gate、GitHub CI確認
+- 設定可能なbounded CI waitと、timeout時の`WAITING_CI` checkpoint・明示resume
 - Windows/Linux process abstraction
 - cancel、timeout、resume
 - 明示要求時だけ起動する任意のWindows Terminal / `tmux`監視wrapper
@@ -816,6 +830,9 @@ PR #512は、WindowsとLinuxでagent processを安全に停止できるplatform 
 - PR comment、local artifact、terminal summary
 - ユーザー判断フローと最大5 clarification turnsの共通対話規約
 - GitHubを正式なconversation sourceとする投稿・read-after-write・resume transport
+- MVPでのGitHub comment回答取得と明示resume。comment triggerによる非同期自動resumeは後続release
+- repository設定可能なmerge methodと、未設定・複数候補時のユーザー判断
+- local artifactの正常30日／失敗・salvage 90日保持、起動時bounded cleanup、明示cleanup dry-run
 - credential redactionと基本trust policy
 
 ### Proposed later phases
@@ -843,12 +860,8 @@ Issue #2で次を順に確認する。
 
 | ID | Question | Why it matters | Current recommendation |
 | --- | --- | --- | --- |
-| Q-004 | CI pending時にforegroundで待ち続けるか | terminal占有とresume UXへ影響 | bounded wait後に`WAITING_CI` |
-| Q-005 | ユーザー判断・merge gateの入力をどの経路で受け取るか | terminal継続、resume、GitHub comment監視の実装方式へ影響 | MVPは既存の対話型Claude Code PowerShell画面で受け取り、ControllerがGitHubへcanonical recordとして転記・確認。直接の非同期GitHub入力は後続phase（D-013） |
-| Q-008 | artifactの保存期間はどの程度か | disk、機密情報、監査要件へ影響 | repo単位設定、既定30日を検討 |
 | Q-009 | approved follow-upをどう表示するか | merge判断と追加Issue作成へ影響 | reportでsummary、Issue自動作成なし |
 | Q-010 | Claude permission要求をどう扱うか | bypassせず自動化する境界を決める | 停止して明示的にユーザーへ提示 |
-| Q-011 | どのmerge methodを使用するか | repository履歴、branch protection、commit構成へ影響 | repository既定を尊重し、必要なら明示設定 |
 | Q-012 | Claude Code Skillを任意repositoryへどう配布するか | 現行はrepo rootまたは`helpers/`・`SKILL.md`配置が必要で、複数repository運用の導入負荷へ影響 | user-level plugin / Skillを第一候補とし、MCPは決定論的Controller toolの公開が必要になった段階で検討 |
 
 ## 15. Decision log
@@ -874,6 +887,10 @@ Issue #2で次を順に確認する。
 | D-017 | 2026-08-17 | agentごとのtab / paneは既定で自動起動せず、ユーザーがClaude Code画面から明示要求した場合だけ任意wrapperで監視paneを開く。wrapperなしでもcore loopは動作し、Codex paneはfresh subprocessのread-only log監視に限定する | Decided | PR #3 discussion |
 | D-018 | 2026-08-17 | Linux/SSHでは対応`tmux` wrapper内のrunをSSH切断後もユーザー判断不要な範囲で継続する。判断が必要ならGitHubへ資料を投稿して`AWAITING_USER_DECISION`、merge-readyならfinal reportを投稿して`READY_FOR_HUMAN_MERGE`でmergeせず終了する。wrapper外はprocess生存を保証せずGitHub checkpointからresumeし、独自daemonはMVP外とする | Decided | PR #3 discussion |
 | D-019 | 2026-08-17 | final report言語はrepository設定ファイルで選択可能にし、repository設定、user-level設定、組込み既定値の順に解決する。未設定時の既定は日本語とする | Decided | PR #3 discussion |
+| D-020 | 2026-08-17 | CI pending時は設定可能なbounded foreground wait（既定20分・30秒間隔）を行い、上限後もpendingならGitHubへ記録して`WAITING_CI`で終了し、CI完了後に明示resumeする | Decided | PR #3 discussion |
+| D-021 | 2026-08-17 | MVPではGitHub commentへ直接入力されたユーザー回答を次の明示Skill resume時に取得する。comment watcher / webhookによる非同期自動resumeは認可・重複・編集・head bindingを備える後続releaseとする | Decided | PR #3 discussion |
+| D-022 | 2026-08-17 | merge methodはrepository設定で`merge` / `squash` / `rebase`を選択可能にする。未設定で許可方式が複数ならユーザー判断を求め、承認をheadとmethodの両方へbindする | Decided | PR #3 discussion |
+| D-023 | 2026-08-17 | local artifactは正常runを既定30日、`FAILED` / `BLOCKED` / salvageを90日保持し、active / locked runを除外して起動時または明示commandでbounded cleanupする | Decided | PR #3 discussion |
 
 ## 16. Agreement checklist
 
@@ -893,7 +910,7 @@ Issue #2で次を順に確認する。
 - [ ] final reportの形式とサンプルを確認した
 - [ ] Windows / Linux SSHの差異を確認した
 - [ ] MVP inclusions、later phases、exclusionsを確認した
-- [ ] Q-001・Q-002はD-016、Q-007はD-017、Q-006はD-018、Q-003はD-019で解決済みであり、残るQ-004・Q-005・Q-008～Q-012を解決または判断時期付きで保留した
+- [ ] Q-001・Q-002はD-016、Q-007はD-017、Q-006はD-018、Q-003はD-019、Q-004・Q-005・Q-008・Q-011はD-020～D-023で解決済みであり、残るQ-009・Q-010・Q-012を解決または判断時期付きで保留した
 - [ ] 文書statusを`Agreed`へ変更した
 - [ ] implementation plan作成へ進むことをIssue #2で確認した
 
